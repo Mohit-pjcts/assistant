@@ -5,3 +5,12 @@ __pycache__/
 venv/
 *.db
 .DS_Store
+*.egg-info/
+
+# Gmail/Calendar MCP credential files — should live in ~/.gmail-mcp/ outside
+# the repo, but ignored here too as a safety net in case one lands in-tree.
+gcp-oauth.keys.json
+credentials.json
+tokens.json
+.gmail-mcp/
+.config/google-calendar-mcp/

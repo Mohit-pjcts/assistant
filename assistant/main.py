@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 # Loaded before any other import — assistant.agent constructs a ChatAnthropic
 # instance and assistant.tools constructs a TavilySearch instance, both at
 # module import time, so the environment must already be populated by then.
@@ -10,7 +12,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from assistant.agent import build_agent, make_thread_config  # noqa: E402
+from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
+from assistant.tools import TOOLS  # noqa: E402
 
 # Fixed rather than generated per run: this is what makes conversation memory
 # actually observable across separate launches of the CLI, not just within a
@@ -40,12 +44,18 @@ def _render_content(content: object) -> str:
     return str(content)
 
 
-def main() -> None:
+async def _run() -> None:
     """Run the interactive CLI chat loop."""
     print("Personal assistant. Type 'exit' or 'quit' to leave (Ctrl+C / Ctrl+D also work).")
 
-    with get_checkpointer() as checkpointer:
-        graph = build_agent(checkpointer)
+    try:
+        mcp_tools = await load_mcp_tools()
+    except Exception as exc:  # e.g. GMAIL_MCP_SERVER_PATH unset, server not built
+        print(f"[warning] Gmail tools unavailable: {type(exc).__name__}: {exc}")
+        mcp_tools = []
+
+    async with get_checkpointer() as checkpointer:
+        graph = build_agent(checkpointer, tools=TOOLS + mcp_tools)
         config = make_thread_config(THREAD_ID)
 
         while True:
@@ -57,7 +67,7 @@ def main() -> None:
                 if user_input.lower() in EXIT_COMMANDS:
                     break
 
-                result = graph.invoke(
+                result = await graph.ainvoke(
                     {"messages": [("user", user_input)]},
                     config=config,
                 )
@@ -71,6 +81,19 @@ def main() -> None:
                 continue
 
     print("\nGoodbye.")
+
+
+def main() -> None:
+    """Sync entry point (required by the `assistant` console script) that
+    drives the async chat loop."""
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        # SIGINT delivered while the event loop itself (not our coroutine) is
+        # on the stack — e.g. between input() returning and ainvoke() being
+        # scheduled — surfaces here instead of _run()'s try/except. Same
+        # clean-exit behavior either way.
+        print("\nGoodbye.")
 
 
 if __name__ == "__main__":

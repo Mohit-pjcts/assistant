@@ -31,7 +31,7 @@ load_dotenv()
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent / "workspace"
 
 
-def _ensure_workspace_dir() -> Path:
+def ensure_workspace_dir() -> Path:
     """Create the workspace directory if needed and return its resolved path."""
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     return WORKSPACE_DIR.resolve()
@@ -49,7 +49,7 @@ def _resolve_in_workspace(path: str) -> Path:
     if Path(path).is_absolute():
         raise ValueError(f"'{path}' must be a relative path")
 
-    workspace_root = _ensure_workspace_dir()
+    workspace_root = ensure_workspace_dir()
     candidate = (workspace_root / path).resolve()
 
     try:
@@ -193,7 +193,7 @@ def execute_shell_command(command: str, timeout_seconds: int = 30) -> str:
     if reason is not None:
         return f"Error: command blocked — {reason}"
 
-    workspace_root = _ensure_workspace_dir()
+    workspace_root = ensure_workspace_dir()
 
     try:
         result = subprocess.run(

@@ -11,3 +11,4 @@ assistant.egg-info/entry_points.txt
 assistant.egg-info/requires.txt
 assistant.egg-info/top_level.txt
 tests/test_memory.py
+tests/test_tools.py
