@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 
-# Loaded before any other import — assistant.agent constructs a ChatAnthropic
-# instance and assistant.tools constructs a TavilySearch instance, both at
-# module import time, so the environment must already be populated by then.
+# Loaded before any other import — assistant.sub_agents/assistant.supervisor
+# construct ChatAnthropic instances and assistant.tools constructs a
+# TavilySearch instance, all at module import time, so the environment must
+# already be populated by then.
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from assistant.agent import build_agent, make_thread_config  # noqa: E402
+from assistant.agent import make_thread_config  # noqa: E402
+from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
-from assistant.tools import TOOLS  # noqa: E402
+from assistant.supervisor import build_graph  # noqa: E402
+
+from langgraph.types import Command  # noqa: E402
 
 # Fixed rather than generated per run: this is what makes conversation memory
 # actually observable across separate launches of the CLI, not just within a
@@ -51,11 +55,11 @@ async def _run() -> None:
     try:
         mcp_tools = await load_mcp_tools()
     except Exception as exc:  # e.g. GMAIL_MCP_SERVER_PATH unset, server not built
-        print(f"[warning] Gmail tools unavailable: {type(exc).__name__}: {exc}")
+        print(f"[warning] Gmail/Calendar tools unavailable: {type(exc).__name__}: {exc}")
         mcp_tools = []
 
     async with get_checkpointer() as checkpointer:
-        graph = build_agent(checkpointer, tools=TOOLS + mcp_tools)
+        graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
         config = make_thread_config(THREAD_ID)
 
         while True:
@@ -71,6 +75,16 @@ async def _run() -> None:
                     {"messages": [("user", user_input)]},
                     config=config,
                 )
+
+                # A tool (e.g. interrupts.send_test_notification) paused the
+                # graph for confirmation — CLAUDE.md's standing rule for
+                # side-effectful actions. Loop in case a resumed turn hits a
+                # second interrupt.
+                while "__interrupt__" in result:
+                    payload = result["__interrupt__"][0].value
+                    approved = input(f"\n[confirm] {payload} Proceed? (y/n): ").strip().lower() == "y"
+                    result = await graph.ainvoke(Command(resume=approved), config=config)
+
                 final_message = result["messages"][-1]
                 print(f"\nAssistant: {_render_content(final_message.content)}")
 

@@ -1033,3 +1033,381 @@ the dev invocation form used throughout this log.
 printf "hello\nexit\n" | .venv/bin/assistant
 rm -f conversation_memory.sqlite
 ```
+
+## 21. Phase 2 → COMPLETE, Phase 3 → ACTIVE (2026-07-11)
+
+**What:** Flipped status in both files per CLAUDE.md's "How to use this file"
+process, at the start of the Phase 3 session. `CLAUDE.md`'s Current Status
+block: Phase 2 moved from active to complete (pointing at STEPS.md groups
+9–20), Phase 3 (Multi-agent split) marked active. `PLAN.md`: Phase 2's header
+flipped to COMPLETE with a dated **Delivered** summary (async MCP tool
+loading, Gmail's `gmail.readonly`-scoped OAuth, Calendar's read-only
+enforcement approach, README), and its **Done-when** section rewritten to
+record one approved deviation rather than claim a clean pass: Calendar's
+OAuth grant is full-scope (`.../auth/calendar`), not `calendar.readonly`,
+because no self-hosted Calendar MCP server found in step 7's research
+(STEPS.md 17) supports a read-only-only grant — read-only is enforced
+instead at the `ENABLED_TOOLS` allowlist + `tool_interceptors` layer (STEPS.md
+19.2), which already caught one real gap (`manage-accounts` bypassing the
+allowlist). Every other Phase 2 done-when item (both target CLI phrases,
+Gmail's scope, gitignored tokens, 28 passing tests, README) is unqualified.
+Phase 3's header flipped to ACTIVE. `PLAN.md`'s Phase 3 section itself
+(objective, steps, done-when) is unchanged — it was already written when
+Phase 2 was scoped out.
+
+**Why:** Matches the standing process in CLAUDE.md §"How to use this file":
+status edits happen with explicit user approval, and completion of a phase's
+done-when criteria is a discussed commit boundary — done here at the user's
+explicit instruction at the start of this session, before any Phase 3 work
+began, so the record of *why* Calendar's grant is broader than planned isn't
+lost once Phase 3 activity starts overwriting file mtimes.
+
+## 22. Phase 3 step 0 — LangSmith tracing: wired, blocked on a key-permissions issue (2026-07-11)
+
+**What:** Verified against the installed packages (`langsmith` 0.10.1,
+`langchain-core` 1.4.9) rather than assumed which env var actually gates
+tracing — `langchain_core/callbacks/manager.py` checks `LANGCHAIN_TRACING_V2`
+directly (confirms PLAN.md step 0's own wording), and `langsmith/client.py`'s
+`_get_langsmith_env_var_uncached` resolves API key/project vars by trying the
+`LANGSMITH_` prefix first, then falling back to `LANGCHAIN_`, so the existing
+`LANGSMITH_API_KEY` (already in `.env` since 2.3) is picked up with no
+rename needed. Added `LANGCHAIN_TRACING_V2=true` and
+`LANGCHAIN_PROJECT=personal-assistant` to both `.env` and `.env.example`. No
+code changes — this is pure env config, nothing in `main.py`/`agent.py`
+touches tracing directly.
+
+**Smoke-tested, not assumed — and a real problem surfaced:** ran a real CLI
+turn (`what is 2+2?`). Tracing genuinely fired (LangChain attempted to POST
+to `https://api.smith.langchain.com/runs/multipart`), but every attempt
+failed with `403 Forbidden`, printed inline in the CLI output — a real
+functional gap, not a cosmetic log line (unlike 19.3's stderr-interleaving
+quirk). Isolated the cause directly rather than guessing: `Client().info`
+succeeds (confirms the key authenticates and has *read* access), but
+`Client().create_run(...)` against the `personal-assistant` project also
+403s — so the key can read the LangSmith deployment but cannot write traces.
+This is a permissions/plan issue on the API key itself, not a bug in this
+project's config, and matches Phase 2's established pattern of Console-side
+setup steps belonging to the user (STEPS.md 13, 18) rather than something to
+work around in code.
+
+**Left as-is, not merged into the write-up as complete:** `LANGCHAIN_TRACING_V2`
+and `LANGCHAIN_PROJECT` stay in `.env`/`.env.example` since the wiring itself
+is correct and verified; step 0 is not being marked done until a real trace
+is confirmed visible in the LangSmith UI. Cleaned up
+`conversation_memory.sqlite` from the smoke-test turn afterward (no
+`workspace/` artifacts).
+
+**Commands:**
+```sh
+printf "what is 2+2?\nexit\n" | .venv/bin/python -m assistant.main   # 403 surfaced here
+.venv/bin/python -c "... Client().info ..."         # confirmed: read access OK
+.venv/bin/python -c "... Client().create_run(...) ..."  # confirmed: write 403s
+rm -f conversation_memory.sqlite
+```
+
+### 22.1 Root cause found — account on LangSmith's APAC region, not US default (2026-07-11)
+
+**What:** `Client().info` succeeding while every genuinely authenticated call
+403'd was itself a clue eventually run down: that endpoint returns server
+version info unauthenticated, so it never actually validated the key.
+Regenerating the key twice more (a second personal-access-token, then a
+service-key, then a third personal-access-token) didn't help — each new key
+still 403'd identically on both `create_run` and `list_projects`, on both the
+default `https://api.smith.langchain.com` endpoint and a guessed
+`https://apac.api.smith.langchain.com` one, ruling out "bad key" and, at the
+time, seeming to rule out region too. Went one step further and bypassed the
+Python SDK entirely with a raw `curl -H "x-api-key: ..."` against both
+endpoints to eliminate any SDK-level bug — same 403 on both, confirming it
+really was the backend rejecting the key, not a client-side header/config
+issue.
+
+**Confirmed:** after the user generated one more fresh key, the same raw
+`curl` check against both endpoints finally showed the actual signal:
+`apac.api.smith.langchain.com` → `200`, `api.smith.langchain.com` → `403` —
+same key, two different results by endpoint. The account's workspace is
+provisioned in LangSmith's APAC data-plane region; a key from that account
+was never going to authenticate against the default US endpoint, regardless
+of key type or how many times it was regenerated. `LANGSMITH_ENDPOINT`
+(already added to `.env` by the user mid-troubleshooting) is exactly the env
+var `langsmith/client.py`'s `_get_langsmith_env_var_uncached("ENDPOINT")`
+reads to override the default API URL — no code or SDK-version change
+needed once it was set correctly.
+
+**Verified against the real CLI, not just the SDK in isolation:** ran
+`what is 3+3?` through `python -m assistant.main` — no `403`/warning text in
+the output (contrast with 22's run, which printed the error inline). Queried
+`Client().list_runs(project_name="personal-assistant")` directly afterward
+and confirmed the real trace tree from that turn
+(`LangGraph` → `model` → `ChatAnthropic`, all `success`) is present in the
+project, alongside the manual verification run from earlier in this step.
+
+**Phase 3 step 0 is now done:** `LANGCHAIN_TRACING_V2=true`,
+`LANGCHAIN_PROJECT=personal-assistant`, and `LANGSMITH_ENDPOINT=https://apac.api.smith.langchain.com`
+are the three tracing-related vars in `.env`; `LANGCHAIN_TRACING_V2` and
+`LANGCHAIN_PROJECT` are documented in `.env.example` (`LANGSMITH_ENDPOINT`
+deliberately left out of the example template — it's specific to this
+account's region, not a generally-applicable default, so a future clone of
+this repo shouldn't inherit a hardcoded APAC endpoint that may not match
+their account). Cleaned up `conversation_memory.sqlite` from the final CLI
+verification turn.
+
+**Commands:**
+```sh
+curl -s -o /dev/null -w "HTTP %{http_code}\n" https://apac.api.smith.langchain.com/api/v1/sessions?limit=1 -H "x-api-key: $LANGSMITH_API_KEY"
+curl -s -o /dev/null -w "HTTP %{http_code}\n" https://api.smith.langchain.com/api/v1/sessions?limit=1 -H "x-api-key: $LANGSMITH_API_KEY"
+.venv/bin/python -c "... Client().create_run(...) ..."   # confirmed OK against apac endpoint
+printf "what is 3+3?\nexit\n" | .venv/bin/python -m assistant.main   # clean, no 403
+.venv/bin/python -c "... Client().list_runs(project_name='personal-assistant') ..."  # confirmed real trace present
+rm -f conversation_memory.sqlite
+```
+
+## 23. Phase 3 step 1 — design checkpoint: hand-rolled graph over `langgraph-supervisor` (2026-07-11)
+
+**What:** Per PLAN.md step 1, compared LangGraph's `langgraph-supervisor`
+library against a hand-rolled supervisor graph before writing any Phase 3
+code. Installed `langgraph-supervisor==0.0.31` into the venv to inspect its
+real API rather than trust its README — confirmed via PyPI metadata it's
+compatible with the installed `langgraph` (1.2.8) and `langchain-core`
+(1.4.9), and via `inspect.signature` that `create_supervisor(agents:
+list[Pregel], model, tools=None, prompt=..., ...) -> StateGraph` would accept
+our existing `agent.py`'s `create_agent(...)` output directly — confirmed
+`CompiledStateGraph` (what `create_agent` returns) is a `Pregel` subclass,
+and `create_agent` already accepts a `name=` kwarg, which is what the
+library needs to distinguish sub-agents. So compatibility was never the
+blocker either way.
+
+**Trade-offs presented to the user:** library wins on less code to write
+(automatic handoff-tool generation, routing); hand-rolled wins on control —
+step 4 (shared checkpointer + `checkpoint_ns` namespacing across subgraphs,
+already the source of one real bug at STEPS.md 3.2) and step 5 (LangGraph
+interrupts for the confirmation gate) both need precise control over graph
+structure that a `0.0.x` (pre-1.0) library's internals would obscure or need
+to be worked around. Also confirmed LangSmith trace quality is identical
+either way — tracing rides LangChain's callback system and instruments any
+`Runnable` regardless of who built the graph, so it wasn't a factor in the
+decision.
+
+**User's pick: hand-rolled graph.** Matches CLAUDE.md's "no premature
+abstraction... small testable functions over monoliths" convention, and
+keeps the confirmation-gate interrupt (step 5) and checkpoint namespacing
+(step 4) fully in this project's own code rather than routed through a young
+third-party library's internals. `langgraph-supervisor` uninstalled from the
+venv (scratch install for API inspection only — never added to
+`pyproject.toml`/`requirements.txt`).
+
+**Commands:**
+```sh
+.venv/bin/pip install -q langgraph-supervisor==0.0.31
+.venv/bin/python -c "... inspect.signature(create_supervisor) ..."
+.venv/bin/python -c "... create_agent(...) return type is CompiledStateGraph, a Pregel subclass ..."
+.venv/bin/pip uninstall -y langgraph-supervisor
+```
+
+## 24. Phase 3 steps 2–6 planned; handoff/checkpoint_ns mechanic spiked before real code (2026-07-11)
+
+**What:** Before writing `sub_agents.py`/`supervisor.py` for real, per the approved
+plan's build sequence, spiked the riskiest unverified mechanic standalone: a
+minimal 2-node outer `StateGraph` (a `create_agent`-based `supervisor` node
+with one dummy `Command(graph=Command.PARENT)` handoff tool, routing to a
+`target` node). Confirmed against real execution, not just library source
+reading: (1) the handoff actually routes to `target`; (2) the final message
+list has no orphaned tool calls — the `AIMessage`'s `transfer_to_target` tool
+call is fully satisfied by the synthetic `ToolMessage` the handoff tool
+constructs via `InjectedState`; (3) `checkpoint_ns` nests automatically as
+`supervisor:<task_id>` for the subgraph's own internal checkpoints, distinct
+from the outer graph's root `''` namespace — confirmed by querying
+`AsyncSqliteSaver.alist()` directly against the real sqlite file with no
+`checkpoint_ns` filter, not assumed from the separator logic read in
+`langgraph/pregel/_algo.py` (22 confirmed the logic exists; this confirms it
+actually produces the right values at runtime).
+
+**A real, if mundane, bug hit and resolved during the spike (not a codebase
+bug):** the throwaway spike script (per this session's convention, written
+to the job's scratch `tmp/` directory rather than inside the project) failed
+100% of runs (8/8) with `TypeError: Could not resolve authentication
+method...` when run as a file, while byte-identical content run via
+`python -c` succeeded 100% of runs (4/4) — a startling, fully reproducible
+split that took real diffing to track down. Root cause: `load_dotenv()` with
+no explicit path calls `find_dotenv()`, which walks *upward from the calling
+script's own file location* (via stack-frame introspection), not from the
+process's cwd. `python -c` code has no real file path, so `find_dotenv()`
+falls back to resolving against cwd (the project root, where `.env` lives)
+and succeeds; the actual spike *file*, living under
+`~/.claude/jobs/.../tmp/`, is nowhere near the project root, so
+`find_dotenv()` silently found no `.env` and every API key came back unset.
+Not a bug in `assistant/`'s own modules — `main.py`/`agent.py`/etc. all live
+directly under the project root, so `find_dotenv()` correctly resolves one
+level up from there. Fixed for the spike by passing the `.env` path to
+`load_dotenv()` explicitly; no code change needed in the real codebase, but
+worth recording since the failure signature (a Anthropic auth `TypeError`
+buried under nested async task frames) would be a confusing false lead if
+seen again in a future throwaway script.
+
+**Plan for steps 2–6** (supervisor + 3 sub-agents, hand-rolled `StateGraph`
+with `Command`-based handoff tools, shared checkpointer via automatic
+subgraph `checkpoint_ns` nesting, LangGraph interrupts on a dummy
+confirmation-gated tool, full regression) written up via a Plan-mode session
+and approved; full detail in the plan file
+(`jolly-pondering-brook.md`) — new modules `assistant/sub_agents.py`,
+`assistant/interrupts.py`, `assistant/supervisor.py`; `agent.py` trimmed to
+just `make_thread_config()`; `main.py` updated for the new graph + an
+interrupt-handling loop.
+
+**Commands:**
+```sh
+# spike script (scratch, deleted after) — see finding above
+.venv/bin/python <spike script>   # orphaned-tool-call check: none found
+.venv/bin/python -c "... AsyncSqliteSaver.alist(config, limit=100) ..."  # checkpoint_ns: '' and 'supervisor:<uuid>'
+rm -f <spike scratch files>
+```
+
+## 25. Phase 3 steps 2–6 implemented — supervisor + 3 sub-agents, interrupts, full regression (2026-07-11)
+
+**What:** Built out the plan from 24 in the order its build sequence specified:
+
+- **`assistant/sub_agents.py`** (new) — `build_coding_agent(extra_tools=None)`
+  (file/shell tools from `tools.py`, unchanged), `build_research_agent()`
+  (web_search only), `build_life_admin_agent(mcp_tools)` (filters the flat
+  MCP tool list down to known Gmail/Calendar names via
+  `_select_life_admin_tools()`, guarding against an unaudited tool — e.g.
+  `manage-accounts` — silently reaching this sub-agent). Each is a plain
+  `create_agent(...)` call with its own trimmed system prompt and a
+  `MODEL_NAME` constant (`research_agent`'s flagged as the Haiku follow-up
+  candidate, left on Sonnet 5 for this build — see 24's "explicitly out of
+  scope"). Smoke-tested each standalone before wiring into the outer graph;
+  `life_admin_agent` correctly selected 15 of the 16 loaded MCP tools,
+  excluding `manage-accounts` (matches 19.2's finding that it bypasses the
+  server's own `ENABLED_TOOLS` allowlist).
+- **`assistant/interrupts.py`** (new) — `send_test_notification`, the dummy
+  confirmation-gated tool demonstrating CLAUDE.md's standing confirmation
+  rule via a real `langgraph.types.interrupt()` call.
+  **`tests/test_interrupts.py`** (new, 2 tests) — isolated from the handoff
+  mechanic (a minimal single-node graph, not the whole supervisor stack) —
+  also settled the plan's flagged open question: `graph.ainvoke()`'s return
+  dict does contain an `"__interrupt__"` key on interrupt, same shape as the
+  documented `.stream()` pattern.
+- **`assistant/supervisor.py`** (new) — `GraphState` (mirrors
+  `create_agent`'s own `AgentState.messages` field exactly, confirmed via
+  `inspect.getsource` before writing this), `_make_handoff_tool()` (the
+  `InjectedState` + `Command(graph=Command.PARENT)` pattern spiked in 24),
+  three `transfer_to_*` tools, `build_supervisor()`, and `build_graph()`
+  assembling the hand-built outer `StateGraph` — `supervisor` node routes to
+  `coding_agent`/`research_agent`/`life_admin_agent` or straight to `END`.
+  Smoke-tested the full assembled graph across all four cases (plain
+  greeting, coding, research, life-admin) before touching `main.py` — all
+  four routed and answered correctly on the first real run.
+- **`assistant/agent.py`** trimmed to just `make_thread_config()` —
+  `build_agent()`/`SYSTEM_PROMPT`/`MODEL_NAME` removed, superseded by
+  `supervisor.py`/`sub_agents.py`. No test imported `agent.py` directly, so
+  this was safe.
+- **`assistant/main.py`** updated: calls `supervisor.build_graph(checkpointer,
+  [send_test_notification], mcp_tools)` in place of the old
+  `agent.build_agent(...)`; turn loop gained a
+  `while "__interrupt__" in result:` block prompting `y/n` and resuming via
+  `Command(resume=...)` — this lives inside the same `try` as the rest of
+  the turn, so `EOFError`/`KeyboardInterrupt` raised from the confirmation
+  `input()` still exit cleanly through the existing exception handling, no
+  new exit path needed.
+
+**A real routing gap found and fixed, not just built around:** the first
+end-to-end interrupt test — "send a test notification saying hello world"
+through the real CLI — did NOT trigger the interrupt. The supervisor routed
+it to `life_admin_agent` (misreading "notification" as an email/messaging
+request) instead of `coding_agent` (the only sub-agent with
+`send_test_notification`), so the demo tool was never reachable through
+natural language. Root cause: `SUPERVISOR_SYSTEM_PROMPT` only described
+`coding_agent` as owning "file/shell tasks" — nothing hinted it also owns
+the notification demo, and the supervisor never sees sub-agents' own tool
+lists when deciding where to route. Fixed by adding one clause to the
+supervisor's prompt ("and also for any request to send a test/demo
+notification"). Re-tested through the real CLI afterward: both the confirm
+path (`y` → `[simulated] notification sent: 'hello world'`) and the decline
+path (`n` → cancellation message) now work end-to-end, including the
+`[confirm] {...} Proceed? (y/n):` prompt printing correctly and the graph
+resuming via `Command(resume=...)`.
+
+**Memory smoke test (PLAN.md step 4):** a real two-turn CLI session — turn 1
+routed to `research_agent`, turn 2 to `coding_agent`, same thread. Turn 2 of
+a separate continuity check ("what did I just ask you to search for?")
+correctly recalled turn 1's content, confirming the outer graph's message
+history persists correctly across sub-agent hops. Inspected the real
+`conversation_memory.sqlite` directly afterward (`AsyncSqliteSaver.alist()`,
+no `checkpoint_ns` filter): saw `''` (outer graph), two distinct
+`supervisor:<uuid>` entries (one per turn), one `research_agent:<uuid>`, and
+one `coding_agent:<uuid>` — checkpoint_ns nested exactly as the spike in 24
+predicted, across multiple turns in the same thread, not just a single
+isolated call.
+
+**Full regression (PLAN.md step 6):**
+- All 4 test files pass: `test_tools.py` (17), `test_mcp_tools.py` (10),
+  `test_memory.py` (1), `test_interrupts.py` (2) — 30 total.
+- Manually re-ran the STEPS.md 8.4/14.4 transcript classes against the new
+  graph: `exit` command, piped EOF, `SIGINT` at the `input()` prompt,
+  `SIGINT` genuinely mid-`ainvoke()` (no `Assistant:` line printed either
+  time), and a forced-invalid `ANTHROPIC_API_KEY` (`[error]
+  AuthenticationError: ...` printed, loop did not crash, next turn still
+  worked) — all clean, same as Phase 1/2's original results.
+- Shell denylist: `execute_shell_command.invoke({"command": "sudo rm -rf
+  /"})` called directly still returns the denial string rather than
+  raising (unchanged code, already covered by `test_tools.py`'s
+  `test_shell_blocks_sudo`) — confirmed this specific guarantee survives
+  the refactor unmodified. Noted but not a bug: asking the live model to
+  run this command (even when explicitly told not to refuse) now has
+  Claude's own safety training refuse before even attempting the tool
+  call, so the ToolMessage-rejection path Phase 1's STEPS.md 6.4 originally
+  observed live isn't reliably reproducible via natural-language prompting
+  anymore — a model-behavior characteristic, not a regression in this
+  project's code (the underlying tool's crash-prevention guarantee is
+  unchanged and independently verified above).
+- LangSmith traces (project `personal-assistant`) cross-checked, not just
+  final answers: real trace trees show
+  `LangGraph -> supervisor -> model -> ChatAnthropic` for routing decisions
+  and separate `coding_agent -> model -> ChatAnthropic -> execute_shell_command`/
+  `write_file`/`read_file` spans for actual sub-agent tool use — confirms
+  genuine routing occurred rather than the supervisor coincidentally
+  answering correctly from world knowledge. The two `error`-status traces
+  seen in this window match the intentional SIGINT-mid-`ainvoke()` test
+  above, not a real failure.
+
+**PLAN.md Phase 3's done-when criteria are now met**: one CLI entry point
+routes correctly across three sub-agents on real tasks ✓; traces visible in
+LangSmith ✓; the interrupt/confirmation gate demonstrably fires (both
+confirm and decline paths) ✓; all prior tests pass (30/30) ✓. Status flip
+proposed to the user, not applied unilaterally, per CLAUDE.md's standing
+approval rule. `research_agent`'s Haiku follow-up (PLAN.md step 3) remains
+open and deliberately deferred, as planned in 24.
+
+**Commands:** (representative — full detail in the smoke-test transcripts above)
+```sh
+.venv/bin/python -c "... build_coding_agent()/build_research_agent()/build_life_admin_agent() standalone smoke tests ..."
+.venv/bin/python -c "... build_graph() full 4-case smoke test ..."
+.venv/bin/python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py
+printf "search the web...\nwrite a file...\nexit\n" | .venv/bin/python -m assistant.main   # memory smoke test
+.venv/bin/python -c "... AsyncSqliteSaver.alist(thread-only config) ..."   # checkpoint_ns nesting across turns
+printf "hello\nexit\n" / EOF / SIGINT (2 variants) / bad-key / denylist transcripts against the new graph
+.venv/bin/python -c "... Client().list_runs(project_name='personal-assistant') ..."   # routing cross-check
+rm -f conversation_memory.sqlite && rm -rf workspace
+```
+
+## 26. Phase 3 → COMPLETE (2026-07-11)
+
+**What:** Flipped status in both files per CLAUDE.md's "How to use this
+file" process, at the user's explicit request after reviewing 25's
+regression results. `CLAUDE.md`'s Current Status block: Phase 3 moved from
+active to complete (pointing at STEPS.md groups 21–25), no phase currently
+active (Phase 4 — Mac-native control — not yet started). `PLAN.md`: Phase
+3's header flipped to COMPLETE with a dated **Delivered** summary
+(LangSmith tracing, the hand-rolled supervisor graph, the three sub-agents,
+verified `checkpoint_ns` nesting, the interrupt-based confirmation-gate
+demo) and a **Scope note** recording the one deliberate deferral —
+`research_agent`'s Haiku evaluation (step 3) — as an explicit decision, not
+an oversight; **Done-when** rewritten to confirm each of the four original
+criteria with what specifically verified it (real trace-tree inspection for
+routing, both interrupt paths through the real CLI, 30/30 tests plus
+re-verified manual transcripts).
+
+**Why:** Matches the same standing process used for the Phase 2 → 3 flip
+(STEPS.md 21) — status edits happen with explicit user approval, done here
+only after the user reviewed the regression summary and asked for the
+status-flip changes specifically, with the diff left for them to review
+before committing (per CLAUDE.md's git rules: I don't commit, only propose).

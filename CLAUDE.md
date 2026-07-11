@@ -20,9 +20,14 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **Active phase: 2 — Gmail via MCP** (see PLAN.md)
+- **No active phase** — Phase 4 (Mac-native control) not yet started; read
+  PLAN.md before beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
+- Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
+  (STEPS.md groups 9–20)
+- Complete: Phase 3 — supervisor + 3 sub-agents, LangGraph handoff routing,
+  interrupt-based confirmation gate (STEPS.md groups 21–25)
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

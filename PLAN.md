@@ -31,11 +31,25 @@ doesn't kill the loop.
 
 ---
 
-## Phase 2 — Gmail via MCP — ACTIVE
+## Phase 2 — Gmail via MCP — COMPLETE (2026-07-10/11)
 
 **Objective:** the agent can search and read my Gmail (read-only) via a
 locally-run community Gmail MCP server behind my own Google Cloud OAuth app.
 Google Calendar (read-only) follows as a mini-phase once Gmail is proven.
+
+**Delivered:** mcp_tools.py (async MCP tool loading, merged into TOOLS at
+startup); Gmail via `ArtyMcLabin/Gmail-MCP-Server` (OAuth grant itself scoped
+to `gmail.readonly`); Calendar via `nspady/google-calendar-mcp` (OAuth grant
+is NOT scope-restricted — no self-hosted server found supports that; enforced
+read-only instead via an `ENABLED_TOOLS` server allowlist plus a
+`tool_interceptors` hard block on write-tool calls, which caught a real gap
+where the server ignored its own allowlist for `manage-accounts`); a second
+interceptor confining Gmail's `download_attachment`/`download_email` to
+`workspace/` (they write from a separate process, outside tools.py's own
+sandbox); a third capping `maxResults` on list/search tools (cost). Required
+migrating main.py/agent.py/memory.py to async (`graph.ainvoke()`,
+`AsyncSqliteSaver`) — MCP-loaded tools only support async invocation, so this
+wasn't optional. README.md added. Full record: STEPS.md groups 9–20.
 
 **Scope rules:**
 - MCP ADDS tools; it never replaces Phase 1's TOOLS.
@@ -81,17 +95,39 @@ Google Calendar (read-only) follows as a mini-phase once Gmail is proven.
    vars, OAuth flow), roadmap pointer. Portfolio-quality.
 9. STEPS.md updated throughout; propose the Phase 2 commit boundary.
 
-**Done-when:** the agent correctly answers "summarize my unread emails" and
-"what's on my calendar this week" from the CLI; scopes verified read-only in
-the OAuth consent; token files confirmed gitignored; Phase 1 tests pass on
-the 3.12 venv; README exists.
+**Done-when (met, with one caveat):** the agent correctly answers "summarize
+my unread emails" and "what's on my calendar this week" from the CLI ✓;
+Gmail's scope verified read-only in the OAuth consent ✓ — **Calendar's is
+not**, by necessity (see Delivered above), read-only enforced at the
+tool-allowlist/interceptor layer instead of the OAuth grant; token files
+confirmed gitignored ✓; Phase 1 tests pass on the 3.12 venv ✓ (28 tests
+total); README exists ✓.
 
 ---
 
-## Phase 3 — Multi-agent split — NOT STARTED
+## Phase 3 — Multi-agent split — COMPLETE (2026-07-11)
 
 **Objective:** supervisor + sub-agents (coding, research, life-admin) behind
 the same CLI, with observability in place before the complexity arrives.
+
+**Delivered:** LangSmith tracing enabled (`LANGCHAIN_TRACING_V2`,
+`LANGCHAIN_PROJECT=personal-assistant`, `LANGSMITH_ENDPOINT` — the account
+is on LangSmith's APAC region); a hand-rolled outer `StateGraph`
+(`assistant/supervisor.py`) routing via LangGraph's `Command`-based
+handoff-tool pattern to three sub-agents (`assistant/sub_agents.py`:
+coding, research, life-admin), each a `create_agent(...)` graph embedded as
+a node; `checkpoint_ns` nests automatically per sub-agent under the shared
+checkpointer, verified against real checkpoint rows; a dummy
+confirmation-gated tool (`assistant/interrupts.py`) demonstrates the
+standing confirmation rule via a real `langgraph.types.interrupt()`, wired
+into `coding_agent` and surfaced as a y/n prompt in `main.py`'s loop.
+`agent.py` trimmed to just `make_thread_config()`. Full record: STEPS.md
+groups 21–25.
+
+**Scope note:** step 3's Haiku evaluation is deliberately deferred —
+`research_agent` (the best candidate, simplest single-tool role) stays on
+Sonnet 5 for now; a follow-up pass using real LangSmith trace data will
+decide whether to switch it, not part of this phase's completion.
 
 **Steps:**
 0. Enable LangSmith tracing first (`LANGCHAIN_TRACING_V2=true`; key already
@@ -112,9 +148,13 @@ the same CLI, with observability in place before the complexity arrives.
 6. Regression: every Phase 1/2 capability still works through the
    supervisor; traces confirm requests route to the right sub-agent.
 
-**Done-when:** one CLI entry point routes correctly across three sub-agents
-on real tasks; traces visible in LangSmith; the interrupt/confirmation gate
-demonstrably fires; all prior tests pass.
+**Done-when (all met):** one CLI entry point routes correctly across three
+sub-agents on real tasks ✓; traces visible in LangSmith ✓ (cross-checked
+against real trace trees, not just final-answer correctness); the
+interrupt/confirmation gate demonstrably fires ✓ (both confirm and decline
+paths, end-to-end through the CLI); all prior tests pass ✓ (30/30 across 4
+test files, plus every Phase 1/2 manual transcript re-verified against the
+new graph).
 
 ---
 
