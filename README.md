@@ -1,35 +1,41 @@
 # assistant
 
-A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI with persistent conversation memory, tool-calling (web search, sandboxed file/shell access, Gmail, Google Calendar), and a security model built around the assumption that anything a tool returns — a search result, an email, a calendar event — could be adversarial.
+A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI with persistent conversation memory, a supervisor that routes to specialist sub-agents (coding, research, email/calendar, Mac control), and a security model built around the assumption that anything a tool returns — a search result, an email, a calendar event — could be adversarial.
 
 Not "Jarvis." Deliberately.
 
 ## What it can do today
 
-- Hold a conversation that persists across separate launches (SQLite-backed).
-- Search the web (Tavily).
-- Read and write files in a sandboxed workspace, and run shell commands there — with a denylist blocking destructive commands, shell metacharacters, and shell-interpreter escapes.
-- Search and read Gmail (read-only — cannot send, reply, delete, or modify).
-- Search and read Google Calendar (read-only — cannot create, update, delete, or respond to events).
+- Hold a conversation that persists across separate launches (SQLite-backed), routed by a supervisor to the right specialist sub-agent.
+- **Coding**: read/write files in a sandboxed workspace and run shell commands there — argument-list execution only (never a shell interpreter), a denylist blocking destructive commands and AppleScript, and a confirmation gate on inline interpreter code (`python3 -c "..."`).
+- **Research**: search the web (Tavily).
+- **Life-admin**: search and read Gmail (read-only — cannot send, reply, delete, or modify); search and read Google Calendar (read-only — cannot create, update, delete, or respond to events).
+- **Mac control**: open/focus an app, control Music.app playback, read/create Reminders and Notes, start a new Shortcut in the editor (you finish and save it), and run a named Shortcut — the last one always asks for confirmation first.
+- Side-effectful or opaque actions (running a named Shortcut, inline interpreter code) pause the conversation for an explicit y/n before executing, via a real LangGraph interrupt — not just a prompt instruction.
 
-Email and calendar content is treated as untrusted input throughout: the system prompt tells the model not to follow instructions embedded in message/event content, and — more importantly — the tools themselves are built so an adversarial instruction has nothing dangerous to reach even if the model is fooled. See [Security model](#security-model) below.
+Email, calendar, and Shortcut content are all treated as untrusted input: the system prompts tell the model not to follow instructions embedded in message/event content or blindly trust what a Shortcut does, and — more importantly — the tools themselves are built so an adversarial instruction has nothing dangerous to reach even if the model is fooled. See [Security model](#security-model) below.
 
 ## Architecture
 
 ```
 assistant/
-├── main.py       # CLI loop — async, owns checkpointer + MCP tool loading lifetime
-├── agent.py      # build_agent(checkpointer, tools) + make_thread_config(thread_id)
-├── tools.py      # Phase 1 hand-secured tools: web search, file r/w, shell exec
-├── mcp_tools.py  # Phase 2 MCP integration: Gmail + Calendar, async, with interceptors
-└── memory.py     # get_checkpointer() — async context manager over AsyncSqliteSaver
+├── main.py        # CLI loop — async, owns checkpointer + MCP tool loading lifetime
+├── studio.py       # LangGraph Studio (`langgraph dev`) entry point — same graph, no checkpointer
+├── supervisor.py   # Outer StateGraph: routes to sub-agents via Command-based handoff tools
+├── sub_agents.py   # coding / research / life_admin / mac_control sub-agents (each a create_agent graph)
+├── agent.py        # make_thread_config(thread_id) only — the single-agent builder it once held moved into supervisor.py/sub_agents.py at Phase 3
+├── tools.py        # Phase 1 hand-secured tools: file r/w, shell exec (+ Phase 4 hardening)
+├── mac_tools.py     # Phase 4: osascript/open/shortcuts-CLI bridge behind a hard allowlist
+├── mcp_tools.py     # Phase 2 MCP integration: Gmail + Calendar, async, with interceptors
+├── interrupts.py    # Dummy confirmation-gated tool — the interrupt mechanic's test fixture
+└── memory.py        # get_checkpointer() — async context manager over AsyncSqliteSaver
 tests/            # pytest-shaped, runnable directly with plain python
 workspace/        # the ONLY directory file/shell tools (and confined MCP downloads) may touch — runtime-created
 PLAN.md           # six-phase build plan; only one phase is ever "active"
 STEPS.md          # full build log — every decision, bug, and why
 ```
 
-The agent itself is a single [`langchain.agents.create_agent`](https://docs.langchain.com/oss/python/langchain/agents) graph — no custom `StateGraph`, no multi-agent supervisor (that's Phase 3). `tools.py`'s tools are synchronous and hand-written; `mcp_tools.py`'s tools are loaded asynchronously at startup from locally-run MCP servers and merged into the same tool list the agent sees. Because MCP-loaded tools only support async invocation, the whole CLI runs on `graph.ainvoke()`, not `graph.invoke()` — see STEPS.md §14 for why that's a hard requirement, not a style choice.
+A hand-built outer `StateGraph` (`supervisor.py`) holds a routing supervisor and four sub-agents, each itself a [`langchain.agents.create_agent`](https://docs.langchain.com/oss/python/langchain/agents) graph embedded as a node. Routing uses LangGraph's `Command`-based handoff-tool pattern — the supervisor never sees a sub-agent's own tool list, only what its own system prompt says that sub-agent owns, so every new sub-agent's capabilities have to be described in `SUPERVISOR_SYSTEM_PROMPT` explicitly. `checkpoint_ns` nests automatically per sub-agent under the shared checkpointer. `tools.py`/`mac_tools.py`'s tools are synchronous and hand-written; `mcp_tools.py`'s tools are loaded asynchronously at startup from locally-run MCP servers and merged in. Because MCP-loaded tools only support async invocation, the whole CLI runs on `graph.ainvoke()`. LangSmith tracing is wired up (`LANGCHAIN_TRACING_V2`) so routing decisions and sub-agent tool calls are inspectable as real trace trees, not just final answers. A `langgraph dev` entry point (`studio.py`) exposes the same graph to LangGraph Studio for local, visual debugging.
 
 ## Setup
 
@@ -37,6 +43,7 @@ The agent itself is a single [`langchain.agents.create_agent`](https://docs.lang
 
 - Python 3.12 (a wheel-availability concession for Phase 5's audio deps — nothing in Phases 1–4 needs it specifically)
 - Node.js (for the Gmail and Calendar MCP servers, which are separate Node/TypeScript projects run as local subprocesses)
+- macOS (Phase 4's Mac-control sub-agent uses `osascript`/`open`/`shortcuts`, all macOS-only; everything else is cross-platform)
 - API keys: an Anthropic API key (pay-per-token Console account, not a Pro/Max subscription), a [Tavily](https://tavily.com) API key
 
 ### Install
@@ -54,12 +61,15 @@ cp .env.example .env   # then fill in the real values
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Core agent | Console API key, pay-per-token |
 | `TAVILY_API_KEY` | Web search | |
-| `LANGSMITH_API_KEY` | (unused until Phase 3) | Tracing isn't wired up yet |
+| `LANGSMITH_API_KEY` | Tracing | Optional but recommended — routing/tool-call traces in the LangSmith UI |
+| `LANGCHAIN_TRACING_V2` | Tracing | `true` to enable |
+| `LANGCHAIN_PROJECT` | Tracing | LangSmith project name |
+| `LANGSMITH_ENDPOINT` | Tracing (regional accounts only) | Not in `.env.example` — only needed if your LangSmith workspace isn't on the default US endpoint (e.g. APAC) |
 | `GMAIL_MCP_SERVER_PATH` | Gmail | Path to a built `Gmail-MCP-Server/dist/index.js` |
 | `GOOGLE_CALENDAR_MCP_SERVER_PATH` | Calendar | Path to a built `google-calendar-mcp/build/index.js` |
 | `GOOGLE_CALENDAR_MCP_CREDENTIALS` | Calendar | Path to that server's `gcp-oauth.keys.json` |
 
-Gmail and Calendar are optional at startup — if their env vars are unset or the servers aren't built yet, `main.py` prints a warning and runs with the web/file/shell tools only.
+Gmail and Calendar are optional at startup — if their env vars are unset or the servers aren't built yet, `main.py` prints a warning and runs without the `life_admin_agent` tools. Mac control needs no setup beyond running on macOS — see the permissions note below.
 
 ### Gmail and Calendar OAuth setup
 
@@ -96,35 +106,42 @@ GOOGLE_OAUTH_CREDENTIALS=~/.config/google-calendar-mcp/gcp-oauth.keys.json npm r
 
 Both apps stay in Google's "Testing" publish status by default, which means tokens expire after 7 days and need re-auth (rerun the `auth` command above). Publishing the app (still shows an "unverified" warning, but no expiry) is a one-click alternative on the OAuth consent screen if the weekly re-auth gets old.
 
+### Mac-control permissions
+
+No API keys or config needed — but the first time each AppleScript-controlled app (Music, Reminders, Notes) or `run_shortcut` (Shortcuts automation) actually runs, macOS shows a one-time Automation permission dialog asking whether to let your terminal/Python process control that app. Click Allow. This is a per-app, first-use-only prompt — nothing to configure ahead of time.
+
 ### Run
 
 ```sh
 .venv/bin/assistant
 ```
 
-Type `exit`/`quit`, or Ctrl+C/Ctrl+D, to leave. Conversation memory persists in `conversation_memory.sqlite` across separate launches (fixed thread ID, by design).
+Type `exit`/`quit`, or Ctrl+C/Ctrl+D, to leave. Conversation memory persists in `conversation_memory.sqlite` across separate launches (fixed thread ID, by design). When a tool needs confirmation, the CLI prints `[confirm] {...} Proceed? (y/n):` and pauses — type `y` or `n`.
+
+For visual/step-by-step debugging of the graph itself (routing decisions, tool calls, message state), run `.venv/bin/langgraph dev` instead — opens [LangGraph Studio](https://github.com/langchain-ai/langgraph-studio) against the same graph, without a persistent checkpointer (Studio manages its own run state).
 
 ## Security model
 
-Threat model: any tool that touches the web, email, or calendar content is a prompt-injection surface — adversarial text can arrive as a tool result and try to induce harmful actions. The mitigation lives on the *execution* side, not in filtering content:
+Threat model: any tool that touches the web, email, calendar, or Shortcut content is a prompt-injection surface — adversarial text can arrive as a tool result and try to induce harmful actions. The mitigation lives on the *execution* side, not in filtering content:
 
-- **Shell**: commands are parsed into an argument list and run with `shell=False` — never a shell interpreter. A denylist blocks `rm`/`sudo`/`su`, shell interpreters invoked with `-c`, shell metacharacters (checked as substrings, since `shlex` doesn't split on them), and sensitive system paths.
+- **Shell**: commands are parsed into an argument list and run with `shell=False` — never a shell interpreter. A denylist blocks `rm`/`sudo`/`su`/`osascript`, shell interpreters invoked with `-c`, shell metacharacters (checked as substrings, since `shlex` doesn't split on them), sensitive system paths, and common home-directory folders (Desktop/Documents/Downloads/Pictures/Movies). A general-purpose interpreter invoked with inline code (`python3 -c "..."`, `node -e "..."`) pauses for confirmation via a LangGraph interrupt — running a *file* the agent already wrote (`python3 script.py`) stays ungated, since no denylist can fully contain a Turing-complete interpreter and gutting that capability would defeat the coding agent's actual purpose.
 - **Files**: confined to `workspace/`, anchored at the project root. Path traversal is rejected by resolving and checking containment; dotfiles/dotdirs are blocked independent of that check.
+- **Mac control**: every action is a fixed AppleScript template (or the plain `open`/`shortcuts` CLI) invoked as an argv list — model-supplied values are passed as osascript's own positional argv, read via `on run argv`, never string-interpolated into script source. Open app / Music playback / Reminders / Notes / opening a blank Shortcut editor are ungated (private, reversible, local-only, and — for the Shortcut editor — inert until the user manually finishes and saves it). Running a *named* Shortcut always pauses for confirmation, regardless of name, since a Shortcut's actual behavior is opaque to this codebase. There is no scriptable way to author a Shortcut's logic at all — `create_shortcut` only opens a blank editor, verified empirically rather than assumed from docs.
 - **Gmail**: OAuth grant itself is scoped to `gmail.readonly` — send/reply/delete/modify aren't just hidden from the model, the token can't do them. Two tools (`download_attachment`, `download_email`) write to disk from inside the separate Node server process, outside `tools.py`'s own sandbox — an interceptor forces their save path into `workspace/` and reduces filenames to their basename, regardless of what the model requests.
 - **Calendar**: the OAuth grant is *not* scope-restricted (no self-hosted Calendar MCP server was found that supports it — see STEPS.md §17). Read-only is enforced by an `ENABLED_TOOLS` server-side allowlist plus a client-side interceptor that refuses write-tool calls before they reach the server. The interceptor caught a real gap during development: the server registers `manage-accounts` regardless of the allowlist.
 - **Cost**: an MCP tool that defaults to expanding up to 50 full email threads into context on a single call is capped to 10 by an interceptor, rather than trusting the model to pass a small limit.
-- **Standing rule**: any side-effectful action (sending email, creating events, Mac control) requires explicit confirmation before execution — enforced today by keeping those tools out of scope entirely; LangGraph interrupts formalize this in Phase 3.
+- **Standing confirmation rule**: any side-effectful or opaque action — running a named Shortcut, inline interpreter code in the shell tool — pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit y/n before executing. This is implemented, not aspirational: the interrupt mechanic is demonstrated end-to-end (both confirm and decline paths) through the real CLI, not just tested in isolation.
 
-Full reasoning, including two things that went wrong during development (a credentials-file mistake and an accidental token print) and how they were caught, is in [STEPS.md](STEPS.md).
+Full reasoning, including several things that went wrong during development (a credentials-file mistake, an accidental token print, and a real gap in the shell denylist found by testing this project's own "refuse cleanly" behavior) and how they were caught, is in [STEPS.md](STEPS.md).
 
 ## Roadmap
 
 Six phases, one active at a time — see [PLAN.md](PLAN.md) for the full plan.
 
 1. ✅ Foundations — single agent, tool-calling, persistent memory
-2. ✅ Gmail + Calendar via MCP (this README's state)
-3. Multi-agent split — supervisor + coding/research/life-admin sub-agents, LangSmith tracing, interrupt-based confirmation gate
-4. Mac-native control — allowlisted `osascript` actions
+2. ✅ Gmail + Calendar via MCP
+3. ✅ Multi-agent split — supervisor + coding/research/life-admin sub-agents, LangSmith tracing, interrupt-based confirmation gate
+4. ✅ Mac-native control — allowlisted `osascript`/`open`/`shortcuts` actions, mac_control sub-agent (this README's state)
 5. Voice I/O — local STT, `say` for TTS
 6. Proactivity — scheduled morning briefing, repo polish
 
@@ -134,6 +151,8 @@ Six phases, one active at a time — see [PLAN.md](PLAN.md) for the full plan.
 .venv/bin/python tests/test_memory.py
 .venv/bin/python tests/test_tools.py
 .venv/bin/python tests/test_mcp_tools.py
+.venv/bin/python tests/test_interrupts.py
+.venv/bin/python tests/test_mac_tools.py
 ```
 
-No test framework dependency yet — each file is pytest-shaped (`def test_...(): assert ...`) but runnable directly with plain `python`.
+No test framework dependency yet — each file is pytest-shaped (`def test_...(): assert ...`) but runnable directly with plain `python`. `test_mac_tools.py` monkeypatches `subprocess.run` throughout, so it runs anywhere — it doesn't require macOS, installed apps, or Automation permission grants; that live verification is manual and recorded in STEPS.md instead.

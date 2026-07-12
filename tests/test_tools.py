@@ -5,12 +5,18 @@ tools.WORKSPACE_DIR to an isolated temp directory so tests don't touch the
 real project workspace or each other.
 """
 
+import asyncio
 import tempfile
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 import assistant.tools as tools
+from assistant.memory import get_checkpointer
 
 
 @contextmanager
@@ -160,6 +166,82 @@ def test_shell_blocks_redirect_glued_to_sensitive_path() -> None:
             {"command": "echo hi>/etc/passwd"}
         )
         assert result.startswith("Error: command blocked")
+
+
+def test_shell_blocks_osascript() -> None:
+    """osascript can fully control the Mac via AppleScript — no legitimate
+    coding use, and mac_tools.py is the deliberate, template-only bridge for
+    that instead (STEPS.md 32)."""
+    with _temp_workspace():
+        result = tools.execute_shell_command.invoke(
+            {"command": 'osascript -e \'tell application "Finder" to empty trash\''}
+        )
+        assert result.startswith("Error: command blocked")
+
+
+def test_shell_blocks_home_directory_desktop_path() -> None:
+    with _temp_workspace():
+        result = tools.execute_shell_command.invoke(
+            {"command": f"rm {tools._HOME_DIR}/Desktop/file.txt"}
+        )
+        assert result.startswith("Error: command blocked")
+
+
+# --- Shell tool: inline-interpreter confirmation gate -----------------------
+
+
+class _ShellState(TypedDict):
+    result: str | None
+
+
+def _build_shell_graph(checkpointer, command: str):
+    def node(state: _ShellState) -> dict:
+        return {"result": tools.execute_shell_command.invoke({"command": command})}
+
+    builder = StateGraph(_ShellState)
+    builder.add_node("act", node)
+    builder.add_edge(START, "act")
+    builder.add_edge("act", END)
+    return builder.compile(checkpointer=checkpointer)
+
+
+async def _run_shell_confirmation_case(command: str, resume: bool) -> dict:
+    with _temp_workspace(), tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "scratch.sqlite"
+        async with get_checkpointer(db_path) as checkpointer:
+            graph = _build_shell_graph(checkpointer, command)
+            config = {
+                "configurable": {"thread_id": str(uuid.uuid4()), "checkpoint_ns": ""}
+            }
+            result = await graph.ainvoke({"result": None}, config=config)
+            assert "__interrupt__" in result, f"expected interrupt, got {result}"
+            payload = result["__interrupt__"][0].value
+            assert payload["action"] == "execute_shell_command"
+            return await graph.ainvoke(Command(resume=resume), config=config)
+
+
+def test_shell_inline_python_code_requires_confirmation_and_declines_cleanly() -> None:
+    resumed = asyncio.run(
+        _run_shell_confirmation_case('python3 -c "print(1)"', resume=False)
+    )
+    assert resumed["result"] == "Cancelled — user did not confirm."
+
+
+def test_shell_inline_python_code_runs_after_confirmation() -> None:
+    resumed = asyncio.run(
+        _run_shell_confirmation_case('python3 -c "print(1)"', resume=True)
+    )
+    assert "1" in resumed["result"]
+
+
+def test_shell_running_a_script_file_is_not_gated() -> None:
+    """python3 script.py (a file the agent already wrote via write_file) is
+    this tool's core job and must stay ungated — only inline -c/-e code is
+    gated (STEPS.md 32)."""
+    with _temp_workspace():
+        tools.write_file.invoke({"path": "script.py", "content": "print(2)"})
+        result = tools.execute_shell_command.invoke({"command": "python3 script.py"})
+        assert "2" in result
 
 
 # --- Web search tool ---------------------------------------------------------

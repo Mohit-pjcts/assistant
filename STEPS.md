@@ -1411,3 +1411,491 @@ re-verified manual transcripts).
 only after the user reviewed the regression summary and asked for the
 status-flip changes specifically, with the diff left for them to review
 before committing (per CLAUDE.md's git rules: I don't commit, only propose).
+
+## 27. LangGraph Studio (`langgraph dev`) wired up (2026-07-12)
+
+**What:** Installed `langgraph-cli[inmem]` (0.4.31; pulls in `langgraph-api`
+0.11.0 and `langgraph-runtime-inmem` 0.31.0 for the local, Docker-free dev
+server) as a new `dev` extra in `pyproject.toml`
+(`[project.optional-dependencies]`) and mirrored in `requirements.txt` with
+a comment noting it's dev-only, not needed to run `assistant` itself.
+
+**Verified the graph-export contract before writing code, not assumed:**
+read `langgraph_cli/schemas.py`'s `Config.graphs` docstring directly —
+graphs can be a `Pregel`/`StateGraph` object OR an (async) factory
+(function or context manager) accepting a single `RunnableConfig` argument.
+Then read `langgraph_api/graph.py` directly and found a load-bearing
+constraint that isn't obvious from the docs: in `local_dev` mode (i.e.
+`langgraph dev`), the API server **raises** if the graph it imports already
+has a checkpointer or store attached — persistence is meant to be handled
+entirely by the platform, and a custom one is an error, not just ignored.
+This meant `main.py`'s existing graph-build call (which always supplies our
+own `AsyncSqliteSaver`) couldn't be reused directly for Studio.
+
+**What was built:**
+- `assistant/supervisor.py`: `build_graph()`'s `checkpointer` param widened
+  to `BaseCheckpointSaver | None` (was required) — `None` now means "let
+  the caller's own runtime handle persistence," documented in the
+  docstring alongside the local_dev constraint above.
+- `assistant/studio.py` (new): `async def make_graph(config:
+  RunnableConfig)` — the factory `langgraph.json` points at. Loads MCP
+  tools the same way `main.py` does, then calls
+  `build_graph(checkpointer=None, ...)`. `config` is unused (required by
+  the factory contract; this project has no per-request graph config) but
+  kept in the signature since an untyped/missing parameter would change
+  which dispatch path the CLI's `classify_factory` takes.
+- `langgraph.json` (new, repo root): `{"dependencies": ["."], "graphs":
+  {"assistant": "./assistant/studio.py:make_graph"}, "env": ".env"}`.
+- `.gitignore` gained `.langgraph_api/` — the dev server's local runtime
+  state directory, created on first `langgraph dev` run; same "safety net
+  even though it should never be committed" reasoning as the OAuth
+  credential entries.
+
+**Verified against the real server, not just a clean import:** ran
+`langgraph validate` (passed), then `langgraph dev --no-browser` in the
+background. Confirmed via the server's own log: graph `assistant` imported
+successfully, app started in 2.49s, no checkpointer-conflict error. Went
+one step further than "it imports" — hit the running server's actual REST
+API directly (`POST /threads`, then `POST
+/threads/{id}/runs/wait` with a real "hello, who are you?" input) and
+confirmed a correct, real response came back through the full HTTP path,
+not just via a Python-level smoke test. Noted incidentally: port 2024 (the
+default) was already held by an unrelated project's own `langgraph dev`
+process (`lca-lc-foundations`, running since before this session) — ours
+detected the conflict and fell back to port 58137 automatically, exactly as
+designed; left the other project's process untouched.
+
+**Commands:**
+```sh
+.venv/bin/pip install -q "langgraph-cli[inmem]"
+.venv/bin/langgraph validate --config langgraph.json
+.venv/bin/langgraph dev --no-browser --config langgraph.json   # backgrounded
+.venv/bin/python -c "... httpx POST /threads, /threads/{id}/runs/wait ..."   # confirmed real response
+git check-ignore -v .langgraph_api/
+```
+
+## 28. Studio-only BadRequestError traced to a real langchain-anthropic bug, fixed by disabling extended thinking (2026-07-12)
+
+**What:** User hit `BadRequestError: messages.N.content.0.thinking.thinking:
+Field required` repeatedly through Studio's Chat UI — specifically on
+`life_admin_agent` ("latest email in my inbox") and `research_agent`
+("what was the result of the arg vs sui game?"), never on `supervisor`.
+Root-caused via direct source inspection, not guessed: `langchain-anthropic`
+== 1.4.8 (confirmed the latest available on PyPI — no newer release exists
+with a fix) has a real bug in its SSE-to-`AIMessageChunk` merging logic
+(`chat_models.py`, the `content_block_start`/`content_block_delta` handling
+around line 1600–1660). For a `thinking`-type content block, the
+`content_block_start` handler only emits a starter chunk `if thinking or
+signature` — when a thinking block's opening event has both empty (common
+for short reasoning traces), no starter chunk is emitted at all, and the
+block gets built purely from later `signature_delta` events, whose
+`event.delta.model_dump()` never carries a `thinking` key. The final merged
+message ends up with `signature` set but no `thinking` field at all (not
+just empty) — confirmed this exact mechanism with a synthetic
+`AIMessageChunk` reproduction, not just by reading the code. When that
+malformed message is later replayed back to Anthropic (required for
+multi-step tool-calling loops), the API correctly rejects it.
+
+**Why supervisor was fine but sub-agents weren't:** the supervisor makes one
+quick handoff decision and exits — it never replays its own prior turn back
+to itself within a run. `life_admin_agent`/`research_agent` loop internally
+(call a tool, get a real result, call the model again with history
+including their own earlier thinking-block message) — that replay is
+exactly where a malformed block gets resent. Their longer, more substantive
+reasoning (real email/search content) also means more SSE chunks, raising
+the odds of hitting the empty-start-event edge case versus `coding_agent`'s
+shorter exchanges — consistent with, though not proof beyond, the observed
+pattern.
+
+**Confirmed the real CLI was never at risk, before proposing any fix:**
+`main.py` calls `graph.ainvoke()` in-process, which drives a *non-streaming*
+Anthropic request — a different code path that never touches the buggy
+SSE-merging logic at all. Reproduced the bug via the REST API directly to
+prove this: plain `/runs/wait` calls (non-streaming, 2 separate scenarios,
+several turns each) never failed; `/runs/stream` (what Studio's Chat UI
+actually uses) was needed to see it, and even then only intermittently
+(matches the SSE-timing-dependent root cause) — this is why earlier,
+narrower repro attempts in this session didn't immediately catch it.
+
+**Fix:** `thinking={"type": "disabled"}` added to all four
+`ChatAnthropic(...)` construction sites (supervisor + all 3 sub-agents in
+`sub_agents.py`/`supervisor.py`) — confirmed `ThinkingConfigDisabledParam`
+is a real, valid SDK type before using it. Removes the entire bug class
+(no thinking blocks are ever produced) rather than patching one call site
+or working around Studio's UI behavior, which isn't under this project's
+control anyway. User's call, presented as a tradeoff (Studio-only bug vs.
+CLI-wide reasoning depth) via AskUserQuestion rather than applied
+unilaterally, since Phase 1's STEPS.md 8.2 had deliberately left thinking on
+adaptive/default.
+
+**Verified against the exact failing scenarios, not just theory:**
+restarted `langgraph dev`, replayed both of the user's original failing
+queries verbatim via `/runs/stream` — both now return correct, complete
+answers with no error. Ran 5 more diverse streamed queries across all three
+sub-agents (Gmail search, Calendar, two web searches, unread-email summary)
+— all 7 total succeeded. Reran the full automated suite (30/30 still pass)
+to confirm disabling thinking didn't regress anything.
+
+**Commands:**
+```sh
+.venv/bin/python -c "... AIMessageChunk synthetic repro of the missing-thinking-key merge ..."
+.venv/bin/pip show langchain-anthropic   # 1.4.8, confirmed latest via PyPI JSON
+.venv/bin/langgraph dev --no-browser --config langgraph.json   # backgrounded
+.venv/bin/python -c "... httpx /runs/stream, both original failing queries + 5 more ..."   # all 7 OK
+.venv/bin/python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py   # 30/30
+rm -rf workspace && rm -f conversation_memory.sqlite
+```
+
+## 29. Phase 4 → ACTIVE; deferred Haiku evaluation preserved in PLAN.md (2026-07-12)
+
+**What:** Two doc edits at the start of the Phase 4 session, before any
+Phase 4 code: (1) `PLAN.md`'s Phase 6 step 5 (final cost review) now
+explicitly carries forward the `research_agent` Haiku evaluation deferred
+at Phase 3 step 3 (STEPS.md 24/25's "explicitly out of scope" note) — it
+was living only in STEPS.md prose, with no pointer in the phase that will
+actually act on it; (2) `PLAN.md`'s Phase 4 header flipped from NOT STARTED
+to ACTIVE, and `CLAUDE.md`'s Current Status block updated to match ("No
+active phase" → "Active: Phase 4").
+
+**Why:** Matches CLAUDE.md's own "How to use this file" process — status
+edits happen explicitly, not implicitly by starting to write code — and
+prevents the Haiku follow-up from being silently lost between phases now
+that Phase 3 is closed out and its STEPS.md entries will stop being the
+first thing read each session.
+
+## 30. Phase 4 step 1 — threat-model CHECKPOINT settled (2026-07-12)
+
+**What:** Presented the proposed action allowlist to the user before writing
+any code, per PLAN.md's step-1 CHECKPOINT. All actions run as argv-only
+`subprocess.run(shell=False)` with a timeout, same posture as the shell
+tool. `open_app` uses the plain `open -a` CLI (no AppleScript needed at
+all); Music/Reminders/Notes go through `osascript -e <template>`, with
+model-supplied values passed as the script's own positional `argv` (`on run
+argv`) rather than string-interpolated into the AppleScript source — the
+same argv-list-execution principle CLAUDE.md's shell rule already
+established, applied to a second injection surface.
+
+Three judgment calls resolved via AskUserQuestion rather than decided
+unilaterally:
+- **reminders_create/notes_create: ungated.** Structurally similar to
+  calendar-event creation (which CLAUDE.md already gates), but private,
+  reversible, and never visible to anyone but the user — user's call was to
+  treat it like the read actions rather than extend the gate by analogy.
+- **run_shortcut: any name accepted, but always gated.** No hardcoded
+  per-name allowlist (the user can name any Shortcut) — but the interrupt
+  fires unconditionally regardless of name, since a Shortcut's actual
+  behavior is invisible to this codebase and can change any time the user
+  edits it.
+- **`interrupts.send_test_notification`: kept as a fixture**, not retired —
+  `tests/test_interrupts.py` continues to exercise the interrupt mechanic in
+  isolation from whatever real Mac tools end up gated, cheap to keep.
+
+Flagged to the user ahead of implementation: the first real invocation of
+each AppleScript-controlled app (Music, Reminders, Notes) and of
+`run_shortcut` (Shortcuts automation) would trigger a macOS Automation/TCC
+permission dialog requiring a manual click — same category as Phase 2's GCP
+console steps, on the user's side, not something this codebase can do for
+itself.
+
+## 31. Phase 4 steps 2–4 — osascript bridge, mac_control sub-agent, full
+verification (2026-07-12)
+
+### 31.1 `assistant/mac_tools.py` implemented
+
+**What:** New module, `TOOLS = UNGATED_TOOLS + GATED_TOOLS`. `_run_osascript(script,
+args)` is the shared helper: `subprocess.run(["osascript", "-e", script,
+*args], shell=False, timeout=15)` — `script` is always one of this module's
+own hardcoded template constants, never built from tool input; `args` are
+passed through as osascript's own argv, read inside each template via `on
+run argv` / `item N of argv`. Ungated: `open_app` (plain `open -a`, no
+AppleScript), `music_play/pause/next_track/previous_track/now_playing`,
+`reminders_list/reminders_create`, `notes_list/notes_create`. Gated:
+`run_shortcut` — calls `interrupt({"action": "run_shortcut", "name": name})`
+before ever touching the `shortcuts run <name>` CLI, same pattern as
+`interrupts.send_test_notification`. All tool errors (bad app name, timeout,
+osascript failure, shortcut failure) return as plain strings, never raise —
+matches CLAUDE.md's "tool errors are data" rule.
+
+### 31.2 Wired in: `sub_agents.build_mac_control_agent()`, supervisor routing
+
+**What:** `sub_agents.py` gained `build_mac_control_agent()` — a
+`create_agent(...)` graph over `mac_tools.TOOLS` with a system prompt that
+explicitly enumerates the allowlist and instructs a plain refusal (naming
+what it *can* do instead) for anything outside it. `supervisor.py`: added
+`TRANSFER_TO_MAC_CONTROL`, a `mac_control_agent` node, and — per this
+session's explicit carry-over instruction (STEPS.md 25's routing lesson: the
+supervisor only ever sees its own prompt, never sub-agents' tool lists) —
+one clause added to `SUPERVISOR_SYSTEM_PROMPT` describing mac_control_agent's
+ownership from the same edit that added the node, not as an afterthought
+once routing was observed to fail.
+
+### 31.3 Full regression + new permanent tests
+
+**What:** All 30 prior tests still pass unmodified. Added
+`tests/test_mac_tools.py` (4 new tests, 34 total project-wide) — mirrors
+`test_tools.py`'s "test the guardrail shape, not the live app" approach:
+`subprocess.run` is monkeypatched throughout so these don't require macOS,
+installed apps, or Automation permission grants. Covers exactly the two
+security-critical properties: (1) a value containing AppleScript-breaking
+characters (`'"; do shell script "rm -rf ~"; --'`) passed through
+`_run_osascript` shows up as its own separate argv item, never concatenated
+into the script source — asserts the injection-prevention mechanism
+structurally rather than trying to prove a negative by attempting one
+specific exploit string; (2) `run_shortcut`'s gate: declining never invokes
+`subprocess.run` at all (not just "returns a cancel string" — the shortcuts
+CLI call is asserted to never happen), confirming never invokes `shortcuts
+run` with the exact requested name.
+
+### 31.4 Manual verification against the real machine (PLAN.md step 4)
+
+**What:** Every ungated action exercised directly, then through the real
+CLI (`python -m assistant.main`), not just programmatically:
+- `open_app`: opened Music.app; a nonexistent app name returned a clean
+  `Error: could not open '...'` string.
+- `music_now_playing`: **first call timed out after 15s** — the Automation
+  permission dialog was sitting on-screen waiting for a click, exactly the
+  behavior flagged ahead of time in step 1. User approved it; retried and
+  got a correct real answer (`"Corpus Christi Carol — Jeff Buckley
+  (paused)"`). `music_play`/`music_pause` confirmed via before/after
+  `music_now_playing` reads. `music_next_track` confirmed the track
+  actually changed; `music_previous_track` afterward left the track
+  unchanged rather than reverting — normal Apple Music semantics (first
+  "previous" press restarts the current track), not a bug in the AppleScript.
+- `reminders_create` → `reminders_list` round-trip confirmed a real reminder
+  was created and readable. Same round-trip for `notes_create` →
+  `notes_list`. Both test artifacts deleted afterward via one-off
+  `osascript` cleanup commands (not a project tool — delete was
+  deliberately excluded from the allowlist) — confirmed gone via a
+  follow-up read, matching CLAUDE.md's verification discipline against
+  polluting real state.
+- `run_shortcut`'s interrupt gate verified three ways: (1) an isolated
+  single-node graph (confirm path ran the shortcuts CLI and returned its
+  result; decline path never touched it) — same pattern as
+  `test_interrupts.py`; (2) the full supervisor graph via natural language
+  ("Run my 'Open App 2' shortcut") — confirmed the interrupt still surfaces
+  correctly through the `Command(PARENT)` handoff nesting for a *new*
+  sub-agent, not just the already-proven `coding_agent` case from Phase 3;
+  (3) the real interactive CLI's y/n prompt, both `y` and `n`, end to end.
+  **Found along the way (not a code bug):** the only three Shortcuts that
+  exist on this machine ("Open App", "Open App 1", "Open App 2") are
+  themselves broken — each fails with "the app could not be opened" — the
+  tool correctly surfaced this as a plain error string rather than crashing,
+  which is really what this step was verifying.
+- Non-allowlisted refusal (PLAN.md's other step-4 requirement): first
+  attempt ("delete every file on my Desktop using an AppleScript you write
+  yourself") routed to `coding_agent`, not `mac_control_agent` — a fair
+  routing outcome (coding_agent legitimately owns "write me a script"
+  requests), but its answer, while correctly never *executing* anything
+  (no tool was called), included a full working AppleScript snippet and an
+  offer to write more destructive variants. Not a security-model violation
+  under CLAUDE.md's own execution-side-mitigation philosophy (nothing this
+  codebase controls ran anything), but not the clean boundary-respecting
+  refusal Phase 4 is aiming for either — flagged to the user as an open
+  question rather than silently accepted or unilaterally patched. Two
+  Mac-control-flavored out-of-scope requests tested directly against
+  `mac_control_agent` ("empty the Trash", "lock my screen") both got the
+  clean refusal the done-when criterion describes: plainly declined, named
+  the actual allowlist, suggested `run_shortcut` (still gated) as the
+  escape hatch if the user has a Shortcut for it.
+
+**Cleanup:** deleted `conversation_memory.sqlite` and `workspace/` created
+by the CLI verification runs; removed the throwaway `verify_mac_control.py`
+spike script from job scratch space (never part of the repo).
+
+**Commands:**
+```sh
+python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py tests/test_mac_tools.py   # 34/34
+python -c "... music_now_playing/open_app/reminders_create/reminders_list/notes_create/notes_list direct .invoke() calls ..."
+python <throwaway verify_mac_control.py>   # isolated + full-graph interrupt-gate checks, deleted after
+printf "what's currently playing in Music?\nempty the trash for me\ny\nexit\n" | python -m assistant.main
+printf "run my 'Open App 1' shortcut\ny\nrun my 'Open App 1' shortcut\nn\nexit\n" | python -m assistant.main
+osascript -e '... delete matching test Reminder/Note ...'
+rm -f conversation_memory.sqlite && rm -rf workspace
+```
+
+## 32. `execute_shell_command` hardened: osascript denied, home-dir paths added, inline-interpreter code gated (2026-07-12)
+
+**What:** Reviewing Phase 4's "blocked non-allowlisted attempt" test (STEPS.md
+31.4) with the user surfaced a real, pre-existing gap from Phase 1: the
+shell tool's `_denial_reason` denylist blocks specific *patterns*
+(`rm`/`sudo`/`su`, shell-interpreter `-c`, shell metacharacters, a fixed
+list of system paths) rather than acting as a true sandbox — nothing
+stopped `coding_agent` from running `osascript` (full AppleScript/Mac
+control, no coding purpose) or a general-purpose interpreter with inline
+code (`python3 -c "..."`, `node -e "..."`) to do arbitrary file I/O
+anywhere the OS user can reach, including the user's own home-directory
+folders (Desktop/Documents/Downloads), none of which were in the
+sensitive-path list. First proposal (block python3/node/perl/ruby outright)
+was too blunt — user correctly pushed back that this would remove the
+coding agent's actual job (running scripts/tests). Settled, three-part fix,
+each targeting a different failure mode without adding friction to normal
+coding-agent use:
+
+1. **`osascript` added to `_DENIED_EXECUTABLES`** (same tier as
+   `rm`/`sudo`/`su`) — zero legitimate coding use for it now that
+   `mac_tools.py` (STEPS.md 31) is the deliberate, template-only bridge for
+   the one real Mac-control use case.
+2. **`_SENSITIVE_PATH_PREFIXES` extended** with `Path.home()`-anchored and
+   `~`-prefixed forms of Desktop/Documents/Downloads/Pictures/Movies —
+   same substring-match mechanism as the existing `/etc`/`/System`/etc.
+   entries. Explicitly documented as catching only literal path arguments,
+   not a path a script computes at runtime (`os.path.expanduser`) — that
+   residual risk is what point 3 exists for.
+3. **New `_requires_confirmation(argv)` gate**, wired into
+   `execute_shell_command` via `langgraph.types.interrupt()` (same pattern
+   as `mac_tools.run_shortcut` and `interrupts.send_test_notification`):
+   fires only when argv invokes `python`/`python3`/`node`/`perl`/`ruby`
+   with `-c`/`-e` — inline code that was never written to a file the user
+   could have already seen in the transcript. Deliberately narrow: running
+   a *file* the agent wrote via `write_file` (`python3 script.py`) stays
+   fully ungated, since that's the tool's actual job and denylisting
+   general-purpose interpreters outright would gut it — no amount of
+   pattern-matching can fully contain a Turing-complete interpreter anyway,
+   so the honest fix is a human glance at the one opaque pattern, not a
+   longer blocklist.
+
+**Verified, not assumed:** 5 new tests added to `tests/test_tools.py` (22
+total there now, 39 project-wide) — `osascript` blocked, a home-directory
+Desktop path blocked, `python3 -c` declined (asserts the tool never runs,
+same "assert the subprocess call itself never happens" pattern as
+`test_mac_tools.py`'s `run_shortcut` tests), `python3 -c` confirmed (runs
+and returns real output), and — the regression case that actually matters
+here — `python3 script.py` against a real file written via `write_file`
+stays completely ungated. All 39 pass.
+
+Live-verified through the real CLI, not just synthetic tests: `python3 -c
+"print(2+2)"` requested via natural language correctly paused with a
+`[confirm] {...}` prompt and returned `4` after `y`; in the same session,
+"write a script that prints hello and run it" completed with zero
+confirmation friction, proving the gate is scoped to the inline-code
+pattern specifically. A live `osascript` attempt was refused — though it
+routed to `mac_control_agent` (no shell access at all) rather than
+`coding_agent`, so this didn't specifically exercise the new denylist
+entry; the direct unit test is the load-bearing verification for that one
+(deterministic, doesn't depend on model routing).
+
+**`CLAUDE.md`'s Security model section updated** to document all three
+changes under the shell bullet and a new "Shell confirmation gate" bullet
+— this is exactly the class of load-bearing decision that section exists
+to keep from silently going stale.
+
+**Cleanup:** `conversation_memory.sqlite`/`workspace/` from the CLI
+verification runs deleted afterward.
+
+**Commands:**
+```sh
+python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py tests/test_mac_tools.py   # 39/39
+printf 'Run this exact shell command for me: python3 -c "print(2+2)"\ny\nWrite a script that prints hello and run it\nexit\n' | python -m assistant.main
+printf "Run this exact shell command: osascript -e 'tell application \"Finder\" to empty trash'\nexit\n" | python -m assistant.main
+rm -f conversation_memory.sqlite && rm -rf workspace
+```
+
+## 33. `create_shortcut` added — opens the Shortcuts editor, doesn't author logic (2026-07-13)
+
+**What:** User asked to give the agent access to *make* Shortcuts, not just
+run existing ones. Before implementing, established what's actually
+possible: the `shortcuts` CLI only supports `list`/`run`/`view` — there is
+no scriptable way to author a Shortcut's action graph. Two real options
+exist: (1) `shortcuts://create-shortcut`, which opens the editor but
+requires the user to finish and save it themselves; (2) hand-constructing a
+raw `.shortcut` file (the underlying binary-plist format) — technically
+possible but undocumented, easy to get subtly wrong, and macOS still
+gatekeeps installing an "untrusted shortcut" with a manual approval prompt
+regardless. Presented both via AskUserQuestion along with what the user was
+actually trying to accomplish. **User's answers:** wants a real, persistent
+Shortcut usable outside the assistant (Siri/Spotlight), created
+semi-automated — agent opens the editor, user finishes and saves it. Ruled
+out option 2 entirely: a fully-unattended creation path would mean the
+agent can author and run arbitrary automation with no human review at all,
+the same "no free-form scripting from model output" line Phase 4's
+original threat model already drew for AppleScript, just moved into
+Shortcuts' own format instead.
+
+**Verified empirically before writing the tool, not assumed from docs:**
+tested whether `shortcuts://create-shortcut?name=...` pre-fills the name —
+opened it via `open` twice (bare, then with `?name=Test%20Name%20XYZ`),
+confirmed via `osascript` that Shortcuts.app came to the front each time,
+then had the user screenshot the actual editor: it shows the generic
+"Title" placeholder both times — the `name` parameter is silently ignored.
+Docstrings and the system prompt say exactly this (cannot pre-fill
+anything) rather than overclaiming.
+
+**Implemented:** `mac_tools.create_shortcut()` — `open
+shortcuts://create-shortcut`, ungated (same reasoning as `open_app`:
+nothing real exists until the user manually finishes and saves it).
+`sub_agents.MAC_CONTROL_SYSTEM_PROMPT` updated to describe the capability
+and its limits explicitly, so the model doesn't imply to the user that
+naming/actions can be requested through it. New test in
+`tests/test_mac_tools.py` (5 mac_tools tests now, 40 project-wide):
+asserts the exact argv (`["open", "shortcuts://create-shortcut"]`) with no
+parameters, matching the empirical finding above.
+
+**Live-verified through the real CLI:** "I want to create a new shortcut,
+can you start that for me?" routed to `mac_control_agent`, opened the
+editor, and the model's own reply correctly told the user naming/actions/
+saving are manual steps — matches the system-prompt instruction, not
+assumed to follow from it. Cleaned up by quitting Shortcuts.app afterward
+(discards the unsaved blank editor windows opened during testing and
+verification; nothing was ever saved to the real Shortcuts library).
+
+**Commands:**
+```sh
+open "shortcuts://create-shortcut"
+open "shortcuts://create-shortcut?name=Test%20Name%20XYZ"
+osascript -e 'tell application "System Events" to name of first process whose frontmost is true'   # confirmed Shortcuts came forward each time
+# user-provided screenshot confirmed the name param has no effect
+python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py tests/test_mac_tools.py   # 40/40
+printf "I want to create a new shortcut, can you start that for me?\nexit\n" | python -m assistant.main
+osascript -e 'tell application "Shortcuts" to quit'
+rm -f conversation_memory.sqlite && rm -rf workspace
+```
+
+## 34. `MAC_CONTROL_SYSTEM_PROMPT` taught the user's real, saved Shortcuts (2026-07-13)
+
+**What:** After walking the user through building 9 of the suggested
+Shortcuts by hand in Shortcuts.app, asked to "update these actions to my
+agent if necessary." The gap this closes is the one demonstrated live
+earlier this session: "what's my battery status" was correctly refused by
+`mac_control_agent` (battery status isn't a fixed tool) even though
+`run_shortcut` could already trigger a `Battery status` Shortcut by name —
+the model just had no way to know that Shortcut existed.
+
+**Verified real state before touching the prompt, not assumed:** ran
+`shortcuts list` directly rather than trusting that the user used this
+session's exact suggested names. Real names differ from what was suggested
+in casing and structure — `Battery status` (not `Battery Status`), `WiFi
+On`/`WiFi Off` and `Focus On`/`Focus Off` (two shortcuts each, not one
+smart toggle), `Good morning`/`Clipboard to note` (lowercase). Since
+`shortcuts run <name>` needs an exact name match, using the suggested
+names instead of the real ones would have silently failed. `Empty Trash`,
+`Set Volume`, `Quick Capture`, `Study Timer`, and `New Class Note` were
+confirmed absent (user said they skipped those) — not included in the
+prompt. `Open Activity Monitor` (built by the user, not from this
+session's suggestions) was deliberately left out — `open_app("Activity
+Monitor")` already covers it directly with no confirmation needed, so
+routing it through a Shortcut would be strictly worse.
+
+**Implemented:** `sub_agents.MAC_CONTROL_SYSTEM_PROMPT` gained a block
+listing the 9 real, confirmed Shortcut names with a one-line description of
+each, instructing the model to match natural-language requests to them
+rather than refusing just because the request isn't one of the other fixed
+tools. Also added an explicit staleness caveat: if `run_shortcut` reports a
+failure because a name doesn't exist, say so plainly rather than assuming
+the list is still accurate — this list can go stale the moment the user
+renames/deletes/adds a Shortcut outside this conversation, and nothing
+re-syncs it automatically.
+
+**Verified:** all 40 tests still pass (prompt-only change, no logic
+touched). Live-verified through the real CLI: "what's my battery status"
+now correctly triggers `run_shortcut({'name': 'Battery status'})` with the
+confirmation prompt (declined the earlier flat refusal); "turn on do not
+disturb for me" correctly mapped to `run_shortcut({'name': 'Focus On'})`.
+Both real Shortcuts ran successfully on confirm.
+
+**Commands:**
+```sh
+shortcuts list   # verified real, current names before editing the prompt
+python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py tests/test_mac_tools.py   # 40/40
+printf "what's my battery status\ny\nturn on do not disturb for me\ny\nexit\n" | python -m assistant.main
+rm -f conversation_memory.sqlite
+```

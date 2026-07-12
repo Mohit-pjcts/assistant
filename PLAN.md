@@ -158,10 +158,38 @@ new graph).
 
 ---
 
-## Phase 4 — Mac-native control — NOT STARTED
+## Phase 4 — Mac-native control — COMPLETE (2026-07-12/13)
 
 **Objective:** the agent can operate the Mac for a defined, allowlisted set
 of actions — and nothing else.
+
+**Delivered:** `assistant/mac_tools.py` — an `osascript`/`open`/`shortcuts`-CLI
+bridge behind a hard allowlist, argv-only subprocess execution throughout,
+model-supplied values passed as osascript's own argv rather than
+interpolated into script source (STEPS.md 30–31). Ungated: `open_app`,
+Music playback control + read, Reminders/Notes read+create, `create_shortcut`
+(opens a blank Shortcuts editor — no scriptable way to author a Shortcut's
+actual logic exists, confirmed empirically rather than assumed, STEPS.md 33).
+Gated behind a LangGraph interrupt regardless of name: `run_shortcut`. New
+`mac_control_agent` sub-agent wired into the supervisor with its ownership
+described in the routing prompt from the same edit that added the node
+(STEPS.md 31.2, applying the routing lesson from STEPS.md 25). Reviewing
+this phase's own non-allowlisted-refusal test also surfaced and closed a
+real, pre-existing gap in Phase 1's shell tool — `osascript` denial,
+home-directory sensitive paths, and a confirmation gate on inline
+interpreter code (`python3 -c`, etc.) that doesn't touch normal
+script-running usage (STEPS.md 32). 40 tests total project-wide, all
+passing; every allowlisted action verified live against the real machine,
+including the actual macOS Automation permission dialogs.
+
+**Scope note:** `create_shortcut` was added mid-phase, beyond the original
+step-1 checkpoint's allowlist, after the user asked for shortcut-creation
+access. Deliberately scoped down from "fully automate Shortcut creation"
+(which would mean authoring arbitrary automation with zero human review —
+ruled out, same "no free-form scripting from model output" line the
+original checkpoint drew for AppleScript) to "open a blank editor, user
+finishes and saves it" — a discussed narrowing, not the literal original
+ask (STEPS.md 33).
 
 **Steps:**
 1. Threat-model checkpoint FIRST: osascript means the agent controls the
@@ -178,9 +206,18 @@ of actions — and nothing else.
 4. Manually verify each allowlisted action, plus at least one blocked
    non-allowlisted attempt.
 
-**Done-when:** every allowlisted action works from the CLI; non-allowlisted
-requests are refused with a readable message; the confirmation gate fires on
-gated actions; STEPS.md updated.
+**Done-when (all met):** every allowlisted action works from the CLI ✓ —
+verified live against the real machine: `open_app`, Music
+play/pause/next/previous/now_playing, Reminders/Notes read+create
+round-tripped for real (test artifacts cleaned up afterward),
+`create_shortcut` opened the real Shortcuts editor, `run_shortcut` exercised
+through the actual interactive y/n prompt; non-allowlisted requests are
+refused with a readable message ✓ — "empty the Trash," "lock my screen" both
+got clean refusals naming the actual allowlist; the confirmation gate fires
+on gated actions ✓ — `run_shortcut`'s confirm/decline verified three ways
+(isolated graph, full supervisor handoff routing, real CLI prompt), plus the
+shell tool's new inline-code gate as a bonus beyond the original scope;
+STEPS.md updated ✓ (groups 29–33).
 
 ---
 
@@ -226,7 +263,10 @@ is portfolio-finished.
    adoption for the existing test files, optional GitHub Actions to run the
    suite.
 5. Final cost review: measure real daily spend from traces/Console; adjust
-   model assignments if needed.
+   model assignments if needed. Includes the Haiku evaluation deferred from
+   Phase 3 step 3 (STEPS.md 24/25): `research_agent` is the best candidate
+   (simplest, single-tool role) — decide using real LangSmith trace data,
+   not before it exists.
 
 **Done-when:** the briefing fires on schedule for a week without
 intervention; the spend cap is verified; the README and repo are presentable

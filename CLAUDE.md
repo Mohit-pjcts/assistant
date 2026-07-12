@@ -20,14 +20,17 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 4 (Mac-native control) not yet started; read
-  PLAN.md before beginning it.
+- **No active phase** — Phase 5 (Voice I/O) not yet started; read PLAN.md
+  before beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
   (STEPS.md groups 9–20)
 - Complete: Phase 3 — supervisor + 3 sub-agents, LangGraph handoff routing,
   interrupt-based confirmation gate (STEPS.md groups 21–25)
+- Complete: Phase 4 — Mac-native control via osascript/`open`/`shortcuts`
+  bridge + mac_control_agent, plus a shell-tool security hardening pass
+  (STEPS.md groups 29–33)
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -81,10 +84,22 @@ filtering content.
 
 - Shell: `shlex.split()` → argv list → `subprocess.run(shell=False)`. Never
   `shell=True`, never raw string execution.
-- Denylist blocks: `rm`/`sudo`/`su`; shell interpreters invoked with `-c`
-  (`bash -c` re-introduces full shell semantics even under shell=False); shell
-  metacharacters (`| ; && $(` backtick) checked as SUBSTRINGS within tokens
-  (shlex doesn't split on them — `ls&&rm` is one token); sensitive system paths.
+- Denylist blocks: `rm`/`sudo`/`su`/`osascript`; shell interpreters invoked
+  with `-c` (`bash -c` re-introduces full shell semantics even under
+  shell=False); shell metacharacters (`| ; && $(` backtick) checked as
+  SUBSTRINGS within tokens (shlex doesn't split on them — `ls&&rm` is one
+  token); sensitive system paths, including common home-directory folders
+  (Desktop/Documents/Downloads/Pictures/Movies) — this only catches literal
+  path arguments, not paths a script computes at runtime, which is what the
+  next bullet is for.
+- **Shell confirmation gate:** `execute_shell_command` interrupts for
+  confirmation when argv invokes a general-purpose interpreter
+  (python/python3/node/perl/ruby) with inline code (`-c`/`-e`) — the one
+  pattern where the code about to run was never written to a file first, so
+  nothing in the conversation has been reviewable ahead of time. Running a
+  *file* the agent already wrote via `write_file` (e.g. `python3 script.py`)
+  stays ungated — that's this tool's core job, and denylists can't fully
+  contain a general-purpose interpreter anyway (STEPS.md 32).
 - File tools: confined to `workspace/` anchored at the project root (not cwd);
   traversal rejected via resolve-then-relative_to; dotfiles hard-blocked
   independent of the containment check.

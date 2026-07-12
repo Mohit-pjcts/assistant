@@ -10,6 +10,10 @@ Mechanic verified against real execution before this file was written for
 real, not assumed — see STEPS.md 24: a standalone spike confirmed the
 handoff actually routes, the final message list has no orphaned tool calls,
 and checkpoint_ns nests automatically under the parent node's name.
+
+Extended thinking is explicitly disabled on the supervisor's model — see
+sub_agents.py's module docstring and STEPS.md 28 for why (a confirmed
+langchain-anthropic streaming bug, not something specific to this file).
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from langgraph.types import Command
 from assistant.sub_agents import (
     build_coding_agent,
     build_life_admin_agent,
+    build_mac_control_agent,
     build_research_agent,
 )
 
@@ -55,9 +60,11 @@ SUPERVISOR_SYSTEM_PROMPT = (
     "the task yourself. Hand off to coding_agent for file/shell tasks in "
     "the workspace, and also for any request to send a test/demo "
     "notification; research_agent for web search / current-events "
-    "questions; life_admin_agent for anything about email or calendar. If "
-    "the message is a plain greeting or doesn't need a specialist, answer "
-    "directly without transferring."
+    "questions; life_admin_agent for anything about email or calendar; "
+    "mac_control_agent for controlling this Mac directly — opening or "
+    "focusing an application, Music playback, Reminders, Notes, or running "
+    "a named Shortcut. If the message is a plain greeting or doesn't need a "
+    "specialist, answer directly without transferring."
 )
 
 
@@ -102,22 +109,31 @@ TRANSFER_TO_RESEARCH = _make_handoff_tool(
 TRANSFER_TO_LIFE_ADMIN = _make_handoff_tool(
     "life_admin_agent", "Transfer to the Gmail/Calendar specialist."
 )
+TRANSFER_TO_MAC_CONTROL = _make_handoff_tool(
+    "mac_control_agent",
+    "Transfer to the Mac-control specialist (apps, Music, Reminders, Notes, Shortcuts).",
+)
 
 
 def build_supervisor() -> CompiledStateGraph:
     """Build the supervisor sub-graph — a create_agent(...) ReAct loop whose
     tools are handoff tools, not real work tools."""
-    model = ChatAnthropic(model=SUPERVISOR_MODEL_NAME)
+    model = ChatAnthropic(model=SUPERVISOR_MODEL_NAME, thinking={"type": "disabled"})
     return create_agent(
         model=model,
-        tools=[TRANSFER_TO_CODING, TRANSFER_TO_RESEARCH, TRANSFER_TO_LIFE_ADMIN],
+        tools=[
+            TRANSFER_TO_CODING,
+            TRANSFER_TO_RESEARCH,
+            TRANSFER_TO_LIFE_ADMIN,
+            TRANSFER_TO_MAC_CONTROL,
+        ],
         system_prompt=SUPERVISOR_SYSTEM_PROMPT,
         name="supervisor",
     )
 
 
 def build_graph(
-    checkpointer: BaseCheckpointSaver,
+    checkpointer: BaseCheckpointSaver | None,
     coding_extra_tools: list[BaseTool] | None,
     mcp_tools: list[BaseTool],
 ) -> CompiledStateGraph:
@@ -129,7 +145,10 @@ def build_graph(
 
     Args:
         checkpointer: Owned and lifecycle-managed by the caller (main.py),
-            same contract as the old agent.build_agent().
+            same contract as the old agent.build_agent(). None when the
+            caller's own runtime manages persistence instead (e.g. the
+            LangGraph Studio dev server — see studio.py — which errors on
+            local_dev if the graph brings its own checkpointer).
         coding_extra_tools: Passed through to build_coding_agent() — used
             to wire in the Phase 3 step-5 dummy interrupt tool.
         mcp_tools: The full flat tool list from mcp_tools.load_mcp_tools();
@@ -139,16 +158,24 @@ def build_graph(
     builder.add_node(
         "supervisor",
         build_supervisor(),
-        destinations=("coding_agent", "research_agent", "life_admin_agent", END),
+        destinations=(
+            "coding_agent",
+            "research_agent",
+            "life_admin_agent",
+            "mac_control_agent",
+            END,
+        ),
     )
     builder.add_node("coding_agent", build_coding_agent(coding_extra_tools))
     builder.add_node("research_agent", build_research_agent())
     builder.add_node("life_admin_agent", build_life_admin_agent(mcp_tools))
+    builder.add_node("mac_control_agent", build_mac_control_agent())
 
     builder.add_edge(START, "supervisor")
     builder.add_edge("supervisor", END)  # default path when no handoff tool is called
     builder.add_edge("coding_agent", END)
     builder.add_edge("research_agent", END)
     builder.add_edge("life_admin_agent", END)
+    builder.add_edge("mac_control_agent", END)
 
     return builder.compile(checkpointer=checkpointer)

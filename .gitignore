@@ -14,3 +14,6 @@ credentials.json
 tokens.json
 .gmail-mcp/
 .config/google-calendar-mcp/
+
+# LangGraph Studio (`langgraph dev`) local runtime state
+.langgraph_api/

@@ -17,6 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_tavily import TavilySearch
+from langgraph.types import interrupt
 
 # Loaded here (not just in main.py) so this module doesn't depend on import
 # order — TavilySearch below reads TAVILY_API_KEY from the environment at
@@ -112,8 +113,12 @@ def write_file(path: str, content: str) -> str:
 
 # --- Shell tool ----------------------------------------------------------
 
-# Destructive commands, blocked outright regardless of arguments.
-_DENIED_EXECUTABLES = {"rm", "sudo", "su"}
+# Destructive commands, blocked outright regardless of arguments. osascript
+# is here (not just a shell interpreter) because it can fully control the
+# Mac via AppleScript — real capability with zero legitimate overlap with
+# this tool's job now that assistant/mac_tools.py exists as the deliberate,
+# template-only bridge for that (PLAN.md Phase 4 step 1).
+_DENIED_EXECUTABLES = {"rm", "sudo", "su", "osascript"}
 
 # Shell interpreters — invoking one with "-c" would run its argument as a
 # full shell script, defeating the argument-list execution model below.
@@ -122,6 +127,8 @@ _SHELL_EXECUTABLES = {"bash", "sh", "zsh", "csh", "tcsh", "ksh", "dash"}
 # Substrings (not exact tokens) because shlex.split() doesn't treat these as
 # delimiters by default — "ls&&rm -rf ~" parses to a single token "ls&&rm".
 _SHELL_METACHARACTERS = ("|", "&&", ";", "`", "$(")
+
+_HOME_DIR = str(Path.home())
 
 _SENSITIVE_PATH_PREFIXES = (
     "/etc",
@@ -134,7 +141,41 @@ _SENSITIVE_PATH_PREFIXES = (
     "/var",
     "/Applications",
     "/root",
+    # Common personal-data folders outside the workspace sandbox — the shell
+    # tool's cwd is confined to workspace/, but a command's own arguments
+    # can still name a path anywhere; these catch the naive/literal cases,
+    # not a script that computes the path at runtime (os.path.expanduser),
+    # which is why _requires_confirmation() below exists as a second layer.
+    f"{_HOME_DIR}/Desktop",
+    f"{_HOME_DIR}/Documents",
+    f"{_HOME_DIR}/Downloads",
+    f"{_HOME_DIR}/Pictures",
+    f"{_HOME_DIR}/Movies",
+    "~/Desktop",
+    "~/Documents",
+    "~/Downloads",
+    "~/Pictures",
+    "~/Movies",
 )
+
+# General-purpose interpreters invoked with inline code (-c/-e) rather than a
+# file: the one shell-tool pattern where the code about to run was never
+# written to a file via write_file first, so there's nothing in the
+# conversation to have already reviewed. Running a *file* the agent wrote
+# (e.g. "python3 script.py") stays ungated — that's this tool's core job and
+# already visible in the transcript; only the opaque inline form is gated.
+_INLINE_CODE_INTERPRETERS = {"python", "python3", "node", "perl", "ruby"}
+_INLINE_CODE_FLAGS = {"-c", "-e"}
+
+
+def _requires_confirmation(argv: list[str]) -> bool:
+    """True if argv runs inline code via a general-purpose interpreter."""
+    if not argv:
+        return False
+    executable = Path(argv[0]).name
+    if executable not in _INLINE_CODE_INTERPRETERS:
+        return False
+    return any(flag in argv[1:] for flag in _INLINE_CODE_FLAGS)
 
 
 def _denial_reason(argv: list[str]) -> str | None:
@@ -192,6 +233,11 @@ def execute_shell_command(command: str, timeout_seconds: int = 30) -> str:
     reason = _denial_reason(argv)
     if reason is not None:
         return f"Error: command blocked — {reason}"
+
+    if _requires_confirmation(argv):
+        approved = interrupt({"action": "execute_shell_command", "command": command})
+        if not approved:
+            return "Cancelled — user did not confirm."
 
     workspace_root = ensure_workspace_dir()
 

@@ -6,3 +6,6 @@ langchain-mcp-adapters==0.3.0
 langgraph>=0.2.0
 langgraph-checkpoint-sqlite>=2.0.0
 python-dotenv>=1.0.0
+
+# Dev-only: LangGraph Studio (`langgraph dev`), not needed to run `assistant`
+langgraph-cli[inmem]>=0.4.0
