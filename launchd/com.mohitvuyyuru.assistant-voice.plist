@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mohitvuyyuru.assistant-voice</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mohitvuyyuru/Documents/summer26/PA/.venv/bin/assistant-voice</string>
+    </array>
+
+    <!-- load_dotenv() searches from cwd; launchd's default cwd is / -->
+    <key>WorkingDirectory</key>
+    <string>/Users/mohitvuyyuru/Documents/summer26/PA</string>
+
+    <!-- MCP servers spawn `node` via PATH; launchd's default PATH lacks
+         /opt/homebrew/bin, which would silently drop Gmail/Calendar -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash (non-zero exit); stay quit after the menu bar's
+         intentional clean exit (code 0) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- A startup-time bug (e.g. missing API key) must not tight-loop -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Crash-traceback net only; the daemon's own rotating log at
+         voice_daemon.log is the primary log -->
+    <key>StandardOutPath</key>
+    <string>/Users/mohitvuyyuru/Library/Logs/PersonalAssistant/voice_daemon.launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mohitvuyyuru/Library/Logs/PersonalAssistant/voice_daemon.launchd.err.log</string>
+</dict>
+</plist>

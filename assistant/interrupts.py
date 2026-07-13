@@ -18,7 +18,16 @@ def send_test_notification(message: str) -> str:
     Args:
         message: The notification text that would be "sent".
     """
-    approved = interrupt({"action": "send_test_notification", "message": message})
+    approved = interrupt(
+        {
+            "action": "send_test_notification",
+            "message": message,
+            # Ready-to-speak phrasing for the voice daemon's confirmation
+            # gate — the structured fields above stay the machine-readable
+            # payload; this is only ever read aloud.
+            "spoken_prompt": f"Permission to send a notification saying '{message}'?",
+        }
+    )
     if not approved:
         return "Cancelled — user did not confirm."
     return f"[simulated] notification sent: {message!r}"

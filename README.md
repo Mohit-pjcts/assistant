@@ -1,6 +1,6 @@
 # assistant
 
-A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI with persistent conversation memory, a supervisor that routes to specialist sub-agents (coding, research, email/calendar, Mac control), and a security model built around the assumption that anything a tool returns — a search result, an email, a calendar event — could be adversarial.
+A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI — and as an always-on voice daemon in the macOS menu bar — with persistent conversation memory, a supervisor that routes to specialist sub-agents (coding, research, email/calendar, Mac control), and a security model built around the assumption that anything a tool returns — a search result, an email, a calendar event — could be adversarial.
 
 Not "Jarvis." Deliberately.
 
@@ -11,7 +11,8 @@ Not "Jarvis." Deliberately.
 - **Research**: search the web (Tavily).
 - **Life-admin**: search and read Gmail (read-only — cannot send, reply, delete, or modify); search and read Google Calendar (read-only — cannot create, update, delete, or respond to events).
 - **Mac control**: open/focus an app, control Music.app playback, read/create Reminders and Notes, start a new Shortcut in the editor (you finish and save it), and run a named Shortcut — the last one always asks for confirmation first.
-- Side-effectful or opaque actions (running a named Shortcut, inline interpreter code) pause the conversation for an explicit y/n before executing, via a real LangGraph interrupt — not just a prompt instruction.
+- **Voice**: press Option+Return from any application to talk to it and hear it answer — an always-on menu bar daemon (🎙/🔴/💭 state), speech-to-text running fully locally (faster-whisper, no audio ever leaves the machine), replies spoken via macOS `say`. Voice and text share one conversation history, and the confirmation gate works spoken too: the daemon asks the question aloud and records your yes/no.
+- Side-effectful or opaque actions (running a named Shortcut, inline interpreter code) pause the conversation for an explicit confirmation before executing, via a real LangGraph interrupt — not just a prompt instruction. In the text CLI that's a y/n prompt; in voice mode the question is spoken and the answer parsed fail-closed (anything that isn't a clear yes — mumble, silence, timeout — declines).
 
 Email, calendar, and Shortcut content are all treated as untrusted input: the system prompts tell the model not to follow instructions embedded in message/event content or blindly trust what a Shortcut does, and — more importantly — the tools themselves are built so an adversarial instruction has nothing dangerous to reach even if the model is fooled. See [Security model](#security-model) below.
 
@@ -28,7 +29,10 @@ assistant/
 ├── mac_tools.py     # Phase 4: osascript/open/shortcuts-CLI bridge behind a hard allowlist
 ├── mcp_tools.py     # Phase 2 MCP integration: Gmail + Calendar, async, with interceptors
 ├── interrupts.py    # Dummy confirmation-gated tool — the interrupt mechanic's test fixture
+├── voice_io.py      # Phase 5: mic capture, local faster-whisper STT, `say` TTS, confirmation parsing
+├── voice_daemon.py  # Phase 5: always-on menu bar daemon — global hotkey, same graph as the CLI
 └── memory.py        # get_checkpointer() — async context manager over AsyncSqliteSaver
+launchd/          # LaunchAgent plist for starting the voice daemon at login
 tests/            # pytest-shaped, runnable directly with plain python
 workspace/        # the ONLY directory file/shell tools (and confined MCP downloads) may touch — runtime-created
 PLAN.md           # six-phase build plan; only one phase is ever "active"
@@ -36,6 +40,8 @@ STEPS.md          # full build log — every decision, bug, and why
 ```
 
 A hand-built outer `StateGraph` (`supervisor.py`) holds a routing supervisor and four sub-agents, each itself a [`langchain.agents.create_agent`](https://docs.langchain.com/oss/python/langchain/agents) graph embedded as a node. Routing uses LangGraph's `Command`-based handoff-tool pattern — the supervisor never sees a sub-agent's own tool list, only what its own system prompt says that sub-agent owns, so every new sub-agent's capabilities have to be described in `SUPERVISOR_SYSTEM_PROMPT` explicitly. `checkpoint_ns` nests automatically per sub-agent under the shared checkpointer. `tools.py`/`mac_tools.py`'s tools are synchronous and hand-written; `mcp_tools.py`'s tools are loaded asynchronously at startup from locally-run MCP servers and merged in. Because MCP-loaded tools only support async invocation, the whole CLI runs on `graph.ainvoke()`. LangSmith tracing is wired up (`LANGCHAIN_TRACING_V2`) so routing decisions and sub-agent tool calls are inspectable as real trace trees, not just final answers. A `langgraph dev` entry point (`studio.py`) exposes the same graph to LangGraph Studio for local, visual debugging.
+
+Voice mode (`voice_daemon.py`) is a wrapper around the *same* graph, not separate agent logic: the daemon invokes the identical `graph.ainvoke()` path with the same thread ID as the text CLI, so a conversation started by voice can be continued by keyboard and vice versa. Internally it's three coordinated threads — a rumps menu bar app on the main thread (an AppKit hard requirement; all UI mutation is marshaled there), a dedicated asyncio loop for graph/STT/TTS work, and pynput's global-hotkey listener — with a small IDLE → RECORDING → PROCESSING state machine in between, and an extra ANSWERING state for spoken confirmation answers (auto-records after the question; one keypress submits).
 
 ## Setup
 
@@ -68,6 +74,7 @@ cp .env.example .env   # then fill in the real values
 | `GMAIL_MCP_SERVER_PATH` | Gmail | Path to a built `Gmail-MCP-Server/dist/index.js` |
 | `GOOGLE_CALENDAR_MCP_SERVER_PATH` | Calendar | Path to a built `google-calendar-mcp/build/index.js` |
 | `GOOGLE_CALENDAR_MCP_CREDENTIALS` | Calendar | Path to that server's `gcp-oauth.keys.json` |
+| `ASSISTANT_TTS_VOICE` | Voice (optional) | TTS voice name, default `Ava (Premium)`; falls back to the system voice with a logged warning if not installed |
 
 Gmail and Calendar are optional at startup — if their env vars are unset or the servers aren't built yet, `main.py` prints a warning and runs without the `life_admin_agent` tools. Mac control needs no setup beyond running on macOS — see the permissions note below.
 
@@ -110,6 +117,38 @@ Both apps stay in Google's "Testing" publish status by default, which means toke
 
 No API keys or config needed — but the first time each AppleScript-controlled app (Music, Reminders, Notes) or `run_shortcut` (Shortcuts automation) actually runs, macOS shows a one-time Automation permission dialog asking whether to let your terminal/Python process control that app. Click Allow. This is a per-app, first-use-only prompt — nothing to configure ahead of time.
 
+### Voice mode
+
+Speech-to-text runs fully locally via [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base` model, CPU) — no per-utterance API cost, no audio leaving the machine. The model downloads itself on first run.
+
+**Nicer voice (optional, recommended):** macOS's default `say` voice is robotic. Download an Enhanced/Premium voice once — System Settings → Accessibility → Spoken Content → System Voice → Manage Voices… — and either grab "Ava (Premium)" (the default this project looks for) or set `ASSISTANT_TTS_VOICE` to whichever you picked.
+
+**Run it directly:**
+
+```sh
+.venv/bin/assistant-voice
+```
+
+A 🎙 icon appears in the menu bar. Press **Option+Return** (from any application) to start recording — 🔴 — and again to stop and submit; the reply is spoken and logged. When a gated action needs confirmation, the daemon speaks the question and immediately starts recording your answer — say yes or no, then one Option+Return submits it. Quit from the menu bar icon. Transcripts, confirmation outcomes, and errors go to a self-rotating log at `~/Library/Logs/PersonalAssistant/voice_daemon.log`.
+
+**Permissions (the fiddly part):** global hotkey listening needs the **Input Monitoring** TCC grant, and — if you install the launchd autostart below — reading a project that lives under `~/Documents` needs **Full Disk Access** too, because a launchd-spawned process doesn't inherit your terminal's folder grants. The catch (learned the hard way, STEPS.md 42): the venv's Python resolves through *two* distinct executables — the framework stub that boots the interpreter and the `Python.app` bundle it re-execs into — and macOS attributes grants per-binary, so **both** need **both** grants. In each of Input Monitoring and Full Disk Access, click **+**, press Cmd+Shift+G, and add each of (adjusting the version to your Homebrew install):
+
+```
+/opt/homebrew/Cellar/python@3.12/<version>/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+/opt/homebrew/Cellar/python@3.12/<version>/Frameworks/Python.framework/Versions/3.12/Resources/Python.app
+```
+
+Known wart: those grants pin to the versioned Cellar path, so a `brew upgrade python@3.12` silently kills the daemon until you re-add them. Wrapping the daemon in a stable `.app` bundle (so grants attach to a bundle ID) is queued as Phase 6 polish.
+
+**Start at login (optional):** a ready-made LaunchAgent lives in `launchd/`. It pins the working directory (for `.env` discovery) and PATH (so the Node-based MCP servers still spawn — launchd's default PATH lacks `/opt/homebrew/bin`), restarts the daemon on a crash, and stays quit after an intentional menu bar Quit:
+
+```sh
+cp launchd/com.mohitvuyyuru.assistant-voice.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mohitvuyyuru.assistant-voice.plist
+```
+
+To uninstall: `launchctl bootout gui/$(id -u)/com.mohitvuyyuru.assistant-voice` and delete the plist.
+
 ### Run
 
 ```sh
@@ -130,7 +169,9 @@ Threat model: any tool that touches the web, email, calendar, or Shortcut conten
 - **Gmail**: OAuth grant itself is scoped to `gmail.readonly` — send/reply/delete/modify aren't just hidden from the model, the token can't do them. Two tools (`download_attachment`, `download_email`) write to disk from inside the separate Node server process, outside `tools.py`'s own sandbox — an interceptor forces their save path into `workspace/` and reduces filenames to their basename, regardless of what the model requests.
 - **Calendar**: the OAuth grant is *not* scope-restricted (no self-hosted Calendar MCP server was found that supports it — see STEPS.md §17). Read-only is enforced by an `ENABLED_TOOLS` server-side allowlist plus a client-side interceptor that refuses write-tool calls before they reach the server. The interceptor caught a real gap during development: the server registers `manage-accounts` regardless of the allowlist.
 - **Cost**: an MCP tool that defaults to expanding up to 50 full email threads into context on a single call is capped to 10 by an interceptor, rather than trusting the model to pass a small limit.
-- **Standing confirmation rule**: any side-effectful or opaque action — running a named Shortcut, inline interpreter code in the shell tool — pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit y/n before executing. This is implemented, not aspirational: the interrupt mechanic is demonstrated end-to-end (both confirm and decline paths) through the real CLI, not just tested in isolation.
+- **Standing confirmation rule**: any side-effectful or opaque action — running a named Shortcut, inline interpreter code in the shell tool — pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit confirmation before executing. This is implemented, not aspirational: the interrupt mechanic is demonstrated end-to-end (both confirm and decline paths) through the real CLI, not just tested in isolation.
+- **Voice confirmation fails closed**: the spoken answer to a confirmation question only approves on a recognized affirmative — a mistranscription, an ambiguous phrase, silence, or a 30-second timeout all decline. Decline-words win when both appear ("no, don't go ahead" declines). A side-effectful action should never happen because the STT misheard.
+- **Voice-mode surface notes**: the global hotkey listener is non-suppressing — Option+Return still reaches whatever app is frontmost (accepted tradeoff, low collision in practice). The daemon's log records every transcript and confirmation outcome, an audit trail for actions approved by voice.
 
 Full reasoning, including several things that went wrong during development (a credentials-file mistake, an accidental token print, and a real gap in the shell denylist found by testing this project's own "refuse cleanly" behavior) and how they were caught, is in [STEPS.md](STEPS.md).
 
@@ -141,8 +182,8 @@ Six phases, one active at a time — see [PLAN.md](PLAN.md) for the full plan.
 1. ✅ Foundations — single agent, tool-calling, persistent memory
 2. ✅ Gmail + Calendar via MCP
 3. ✅ Multi-agent split — supervisor + coding/research/life-admin sub-agents, LangSmith tracing, interrupt-based confirmation gate
-4. ✅ Mac-native control — allowlisted `osascript`/`open`/`shortcuts` actions, mac_control sub-agent (this README's state)
-5. Voice I/O — local STT, `say` for TTS
+4. ✅ Mac-native control — allowlisted `osascript`/`open`/`shortcuts` actions, mac_control sub-agent
+5. ✅ Voice I/O — local faster-whisper STT, always-on hotkey daemon in the menu bar, spoken confirmation gate, launchd autostart (this README's state)
 6. Proactivity — scheduled morning briefing, repo polish
 
 ## Development
@@ -153,6 +194,8 @@ Six phases, one active at a time — see [PLAN.md](PLAN.md) for the full plan.
 .venv/bin/python tests/test_mcp_tools.py
 .venv/bin/python tests/test_interrupts.py
 .venv/bin/python tests/test_mac_tools.py
+.venv/bin/python tests/test_supervisor.py
+.venv/bin/python tests/test_voice_io.py
 ```
 
-No test framework dependency yet — each file is pytest-shaped (`def test_...(): assert ...`) but runnable directly with plain `python`. `test_mac_tools.py` monkeypatches `subprocess.run` throughout, so it runs anywhere — it doesn't require macOS, installed apps, or Automation permission grants; that live verification is manual and recorded in STEPS.md instead.
+No test framework dependency yet — each file is pytest-shaped (`def test_...(): assert ...`) but runnable directly with plain `python`. `test_mac_tools.py` and `test_voice_io.py` monkeypatch `subprocess.run` and hardware-touching internals throughout, so they run anywhere — no macOS apps, microphone, or permission grants required; that live verification is manual and recorded in STEPS.md instead.

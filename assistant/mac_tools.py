@@ -126,6 +126,62 @@ def music_now_playing() -> str:
     return _run_osascript(_MUSIC_NOW_PLAYING)
 
 
+_MUSIC_PLAY_SONG = """
+on run argv
+    set songName to item 1 of argv
+    set artistName to item 2 of argv
+    tell application "Music"
+        if artistName is "" then
+            set theTracks to (every track of library playlist 1 whose name contains songName)
+        else
+            set theTracks to (every track of library playlist 1 whose name contains songName and artist contains artistName)
+        end if
+        if (count of theTracks) is 0 then
+            return "No match found for: " & songName
+        end if
+        set theTrack to item 1 of theTracks
+        play theTrack
+        return "Playing: " & (name of theTrack) & " — " & (artist of theTrack)
+    end tell
+end run
+"""
+
+_MUSIC_PLAY_PLAYLIST = """
+on run argv
+    set playlistName to item 1 of argv
+    tell application "Music"
+        if not (exists playlist playlistName) then
+            return "No playlist found named: " & playlistName
+        end if
+        play playlist playlistName
+        return "Playing playlist: " & playlistName
+    end tell
+end run
+"""
+
+
+@tool
+def music_play_song(song: str, artist: str = "") -> str:
+    """Search the Music library for a song by name (optionally narrowed by
+    artist) and play the first match.
+
+    Args:
+        song: Song title, or a substring of it, to search for.
+        artist: Optional artist name to narrow the search.
+    """
+    return _run_osascript(_MUSIC_PLAY_SONG, [song, artist])
+
+
+@tool
+def music_play_playlist(name: str) -> str:
+    """Play a playlist in Music.app by its exact name.
+
+    Args:
+        name: The playlist's exact name, as it appears in Music.app.
+    """
+    return _run_osascript(_MUSIC_PLAY_PLAYLIST, [name])
+
+
 # --- Reminders --------------------------------------------------------
 
 _REMINDERS_LIST = """
@@ -279,7 +335,13 @@ def run_shortcut(name: str) -> str:
         name: The exact name of the Shortcut to run, as it appears in the
             Shortcuts app.
     """
-    approved = interrupt({"action": "run_shortcut", "name": name})
+    approved = interrupt(
+        {
+            "action": "run_shortcut",
+            "name": name,
+            "spoken_prompt": f"Permission to run the '{name}' shortcut?",
+        }
+    )
     if not approved:
         return "Cancelled — user did not confirm."
 
@@ -308,6 +370,8 @@ UNGATED_TOOLS = [
     music_next_track,
     music_previous_track,
     music_now_playing,
+    music_play_song,
+    music_play_playlist,
     reminders_list,
     reminders_create,
     notes_list,

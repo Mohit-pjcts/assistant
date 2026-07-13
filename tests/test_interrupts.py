@@ -49,10 +49,16 @@ async def test_interrupt_then_resume_confirmed() -> None:
             result = await graph.ainvoke({"result": None}, config=config)
             assert "__interrupt__" in result, f"expected an interrupt, got {result}"
             payload = result["__interrupt__"][0].value
-            assert payload == {
-                "action": "send_test_notification",
-                "message": "test notification",
-            }, f"unexpected interrupt payload: {payload}"
+            assert payload["action"] == "send_test_notification", (
+                f"unexpected interrupt payload: {payload}"
+            )
+            assert payload["message"] == "test notification", (
+                f"unexpected interrupt payload: {payload}"
+            )
+            # The voice daemon reads this aloud instead of the raw payload.
+            assert "test notification" in payload["spoken_prompt"], (
+                f"spoken_prompt should mention the message: {payload}"
+            )
 
             resumed = await graph.ainvoke(Command(resume=True), config=config)
             assert resumed["result"] == "[simulated] notification sent: 'test notification'", (

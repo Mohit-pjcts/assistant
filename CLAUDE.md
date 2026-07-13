@@ -20,8 +20,9 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 5 (Voice I/O) not yet started; read PLAN.md
-  before beginning it.
+- **No active phase** — Phase 7 (Memory: short-term compaction + long-term
+  facts) is next; read PLAN.md before beginning it, including the
+  context-leakage checkpoint carried over from Phase 6.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
@@ -31,6 +32,17 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 - Complete: Phase 4 — Mac-native control via osascript/`open`/`shortcuts`
   bridge + mac_control_agent, plus a shell-tool security hardening pass
   (STEPS.md groups 29–33)
+- Complete: Phase 5 — voice I/O: local faster-whisper STT, always-on
+  Option+Return hotkey daemon (pynput + rumps menu bar), spoken
+  confirmation gate, launchd autostart (STEPS.md groups 37–43)
+- Complete: Phase 6 — fixed cross-agent handoff routing: sub-agents now loop
+  back through a re-evaluating supervisor instead of stalling after the
+  first specialist, with a correctly turn-scoped handoff cap (STEPS.md
+  groups 47–48)
+
+Roadmap was renumbered 2026-07-13: four phases (6 handoff-fix, 7 memory,
+8 voice-upgrade, 9 dashboard) inserted ahead of the original proactivity/
+polish phase, now Phase 10. See PLAN.md for all phase plans.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

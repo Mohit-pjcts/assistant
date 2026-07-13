@@ -15,5 +15,15 @@ tokens.json
 .gmail-mcp/
 .config/google-calendar-mcp/
 
+# Conversation memory (SQLite checkpointer) — private conversation history,
+# incl. anything the email/calendar tools pulled into context. *.db above
+# does not match .sqlite, which is what memory.py actually writes.
+*.sqlite
+
 # LangGraph Studio (`langgraph dev`) local runtime state
 .langgraph_api/
+
+# Claude Code session state — includes isolated worktrees for background
+# jobs, which are themselves separate git repos and must never be added as
+# gitlinks to this one.
+.claude/

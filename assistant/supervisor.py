@@ -14,6 +14,38 @@ and checkpoint_ns nests automatically under the parent node's name.
 Extended thinking is explicitly disabled on the supervisor's model — see
 sub_agents.py's module docstring and STEPS.md 28 for why (a confirmed
 langchain-anthropic streaming bug, not something specific to this file).
+
+Parallel tool calls are explicitly disabled on the supervisor's model via
+NoParallelHandoffs below — see STEPS.md 36 for the real, live-observed
+failure this closes: a single turn spanning multiple domains ("check my
+calendar AND search the web AND play music") made the supervisor call two
+transfer_to_* tools in the same AIMessage. Each handoff tool returns a
+Command(graph=Command.PARENT) trying to route the outer graph to a
+different node; only one of the two ever wins, and the other's tool_use
+block is left with no matching tool_result — a state corruption Anthropic's
+API rejects on every subsequent call to that thread ("tool_use ids were
+found without tool_result blocks"), permanently breaking the conversation
+until manually repaired. This wasn't caught in Phase 3's testing because
+every regression scenario there only ever exercised one domain per turn.
+
+Phase 6 (STEPS.md 47/48): the ORIGINAL fix for STEPS.md 36 over-corrected —
+it also taught the supervisor "you can only transfer to ONE specialist per
+turn" in the system prompt, which combined with every sub-agent node
+routing straight to END meant a compound, sequential request (e.g. "get
+alfredo ingredients and save them to Notes") stalled after the first
+specialist: nothing routed control back to the supervisor to dispatch the
+second one. NoParallelHandoffs (one handoff tool call per model turn) was
+never the problem and stays; the fix is a LOOP — sub-agents route back to
+"supervisor" (not END) via _route_after_specialist below, so the supervisor
+re-evaluates with the completed specialist's output already merged into
+its context (verified in the repro: STEPS.md 47) and can dispatch the next
+one, turn after turn, until it judges the request satisfied and answers
+directly (the existing supervisor -> END default edge). The system prompt
+was rewritten from "only ONE specialist per turn" to "one at a time, keep
+going until done." _route_after_specialist enforces a hard MAX_HANDOFFS_PER_TURN
+cap by counting completed transfer_to_* handoffs in the message history —
+a structural guard, not a prompt instruction, so a supervisor that can't
+decide it's done can't spin the graph forever.
 """
 
 from __future__ import annotations
@@ -22,8 +54,9 @@ from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AnyMessage, ToolMessage
+from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -64,8 +97,31 @@ SUPERVISOR_SYSTEM_PROMPT = (
     "mac_control_agent for controlling this Mac directly — opening or "
     "focusing an application, Music playback, Reminders, Notes, or running "
     "a named Shortcut. If the message is a plain greeting or doesn't need a "
-    "specialist, answer directly without transferring."
+    "specialist, answer directly without transferring. Transfer to only "
+    "ONE specialist at a time, even for a request that spans multiple "
+    "domains — after that specialist responds, you will see its result "
+    "and can transfer to the next specialist the request needs. Keep "
+    "doing this, one specialist per turn, until every part of the "
+    "request has been handled, then answer directly summarizing what was "
+    "done instead of transferring again."
 )
+
+
+class NoParallelHandoffs(AgentMiddleware):
+    """Forces the supervisor to call at most one tool per turn.
+
+    Without this, a compound request spanning multiple domains can make the
+    model call two transfer_to_* tools in one AIMessage — see this module's
+    docstring and STEPS.md 36 for the real corruption that caused, and why
+    a hard cap here (not just the system-prompt instruction above) is the
+    actual fix: prompt instructions are a hint the model can ignore under
+    enough pressure, this is a structural guarantee via the Anthropic API's
+    own disable_parallel_tool_use.
+    """
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001, ANN201
+        request.model_settings["parallel_tool_calls"] = False
+        return await handler(request)
 
 
 def _make_handoff_tool(agent_name: str, description: str) -> BaseTool:
@@ -114,6 +170,99 @@ TRANSFER_TO_MAC_CONTROL = _make_handoff_tool(
     "Transfer to the Mac-control specialist (apps, Music, Reminders, Notes, Shortcuts).",
 )
 
+# Hard ceiling on completed handoffs within a single outer-graph turn. Purely
+# a runaway-loop guard (cost + hang risk) — a real multi-hop request needs at
+# most one handoff per sub-agent, so this is generous headroom, not a tuned
+# limit. Enforced structurally in _route_after_specialist, not left to the
+# supervisor's own judgment: a model that can't decide it's done must not be
+# able to spin the graph forever.
+MAX_HANDOFFS_PER_TURN = 6
+
+
+_ROUTING_BRIDGE_TEXT = (
+    "[Routing note, not from the user] The specialist above has finished "
+    "responding. If the original request still has an unhandled part, "
+    "transfer to the specialist for it now. Otherwise respond directly, "
+    "summarizing what was done."
+)
+
+# Tags a routing-bridge HumanMessage so _count_handoffs can tell it apart
+# from a genuine user turn (see that function's docstring for why the
+# distinction matters).
+_BRIDGE_MARKER_KEY = "phase6_routing_bridge"
+
+
+def _make_routing_bridge() -> HumanMessage:
+    return HumanMessage(
+        content=_ROUTING_BRIDGE_TEXT, additional_kwargs={_BRIDGE_MARKER_KEY: True}
+    )
+
+
+def _is_routing_bridge(message: AnyMessage) -> bool:
+    return bool(getattr(message, "additional_kwargs", {}).get(_BRIDGE_MARKER_KEY))
+
+
+def _count_handoffs(messages: list[AnyMessage]) -> int:
+    """Count completed transfer_to_* handoffs since the current top-level
+    user turn started — NOT the thread's lifetime total.
+
+    This project's fixed THREAD_ID (agent.py) means one thread persists
+    across every CLI invocation forever, so `messages` keeps every past
+    turn's handoffs too. An earlier version of this function summed the
+    whole history, which meant a thread with enough accumulated handoffs
+    from PAST turns would already be at/over MAX_HANDOFFS_PER_TURN before
+    the CURRENT turn even started its first specialist — routing straight
+    to END and silently defeating the loop-back fix on any thread beyond
+    its first few turns. Caught by inspecting the real conversation_memory
+    .sqlite thread (99 messages of real accumulated use) after a fresh,
+    short-lived test thread had shown the loop working correctly — the bug
+    only manifests once real history has accumulated (STEPS.md 48).
+
+    Scoped instead to messages since the most recent GENUINE HumanMessage
+    (skipping this module's own _make_routing_bridge() insertions, which
+    are also HumanMessages — counting from the last HumanMessage of ANY
+    kind would anchor on the bridge from the previous loop iteration
+    instead of the real turn boundary, undercounting just as badly).
+
+    Derived from the synthetic ToolMessages _make_handoff_tool creates
+    (name=f"transfer_to_{agent_name}") rather than a separate counter field
+    on GraphState — keeps GraphState's schema exactly matching create_agent's
+    own AgentState (see the class docstring), which is what lets the
+    supervisor and every sub-agent be embedded as subgraph nodes with no
+    manual state-transform shim.
+    """
+    turn_start = 0
+    for i, m in enumerate(messages):
+        if isinstance(m, HumanMessage) and not _is_routing_bridge(m):
+            turn_start = i
+    return sum(
+        1
+        for m in messages[turn_start:]
+        if isinstance(m, ToolMessage) and (m.name or "").startswith("transfer_to_")
+    )
+
+
+def _route_after_specialist(state: GraphState) -> Command:
+    """Outer-graph node every sub-agent routes to after finishing.
+
+    Not a bare conditional-edge function: re-invoking the supervisor's model
+    on history that ends in an AIMessage (exactly what a sub-agent's own
+    final answer leaves behind) is shaped like an assistant-message prefill,
+    which Anthropic's API rejects with a 400 on Sonnet 5 (verified against
+    the real API while building this — the very first version of this loop
+    used a plain path function and hit that error immediately). A HumanMessage
+    bridge keeps the conversation ending in a non-assistant turn before the
+    next model call. It never reaches the user — main.py only ever renders
+    the final message, and once the supervisor answers or hands off again
+    this bridge is no longer the last message in state.
+
+    Capped by MAX_HANDOFFS_PER_TURN so a supervisor that never decides it's
+    done can't spin the graph forever.
+    """
+    if _count_handoffs(state["messages"]) >= MAX_HANDOFFS_PER_TURN:
+        return Command(goto=END)
+    return Command(goto="supervisor", update={"messages": [_make_routing_bridge()]})
+
 
 def build_supervisor() -> CompiledStateGraph:
     """Build the supervisor sub-graph — a create_agent(...) ReAct loop whose
@@ -128,6 +277,7 @@ def build_supervisor() -> CompiledStateGraph:
             TRANSFER_TO_MAC_CONTROL,
         ],
         system_prompt=SUPERVISOR_SYSTEM_PROMPT,
+        middleware=[NoParallelHandoffs()],
         name="supervisor",
     )
 
@@ -170,12 +320,23 @@ def build_graph(
     builder.add_node("research_agent", build_research_agent())
     builder.add_node("life_admin_agent", build_life_admin_agent(mcp_tools))
     builder.add_node("mac_control_agent", build_mac_control_agent())
+    builder.add_node(
+        "route_after_specialist",
+        _route_after_specialist,
+        destinations=("supervisor", END),
+    )
 
     builder.add_edge(START, "supervisor")
     builder.add_edge("supervisor", END)  # default path when no handoff tool is called
-    builder.add_edge("coding_agent", END)
-    builder.add_edge("research_agent", END)
-    builder.add_edge("life_admin_agent", END)
-    builder.add_edge("mac_control_agent", END)
+    # Loop back through route_after_specialist instead of ending outright: a
+    # multi-hop request (STEPS.md 47) needs the supervisor to see this
+    # specialist's output and decide whether another handoff is needed.
+    for agent_name in (
+        "coding_agent",
+        "research_agent",
+        "life_admin_agent",
+        "mac_control_agent",
+    ):
+        builder.add_edge(agent_name, "route_after_specialist")
 
     return builder.compile(checkpointer=checkpointer)

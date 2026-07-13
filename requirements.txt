@@ -6,6 +6,11 @@ langchain-mcp-adapters==0.3.0
 langgraph>=0.2.0
 langgraph-checkpoint-sqlite>=2.0.0
 python-dotenv>=1.0.0
+faster-whisper>=1.2.0
+sounddevice>=0.5.0
+numpy>=1.26.0
+pynput>=1.8.0
+rumps>=0.4.0; sys_platform == "darwin"
 
 # Dev-only: LangGraph Studio (`langgraph dev`), not needed to run `assistant`
 langgraph-cli[inmem]>=0.4.0

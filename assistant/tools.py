@@ -235,7 +235,13 @@ def execute_shell_command(command: str, timeout_seconds: int = 30) -> str:
         return f"Error: command blocked — {reason}"
 
     if _requires_confirmation(argv):
-        approved = interrupt({"action": "execute_shell_command", "command": command})
+        approved = interrupt(
+            {
+                "action": "execute_shell_command",
+                "command": command,
+                "spoken_prompt": f"Permission to run inline interpreter code: {command}?",
+            }
+        )
         if not approved:
             return "Cancelled — user did not confirm."
 

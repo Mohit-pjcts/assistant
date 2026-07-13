@@ -74,6 +74,24 @@ def test_open_app_uses_plain_open_cli_not_osascript() -> None:
     assert calls == [["open", "-a", "Safari"]]
 
 
+def test_music_play_song_passes_song_and_artist_as_argv() -> None:
+    with _capture_subprocess_calls() as calls:
+        mac_tools.music_play_song.invoke({"song": "Dream Brother", "artist": "Jeff Buckley"})
+
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0:2] == ["osascript", "-e"]
+    assert argv[2] == mac_tools._MUSIC_PLAY_SONG
+    assert argv[3:] == ["Dream Brother", "Jeff Buckley"]
+
+
+def test_music_play_playlist_passes_name_as_argv() -> None:
+    with _capture_subprocess_calls() as calls:
+        mac_tools.music_play_playlist.invoke({"name": "Favourite Songs"})
+
+    assert calls == [["osascript", "-e", mac_tools._MUSIC_PLAY_PLAYLIST, "Favourite Songs"]]
+
+
 def test_create_shortcut_opens_blank_editor_with_no_prefill() -> None:
     """No name/action parameters are passed — confirmed empirically that the
     create-shortcut URL scheme ignores them (STEPS.md 33), so the tool must
@@ -129,10 +147,14 @@ if __name__ == "__main__":
     print("OK: test_run_osascript_passes_args_as_separate_argv_not_interpolated")
     test_open_app_uses_plain_open_cli_not_osascript()
     print("OK: test_open_app_uses_plain_open_cli_not_osascript")
+    test_music_play_song_passes_song_and_artist_as_argv()
+    print("OK: test_music_play_song_passes_song_and_artist_as_argv")
+    test_music_play_playlist_passes_name_as_argv()
+    print("OK: test_music_play_playlist_passes_name_as_argv")
     test_create_shortcut_opens_blank_editor_with_no_prefill()
     print("OK: test_create_shortcut_opens_blank_editor_with_no_prefill")
     test_run_shortcut_declined_never_invokes_shortcuts_cli()
     print("OK: test_run_shortcut_declined_never_invokes_shortcuts_cli")
     test_run_shortcut_confirmed_invokes_shortcuts_cli_with_exact_name()
     print("OK: test_run_shortcut_confirmed_invokes_shortcuts_cli_with_exact_name")
-    print("\n5 tests passed")
+    print("\n7 tests passed")

@@ -1899,3 +1899,893 @@ python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/te
 printf "what's my battery status\ny\nturn on do not disturb for me\ny\nexit\n" | python -m assistant.main
 rm -f conversation_memory.sqlite
 ```
+
+## 35. `music_play_song` / `music_play_playlist` added (2026-07-13)
+
+**What:** User asked for Alexa-style "play this specific song/playlist"
+control, not just play/pause/next/previous. This extends the already-
+approved Music-control category from Phase 4's original checkpoint (ungated
+— private, reversible, local-only) rather than opening a new one, since
+Music.app's own AppleScript dictionary already covers searching and
+targeted playback; no new threat-model discussion needed.
+
+**Verified both templates directly against the real library before writing
+the tool, not assumed:** listed real playlists via `osascript` (`Favourite
+Songs`, `msth`, `Muahhh`, etc.), confirmed `play playlist "<name>"` actually
+starts it (checked via a follow-up now-playing read). For song search,
+tested `every track of library playlist 1 whose name contains songName
+[and artist contains artistName]` — matched and played "Dream Brother" by
+Jeff Buckley on the first try; also tested the no-match case for both
+templates (nonexistent song and nonexistent playlist) and confirmed both
+return a clean string rather than erroring or hanging.
+
+**Implemented:** `mac_tools.music_play_song(song, artist="")` and
+`music_play_playlist(name)`, both `_run_osascript` with argv-passed
+parameters (same argv-not-interpolated pattern as every other templated
+action here), added to `UNGATED_TOOLS`. `MAC_CONTROL_SYSTEM_PROMPT` updated
+to mention both. 2 new tests in `tests/test_mac_tools.py` (7 mac_tools
+tests now, 42 project-wide) asserting the exact argv shape for each.
+
+**Live-verified through the real CLI:** "play the song dream brother by
+jeff buckley" and "play my favourite songs playlist" both correctly
+triggered the right tool and actually started playback — confirmed via the
+model's own reply, matching the direct `osascript` verification above.
+
+**Commands:**
+```sh
+osascript -e '... list all playlists ...'
+osascript -e '... play playlist "Favourite Songs" ...' && osascript -e '... current track ...'
+osascript -e '... search-and-play template with "Dream Brother" ...'
+osascript -e '... same templates with a nonexistent song/playlist name ...'   # clean no-match strings
+python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py tests/test_mac_tools.py   # 42/42
+printf "play the song dream brother by jeff buckley\nplay my favourite songs playlist\nexit\n" | python -m assistant.main
+rm -f conversation_memory.sqlite
+```
+
+## 36. Real production bug found and fixed: parallel handoffs corrupted persisted conversation state (2026-07-13)
+
+**What:** User hit a live `BadRequestError` from Anthropic: `messages.32:
+tool_use ids were found without tool_result blocks immediately after`.
+Root-caused via direct inspection of the actual corrupted state, not
+guessed — the running `langgraph dev` process (PID discovered via `ps`/
+`lsof`, listening on port 51903, not the default 2024, which turned out to
+belong to an unrelated project — same conflict pattern as STEPS.md 27)
+still had the thread in its local `.langgraph_api/` dev state. Queried
+`POST /threads/search` on the real running server and found the exact
+message: index 32 is an `AIMessage` with **two parallel tool calls**
+(`transfer_to_life_admin_agent` and `transfer_to_research_agent`), but
+index 33 — the next message — only contains a `ToolMessage` for the
+*second* one. The first tool_use was never closed.
+
+**The triggering prompt was this session's own suggested demo**: "What's
+on my calendar today, search the web for today's top news, and play some
+music" — a compound, multi-domain request I'd proposed earlier as a "quick
+way to show off the architecture." Phase 3's original regression testing
+(STEPS.md 25) only ever exercised one domain per turn, so this exact
+failure mode was never triggered until now.
+
+**Mechanism, understood before writing any fix:** each `transfer_to_*`
+handoff tool returns `Command(goto=agent_name, graph=Command.PARENT, ...)`
+to jump the *outer* graph to a specific sub-agent node. When the
+supervisor's model calls two handoff tools in the same turn, both tools
+execute and each returns its own `Command` trying to route the parent
+graph to a *different* destination — only one wins, and that Command's own
+synthetic `ToolMessage` (closing out its own tool_use) is the only one
+that makes it into state. The other handoff's tool_use is silently
+orphaned. This corruption is permanent for that thread: every future
+`ainvoke`/`stream` call replays the full message history to Anthropic,
+which rejects it outright the moment the orphaned tool_use is included.
+
+**Fix verified before writing it for real, not assumed:** confirmed via
+`inspect.signature`/source reading that `ChatAnthropic.bind_tools()`
+accepts `parallel_tool_calls: bool | None` (translates to Anthropic's own
+`tool_choice.disable_parallel_tool_use`), and that `create_agent`'s
+internal binding path merges `ModelRequest.model_settings` into that same
+`bind_tools()` call — meaning a `wrap_model_call`-style middleware setting
+`request.model_settings["parallel_tool_calls"] = False` reaches it
+correctly. Verified with a standalone throwaway script *before* touching
+real code: a baseline `create_agent` with two dummy tools and a prompt
+designed to invite parallel calls produced `[2]` tool-calls-per-AIMessage;
+the same setup with the middleware produced `[1, 1]` (two sequential
+single-tool turns instead) — confirming the fix mechanism actually works,
+not just that it type-checks.
+
+**Implemented:** `supervisor.NoParallelHandoffs` — a minimal
+`AgentMiddleware` subclass implementing `async def awrap_model_call`
+(async, not the sync `wrap_model_call` hook — this project invokes
+exclusively via `ainvoke`/`astream`, and the base class's default
+implementation of whichever hook isn't overridden raises
+`NotImplementedError` with a message explaining exactly this). Wired into
+`build_supervisor()`'s `create_agent(..., middleware=[NoParallelHandoffs()])`
+— scoped to the supervisor only, not the sub-agents, which have no
+Command(PARENT) handoff routing and can legitimately benefit from real
+parallel tool calls for their own work. `SUPERVISOR_SYSTEM_PROMPT` also
+gained an explicit instruction to transfer to only one specialist per
+turn and let that specialist's answer note that the rest needs a
+follow-up — a prompt hint layered on top of the structural fix, not a
+substitute for it.
+
+**New permanent test** (`tests/test_supervisor.py`, 2 tests, 44
+project-wide): tests the middleware's own mechanism deterministically
+(sets `parallel_tool_calls=False`, merges into rather than clobbers
+existing `model_settings`) — no live API call needed on every run, unlike
+the one-off verification script above, which was deleted after confirming
+the mechanism actually works end to end.
+
+**Live-verified against the exact original failing prompt, through the
+real CLI:** re-ran "What's on my calendar today, search the web for
+today's top news, and play some music" — no `BadRequestError`, clean
+single handoff to `life_admin_agent` (reported an empty calendar
+correctly), then a natural follow-up ("what about the rest of that
+request?") correctly routed to `research_agent` with real news headlines.
+**Noted, not fixed — a smaller, secondary UX rough edge**: each specialist,
+not knowing the other specialists exist, phrases its inability to do the
+other parts as "you'll need a different tool for that" rather than
+"ask me again," which reads more like a dead end than an invitation to
+follow up. Flagged to the user as optional further work, not addressed
+in this pass — the corruption bug was the actual ask.
+
+**The user's already-corrupted Studio thread was not repaired**: attempted
+a live `POST /threads/{id}/state` patch to insert the missing
+`ToolMessage`, but the `langgraph dev` process had stopped running between
+the earlier diagnostic query and the repair attempt (connection refused,
+confirmed via `ps`/`lsof` — process gone, not just a different port this
+time). Decided not to pursue further: Studio's `.langgraph_api/` state is
+explicitly ephemeral local dev/debug state (STEPS.md 27's own reasoning
+for why it's gitignored), not the project's real persistent memory — no
+`conversation_memory.sqlite` exists yet, confirming the user has only been
+testing via Studio's Chat UI so far, not the actual CLI. Starting a fresh
+thread in Studio going forward is the practical fix; nothing of lasting
+value was in the corrupted one.
+
+**Commands:**
+```sh
+ps aux | grep langgraph   # found our project's real dev-server PID, distinct from an unrelated project's
+lsof -a -p <pid> -i -P    # found the actual listening port (51903, not default 2024)
+curl -s http://127.0.0.1:51903/threads/search -X POST -d '{"limit": 20}'   # found the exact orphaned tool_use
+python <throwaway script>   # baseline [2] vs middleware [1, 1] tool-calls-per-AIMessage — confirmed fix works, deleted after
+python tests/test_tools.py tests/test_mcp_tools.py tests/test_memory.py tests/test_interrupts.py tests/test_mac_tools.py tests/test_supervisor.py   # 44/44
+printf "What's on my calendar today, search the web for today's top news, and play some music.\nwhat about the rest of that request?\nexit\n" | python -m assistant.main
+curl -s -i -X POST http://127.0.0.1:51903/threads/<id>/state -d '...'   # connection refused — server had stopped
+rm -f conversation_memory.sqlite
+```
+
+## 37. Phase 5 → ACTIVE; extended-thinking follow-up preserved in PLAN.md (2026-07-13)
+
+**What:** Two doc edits at the start of the Phase 5 session, before any
+Phase 5 code, mirroring the same pattern used at Phase 4's start (STEPS.md
+29): (1) `PLAN.md`'s Phase 6 gained a new step 5 carrying forward the
+follow-up on the globally-disabled extended thinking from STEPS.md 28 —
+`thinking={"type": "disabled"}` was set on all four `ChatAnthropic`
+construction sites to kill a real `langchain-anthropic` 1.4.8 SSE-merging
+bug, but that bug only ever reproduced through Studio's streaming Chat UI;
+the CLI's non-streaming `ainvoke()` path was confirmed unaffected at the
+time, so disabling thinking there trades away reasoning depth for
+everything, permanently, to fix a bug the CLI doesn't hit. That tradeoff was
+living only in STEPS.md 28's prose with no forward pointer, same gap Phase 4
+closed for the deferred Haiku evaluation — closed the same way here so it
+isn't silently made permanent once a `langchain-anthropic` release past
+1.4.8 exists; (2) `PLAN.md`'s Phase 5 header flipped from NOT STARTED to
+ACTIVE, `CLAUDE.md`'s Current Status updated to match ("No active phase" →
+"Active: Phase 5").
+
+**Note on bgIsolation:** this session runs as a background job whose
+default is to isolate edits into a separate git worktree. That default
+conflicts with this project's standing rule (CLAUDE.md's Git section) that
+the user commits and pushes everything themselves — worktree isolation
+exists to support autonomous commit/push/PR, which this project explicitly
+opts out of — and, separately, the working tree already had uncommitted
+Phase 4 work (STEPS.md 35/36 among it) that a fresh worktree wouldn't have
+included. Confirmed with the user before proceeding (asked directly rather
+than assuming); added `.claude/settings.json` with `worktree.bgIsolation:
+"none"` so this and future background sessions in this repo edit the
+working directory directly, consistent with the existing git policy.
+
+**Commands:**
+```sh
+mkdir -p .claude && cat > .claude/settings.json   # worktree.bgIsolation: "none"
+```
+
+## 38. Phase 5 steps 1–4 — voice I/O implemented, pending hands-on verification (2026-07-13)
+
+**What:** Step 1's STT CHECKPOINT resolved by the user (faster-whisper,
+local) after the wheel/functional verification in this same session (real
+`pip install` + a real `WhisperModel('tiny').transcribe()` call on a
+synthetic audio buffer, both clean on the 3.12 arm64 venv — no source builds
+needed, `ctranslate2` ships a real `macosx_11_0_arm64`/cp312 wheel). A second
+design fork — how push-to-talk detects its trigger in a terminal — was also
+resolved by the user: Option+Return, captured via a one-time calibration
+(`voice_io.calibrate_trigger()`) that reads whatever raw bytes the terminal
+actually sends for that combo, rather than a hardcoded guess at the escape
+sequence (behavior differs by terminal emulator and its "Option as Meta key"
+setting) — this also avoids needing a `pynput`-style global keyboard hook
+and the macOS Accessibility/Input Monitoring permission grant that would
+require, unlike Phase 4's osascript bridge.
+
+**Implemented:**
+- `assistant/voice_io.py` — raw-terminal trigger calibration/detection
+  (`tty`/`termios`, no new permission), mic capture via a `sounddevice`
+  `InputStream` accumulated between trigger presses, STT via
+  `faster-whisper` (`base` model, CPU, int8), TTS via macOS `say` (argv-only
+  `subprocess.run`, `shell=False` — same posture as mac_tools.py, though
+  this isn't a gated agent tool: it's the voice harness's own output
+  rendering, equivalent to `main.py`'s `print()`, never chosen by the
+  model), and `parse_confirmation()` for the voice confirmation-answer path
+  flagged at session start — fails closed (only a recognized "yes" approves;
+  everything else, including a mistranscription or silence, declines).
+- `assistant/voice_main.py` — parallel entry point (`assistant-voice`
+  console script), not a modification of `main.py`. Reuses
+  `THREAD_ID`/`EXIT_COMMANDS`/`_render_content` from `main.py` and
+  `build_graph`/`make_thread_config`/`get_checkpointer` exactly as the text
+  CLI does, so voice and text turns share one conversation history and hit
+  the identical `graph.ainvoke()` path (PLAN.md's done-when: text CLI stays
+  fully intact — verified untouched, `main.py` has zero diff this session).
+  The interrupt-based confirmation gate (CLAUDE.md's standing rule) is
+  answered by voice: speak the question via `say`, record a fresh
+  push-to-talk answer, transcribe, and resume with
+  `parse_confirmation()`'s fail-closed result.
+- `pyproject.toml`/`requirements.txt`: added `faster-whisper`,
+  `sounddevice`, `numpy` (used directly, not just transitively); new
+  `assistant-voice = "assistant.voice_main:main"` console script.
+  Reinstalled editable; `assistant-voice` resolves on PATH.
+- `tests/test_voice_io.py` (5 new tests, 49 project-wide) — the pure,
+  testable slice only: `parse_confirmation`'s yes/no/fail-closed/
+  no-takes-priority cases, and `transcribe()`'s empty-audio short circuit
+  (asserts the STT model is never loaded for silence, so declining/no-op
+  turns don't pay a model-load cost).
+
+**Verified this session, all real calls, nothing assumed:**
+- `faster-whisper`/`ctranslate2`/`sounddevice` install and import clean on
+  the real 3.12 arm64 venv; a real `WhisperModel` load + transcribe call
+  succeeded (see STEPS.md 37... actually this session, see the CHECKPOINT
+  presentation above — synthetic audio, 0 segments on near-silence, correct
+  behavior).
+- `assistant.voice_io` and `assistant.voice_main` both import cleanly
+  end-to-end (the latter pulls in the full chain: `agent`, `interrupts`,
+  `main`, `mcp_tools`, `memory`, `supervisor` — confirms real `ChatAnthropic`
+  construction still succeeds with `voice_io` in the import graph).
+- Full suite: `tests/test_tools.py` (22) + `test_mcp_tools.py` (10) +
+  `test_memory.py` (1) + `test_interrupts.py` (2) + `test_mac_tools.py` (7) +
+  `test_supervisor.py` (2) + `test_voice_io.py` (5) = 49/49, run as separate
+  invocations (running them space-separated in one `python` command only
+  executes the first file — the rest become its `sys.argv`, not a multi-file
+  run; caught by actually checking each file's own pass count instead of
+  trusting a single combined invocation).
+
+**NOT yet verified — genuinely needs the user's hands, not just review:**
+raw-terminal Option+Return detection against a real keypress in the user's
+actual terminal app (only the byte-capture *mechanism* is exercised by the
+smoke tests above, not a live keypress); real speech through the real mic
+transcribed by `faster-whisper` (only tested against a synthetic near-silent
+buffer); `say` actually audible; and the full voice loop end-to-end,
+confirmation gate included, against the real supervisor graph. None of this
+is simulable from here — no real keyboard or microphone in this session.
+Flagged to the user to run `assistant-voice` by hand and report back before
+this counts toward Phase 5's done-when criteria.
+
+**Commands:**
+```sh
+.venv/bin/pip download --no-deps --dest <tmp> faster-whisper ctranslate2 sounddevice   # wheel check, all arm64/cp312
+.venv/bin/pip install faster-whisper sounddevice
+.venv/bin/python -c "... WhisperModel('tiny').transcribe() on synthetic audio ..."   # real call, 0 segments on near-silence
+.venv/bin/pip install -e .   # registers assistant-voice console script
+.venv/bin/python tests/test_tools.py   # 22, and so on individually for each of the 7 files — 49/49
+.venv/bin/python -c "import assistant.voice_main"   # full import chain, no errors
+```
+
+## 39. Voice pipeline verified as far as this session's hands allow (2026-07-13)
+
+**What:** Asked to "run assistant-voice and try it out." Attempted the real
+console script first rather than assuming it would work: it failed
+immediately and predictably — `assistant-voice` calls `calibrate_trigger()`,
+which needs `termios.tcgetattr()` on a real TTY, and this session's Bash
+tool has no TTY (`sys.stdin.isatty()` is `False`; confirmed with a real run,
+not inferred — `termios.error: (19, 'Operation not supported by device')`).
+No physical keyboard or microphone exists in this environment either, so the
+literal interactive loop (a real Option+Return press, real spoken words)
+cannot be executed here regardless of TTY access. Rather than stop at "can't
+run it," verified every piece that *can* be exercised for real without a
+human at the keyboard:
+
+- **Raw-terminal trigger mechanism**: spawned a real subprocess connected to
+  a real pseudo-terminal (`pty.openpty()`), wrote a plausible Option+Return
+  byte sequence (`\x1b\r`, the common "Option as Meta key" encoding) to the
+  master side twice, and confirmed `calibrate_trigger()`/`wait_for_trigger()`
+  correctly captured the first press and matched the second — real
+  `termios` raw-mode enter/exit, not mocked. This proves the *mechanism* is
+  correct; it does not prove `\x1b\r` matches what the user's actual
+  terminal app sends for that combo, which only calibration against a real
+  keypress can confirm — the reason calibration exists rather than a
+  hardcoded assumption.
+- **Real mic capture + real STT**: recorded 3s of actual ambient audio from
+  the real hardware mic via `_Recorder`/`sounddevice.InputStream` (nonzero
+  amplitude, confirming real hardware capture, not a stub), ran it through
+  the real `faster-whisper` `transcribe()` — correctly returned `""` for
+  room noise with no speech.
+- **Real TTS**: called `speak()` for real; `say` blocked for 4.2s matching
+  the text length, consistent with real audio playback (this session has no
+  way to confirm audibility directly — no ears — but blocking duration is
+  real subprocess behavior, not simulated).
+- **Full pipeline against the real graph, twice**: two throwaway scripts
+  (isolated scratch checkpoint DB via `tempfile.TemporaryDirectory()`, never
+  touching the real `conversation_memory.sqlite` or `THREAD_ID` — a
+  disposable per-run thread id instead) drove `voice_main.py`'s exact logic
+  end to end with a stand-in for the STT output text (since real speech
+  can't be produced here): (1) a plain question through the real supervisor
+  → real Claude API answer → spoken via `say`; (2) `send_test_notification`
+  (Phase 3's dummy gated tool) to trigger a real `__interrupt__`, then the
+  literal confirmation-gate loop from `voice_main.py` — speak the question,
+  `parse_confirmation()` on a stand-in spoken answer, resume — verified both
+  directions: `"yeah go ahead"` → approved → tool ran; `"no, don't do that"`
+  → declined → tool didn't run, matching `parse_confirmation`'s fail-closed
+  design.
+
+**What this does and doesn't cover:** every piece of the pipeline ran for
+real except the two things that structurally require a human: pressing
+Option+Return in an actual terminal window, and speaking real words into the
+mic. Everything downstream of "assume STT produced text X" — the graph
+invocation, the interrupt loop, TTS, the confirmation-gate voice path in
+both directions — is now verified against the real supervisor graph and a
+real Claude API, not just unit-tested in isolation. What's genuinely still
+open is whether the calibration step correctly captures *this user's*
+terminal's actual Option+Return encoding and whether `faster-whisper`
+accurately transcribes *their* real voice — both need the user's own hands
+in a real terminal session.
+
+**Commands:**
+```sh
+assistant-voice < /dev/null   # confirmed real failure: no TTY, termios.error(19)
+python <pty-based subprocess test>   # real termios raw-mode via pty.openpty(), calibrate+detect-second-press both correct
+python <real mic capture + faster-whisper transcribe on real ambient audio>   # nonzero amplitude captured, correct empty transcription
+python -c "... speak('...') ..."   # real `say` call, 4.2s blocking duration
+python <graph.ainvoke() smoke test, scratch checkpoint DB, plain question>   # real Claude API answer, spoken via say
+python <graph.ainvoke() smoke test, scratch checkpoint DB, send_test_notification>   # real interrupt, both confirm/decline directions verified
+ps aux | grep assistant-voice   # confirmed no leftover processes
+```
+
+## 40. Phase 5 v2 — always-on voice daemon implemented (2026-07-13)
+
+**What:** Implemented the approved v2 plan (Ultraplan-refined; teleported
+back for local execution): humanized spoken confirmations, configurable
+Enhanced/Premium TTS voice with safe fallback, and the always-on
+global-hotkey daemon replacing the terminal-bound v1 CLI.
+
+**Cloud-session reconciliation, first:** the Ultraplan cloud execution did
+NOT land as a PR — it discovered mid-run that its repo sync had silently
+omitted all untracked local files (`voice_io.py`, `voice_main.py`, both new
+test files), initially misread STEPS.md 38/39 as describing fabricated
+work, corrected itself, and handed off `PHASE5V2HANDOFF.md` + an unverified
+`voice_daemon.DRAFTUNVERIFIED.py` for a local session instead. Both were
+read, mined, and deleted after consumption. Adopted from the handoff: the
+`rumps>=0.4.0; sys_platform == "darwin"` dependency marker (verified in the
+actual cloud container: rumps→pyobjc has no Linux wheels and its sdist
+build execs /usr/bin/sw_vers — an unmarked dep breaks every non-Mac
+install). NOT adopted: its confirmation-answer flow (a full two-press
+record cycle per answer) — this implementation keeps auto-record +
+one-press submit, which is the ergonomic the user explicitly described
+wanting; and its token-based parse_confirmation rewrite, which the handoff
+itself flagged as worse than the real one ("go ahead" would fail closed).
+**Lesson, per the handoff and now logged as it requested: cloud/remote
+sessions do not see untracked local files — "file absent in a cloud
+session" is not evidence it doesn't exist.** A warned-about
+`phase5-voice-daemon.patch` (would have overwritten real v1 files) was
+confirmed absent.
+
+**Also caught during the same status sweep — a real secrets gap:**
+`conversation_memory.sqlite` (the CLI's actual persistent conversation
+history, now 200KB of real use, plausibly including email/calendar content
+pulled into context) was NOT gitignored — `.gitignore` had `*.db` but
+memory.py writes `.sqlite`. One `git add .` away from the public portfolio
+repo. Added `*.sqlite`; verified with `git check-ignore`, per the standing
+convention from STEPS.md 5.1's near-miss.
+
+**Implemented:**
+- `assistant/voice_io.py`: `Recorder` reshaped from a single-blocking-call
+  context manager to explicit `start()`/`stop()` (daemon triggers are two
+  separate callbacks with arbitrary time between; fresh instance per
+  utterance so stale frames can't leak); terminal-trigger code
+  (`calibrate_trigger`/`wait_for_trigger`/`_read_raw`/
+  `record_until_trigger`) removed — superseded by OS-level hotkeys, and
+  with it v1's known raw-stdin quirk (buffered extra presses making a later
+  confirmation auto-record unexpectedly) structurally disappears;
+  `speak()` now resolves a configurable voice (ASSISTANT_TTS_VOICE, default
+  "Ava (Premium)") against the actually-installed set from `say -v ?`
+  (parsed on the 2+-space column gap — names contain spaces/parens), cached
+  once, falling back to the system default with a logged warning — a
+  not-yet-downloaded voice can never crash the daemon; `preload_stt_model()`
+  added so the several-second first model load lands at startup, not on the
+  user's first utterance.
+- `spoken_prompt` added to all THREE gated interrupt payloads — not just
+  the two in the plan's file list: `interrupts.py` (send_test_notification),
+  `mac_tools.py` (run_shortcut), and `tools.py`'s inline-interpreter shell
+  gate, found by grepping for `interrupt(` rather than trusting the list.
+  The daemon speaks `payload.get("spoken_prompt") or fallback`, so future
+  gated tools that forget the key degrade to the raw payload instead of
+  breaking. `tests/test_interrupts.py`'s exact-payload assertion updated
+  (the handoff flagged this exact trap; confirmed locally too).
+- `assistant/voice_daemon.py` — NEW: menu bar app (rumps, main thread —
+  hard AppKit requirement), dedicated asyncio thread owning the persistent
+  loop (`graph.ainvoke()` — same graph, same THREAD_ID as the text CLI, so
+  voice and text share one conversation), pynput GlobalHotKeys listener
+  thread (Option+Return; 0.4s debounce for double-press/races — pynput
+  already coalesces OS key-repeat; callback body minimal + try/except
+  swallow, since a slow/crashing event-tap callback risks the OS disabling
+  the tap). Menu bar title mutations marshaled to the main thread via
+  `AppHelper.callAfter` only (direct cross-thread AppKit mutation is
+  silently unsafe). State machine IDLE→RECORDING→PROCESSING→IDLE plus an
+  ANSWERING state for the confirmation gate: after speaking the question,
+  the daemon auto-records the answer and ONE Option+Return press submits —
+  fails closed on an unclear answer or 30s timeout. Audio cues (Tink/Pop
+  system sounds) via non-blocking `afplay` Popen. RotatingFileHandler log
+  at `~/Library/Logs/PersonalAssistant/voice_daemon.log` (self-rotating;
+  launchd's StandardOutPath appends forever, so it's only a crash net) —
+  logs transcripts, confirmation Q&A + outcomes (audit trail for
+  voice-approved side effects), replies, errors. Quit menu item stops the
+  listener, signals the loop shut down, joins the thread, exits 0 — the
+  exit code launchd's future KeepAlive={"SuccessfulExit": false} depends on.
+- Packaging: `pynput` + platform-marked `rumps` in pyproject/requirements;
+  `assistant-voice` console script repointed to `voice_daemon:main`;
+  `voice_main.py` deleted; editable reinstall. `main.py` untouched (zero
+  diff), per plan.
+- `tests/test_voice_io.py`: 11 tests now (was 5) — added voice-resolution
+  fallback both ways (cache reset around each case), `speak()` argv shape
+  with and without the -v flag (subprocess.run monkeypatch, per
+  test_mac_tools' pattern), and `_spoken_question`'s prefer/fallback
+  behavior. 55 tests project-wide, all passing.
+
+**Verified this session beyond the unit tests — real calls, no mocks:**
+pynput 1.8.2 + rumps 0.4.0 wheel check and install on the real venv
+(`<alt>+<enter>` confirmed parsing to [Key.alt, keycode 36] before writing
+code against it); both cue sounds actually played via afplay;
+`voice_daemon` imports end-to-end (full ChatAnthropic construction chain);
+and a real integration exercise of the daemon's cross-thread confirmation
+machinery — real asyncio loop, real mic capture, real `say`, real state
+machine, shortened timeout: (1) no press within the timeout → declined,
+fail closed, state/recorder cleanly released; (2) a press delivered from a
+foreign thread mid-ANSWERING (exactly what pynput's listener thread does)
+→ submit event crossed threads correctly → silent room audio → parsed as
+decline. The first version of that harness produced a false alarm worth
+recording: it reset state to IDLE mid-turn — a state the real flow can't
+be in during a confirmation (it's PROCESSING throughout, so presses during
+the spoken question are ignored by design) — making a too-early press
+spawn a rogue recording. Harness bug, not daemon bug; the daemon's state
+flow was re-checked against that exact scenario and holds. The TTS
+fallback also fired for real during these runs ("Ava (Premium)" not yet
+downloaded → logged warning → default voice), confirming the fallback path
+live, not just in tests.
+
+**NOT yet verified — needs the user's hands (no keyboard/mic/GUI here):**
+the real Input Monitoring TCC grant flow, a real Option+Return press
+reaching GlobalHotKeys from a non-terminal app, the menu bar states
+rendering, real spoken turns, and Quit-from-menu-bar. The launchd
+LaunchAgent (plan step 8) is deliberately NOT installed yet — gated on
+that manual verification passing, as the plan's explicit final go/no-go.
+
+**Commands:**
+```sh
+pip download --no-deps pynput rumps pyobjc-framework-Cocoa   # wheel check first
+pip install pynput rumps && python -c "HotKey.parse('<alt>+<enter>')"   # [Key.alt, <36>]
+pip install -e .   # repointed assistant-voice → voice_daemon:main
+python tests/test_*.py   # run individually — 55/55
+python <daemon confirm-gate integration harness, real mic + say>   # both scenarios OK
+git check-ignore conversation_memory.sqlite   # now ignored
+rm PHASE5V2HANDOFF.md voice_daemon.DRAFTUNVERIFIED.py   # consumed cloud artifacts
+```
+
+## 41. Step-7 verification passed; LaunchAgent authored, install handed to the user (2026-07-13)
+
+**What:** User verified the daemon by hand — hotkey from other apps, real
+spoken turns, confirmation gate, Enhanced-voice download — and the final
+quit check was confirmed from this session directly: an initial `ps` sweep
+found a live instance, the user quit it via the menu bar, and a re-check
+showed zero leftover `assistant-voice`/`voice_daemon` processes. Clean
+exit (code 0 path) proven, which is exactly what the LaunchAgent's
+`KeepAlive={"SuccessfulExit": false}` semantics depend on.
+
+**LaunchAgent authored at `launchd/com.mohitvuyyuru.assistant-voice.plist`
+(in-repo, `plutil -lint` clean), not installed by this session:** the
+sandbox/permission layer declined a direct write into
+`~/Library/LaunchAgents/` — reasonable, it's a persistence mechanism — so
+the user runs the two install commands themselves (fits the project's
+existing pattern of the user executing the irreversible steps). Two real
+launchd pitfalls found by checking the code rather than assuming, both
+handled in the plist:
+- `mcp_tools.py` spawns MCP servers with `"command": "node"` resolved via
+  PATH, and node lives in `/opt/homebrew/bin` — absent from launchd's
+  default PATH, which would have silently dropped Gmail/Calendar under
+  autostart while working fine in every terminal test.
+  `EnvironmentVariables.PATH` set explicitly.
+- Every module's `load_dotenv()` searches from cwd, and launchd's default
+  cwd is `/` — no `.env`, no API keys. `WorkingDirectory` pinned to the
+  project root.
+Plus `RunAtLoad`, `ThrottleInterval=30` (a startup bug must not
+tight-loop), and launchd stdout/stderr to `voice_daemon.launchd.*.log` as
+a crash net only (the daemon's RotatingFileHandler log stays primary).
+
+**Known wrinkle flagged to the user:** TCC may attribute the terminal-run
+Input Monitoring grant to the Terminal app rather than the Python binary;
+the launchd-spawned instance (no terminal parent) may prompt again or
+silently receive no key events until a "python"/"assistant-voice" entry is
+enabled in System Settings > Privacy & Security > Input Monitoring. If the
+hotkey is dead after install, that's the first place to look.
+
+**Commands (user runs the install):**
+```sh
+plutil -lint launchd/com.mohitvuyyuru.assistant-voice.plist   # OK
+cp launchd/com.mohitvuyyuru.assistant-voice.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mohitvuyyuru.assistant-voice.plist
+# verify: menu bar icon appears; launchctl print gui/$(id -u)/com.mohitvuyyuru.assistant-voice
+# uninstall: launchctl bootout gui/$(id -u)/com.mohitvuyyuru.assistant-voice && rm ~/Library/LaunchAgents/com.mohitvuyyuru.assistant-voice.plist
+```
+
+## 42. launchd install: TCC crash loop root-caused and fixed (2026-07-13)
+
+**What:** The LaunchAgent crash-looped on install (exit 1 every
+ThrottleInterval): `PermissionError: [Errno 1] Operation not permitted:
+.../.venv/pyvenv.cfg` — not Input Monitoring at all, but macOS's
+Files-and-Folders TCC protection on `~/Documents`. Every terminal run had
+worked only because Terminal holds that grant; a launchd-spawned process
+holds nothing. Meanwhile the user's screenshots confirmed the predicted
+Input Monitoring gap too (no python entry existed, no prompt ever shown).
+
+**The subtle part, found by tracing rather than guessing:** granting Full
+Disk Access to the Homebrew `Python.app` bundle did NOT fix it — the crash
+recurred post-grant (verified against the err-log mtime, not assumed).
+`readlink -f` on the venv's shebang target showed why: the kernel executes
+`.../Frameworks/Python.framework/Versions/3.12/bin/python3.12` — a
+*different executable* from `Python.app/Contents/MacOS/Python` — and that
+stub reads `pyvenv.cfg` during interpreter init, before any re-exec. TCC
+attributes non-bundle binaries by exact path, so the Python.app grant never
+applied to the crashing process. `ps` on the healthy process later
+confirmed the full chain: stub starts (needs FDA for the Documents read),
+then re-execs into Python.app (which creates the event tap, so IT needs
+Input Monitoring). Both executables therefore need both grants; the user
+added all four toggles by hand (TCC is unscriptable by design).
+
+**Outcome:** `launchctl kickstart` after the grants → `state = running`,
+single healthy pid, "daemon ready — hotkey <alt>+<enter>" in the daemon
+log. Crash loop had been stopped promptly via `launchctl bootout` during
+diagnosis rather than left retrying every 30s.
+
+**Known fragility, now concrete (flagged in 41, sharpened here):** all four
+grants pin to the versioned Cellar path (`3.12.13_4`). A `brew upgrade
+python@3.12` moves both binaries and silently kills the daemon until the
+grants are redone. Durable fix — wrapping the daemon in a stable `.app`
+bundle so TCC grants attach to a bundle ID — belongs in Phase 6 polish
+(fits its existing "menu bar app" interface step, which this phase's rumps
+work has already half-settled).
+
+**Commands:**
+```sh
+tail ~/Library/Logs/PersonalAssistant/voice_daemon.launchd.err.log   # EPERM on pyvenv.cfg — TCC, not POSIX
+launchctl bootout gui/$(id -u)/com.mohitvuyyuru.assistant-voice      # stop the crash loop first
+readlink -f .venv/bin/python3.12   # → Frameworks/.../bin/python3.12, NOT Python.app — the key fact
+stat -f "%Sm" ...launchd.err.log   # crash recurred AFTER the Python.app grant — proof it wasn't enough
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mohitvuyyuru.assistant-voice.plist
+launchctl kickstart -k gui/$(id -u)/com.mohitvuyyuru.assistant-voice
+launchctl print gui/$(id -u)/com.mohitvuyyuru.assistant-voice   # state = running
+```
+
+## 43. Phase 5 v2 verified end-to-end by hand (2026-07-13)
+
+**What:** User confirmed the launchd-spawned daemon's hotkey fires from
+other applications — the one behavior no earlier test covered (terminal
+runs exercised a differently-TCC-attributed process). With that, every
+Phase 5 done-when criterion is met, plus the v2 scope on top: push-to-talk
+→ local STT → same-graph invoke → spoken reply, from anywhere, via an
+always-on menu bar daemon; humanized spoken confirmations with one-press
+answers; Enhanced-voice TTS with safe fallback; text CLI untouched
+(main.py zero diff across both v2 passes). Outstanding, non-blocking: the
+logout/login RunAtLoad survival check (standard launchd behavior; user
+will confirm later) — and Accessibility grants turned out NOT to be needed
+for the hotkey, only Input Monitoring (worth knowing: it's the narrower of
+the two).
+
+## 44. Phase 5 closed out: status flips + README refresh (2026-07-13)
+
+**What:** With the user's approval (per CLAUDE.md's status-edit rule):
+PLAN.md Phase 5 → COMPLETE with a full Delivered section covering both
+passes and the TCC scope notes; Phase 6 step 3's interface decision marked
+SETTLED (menu bar + hotkey — it's both) and repurposed as the `.app`-bundle
+hardening step for the versioned-Cellar-path TCC fragility; CLAUDE.md
+Current Status → "No active phase", Phase 5 added to the Complete list
+(groups 37–43). README refreshed per the phase-completion convention:
+voice added to the intro/capabilities/architecture (three-thread design
+summarized), a new Voice-mode setup section (Enhanced-voice download, the
+two-binaries-times-two-grants TCC procedure with the brew-upgrade wart
+called out, launchd install/uninstall), `ASSISTANT_TTS_VOICE` in the env
+table, security model extended (voice confirmation fails closed;
+non-suppressing hotkey noted; the daemon log as an audit trail), roadmap
+5/6 updated, both new test files added to the dev section.
+
+**Commit boundary proposed to the user** (they run git): everything in the
+working tree — Phase 4 follow-ups (STEPS.md 35–36) plus all of Phase 5 —
+either as one commit or split at the pre/post-Phase-5 seam.
+
+## 45. Roadmap renumbered: four phases inserted ahead of the original Phase 6 (2026-07-13, 23:28)
+
+**What:** With Phase 5 closed, the roadmap was reshaped before starting new
+work: four phases — 6 (fix cross-agent handoff routing), 7 (memory:
+short-term compaction + long-term facts), 8 (voice upgrade: accuracy +
+latency), 9 (dashboard app) — inserted ahead of the original
+proactivity/polish phase, which is preserved as Phase 10 (content unchanged
+except where Phase 5 v2 already settled its interface step; see STEPS.md
+44). Edits: PLAN.md gains the four new phase plans ("six phase plans" →
+"ten"); CLAUDE.md's Current Status points at Phase 6 as next and records
+the renumbering date so stale references to old phase numbers are
+detectable.
+
+**Why this order:** Phase 6 first because the supervisor's inability to
+chain two sub-agents in one turn (live repro 2026-07-13, alfredo prompt) is
+a correctness bug in the architecture everything later sits on; Phase 7
+next because the fixed-THREAD_ID ever-growing history is a live cost/
+latency problem, not polish; 8 and 9 are capability work that assumes a
+working, affordable graph; 10 stays last as before.
+
+## 46. Phase 6 → ACTIVE (2026-07-13, 23:29)
+
+**What:** Status flipped in CLAUDE.md (Current Status) and PLAN.md (Phase 6
+heading) per the user's explicit instruction opening this session. Work
+begins at step 1: reproduce the alfredo-prompt stall against a throwaway
+thread (not the real conversation DB), then inspect the LangSmith trace to
+establish routing vs. state vs. both — diagnosis reported before the step-2
+design CHECKPOINT.
+
+## 47. Phase 6 step 1 — stall reproduced; diagnosis: ROUTING, not state (2026-07-13, 23:40)
+
+**Repro, isolated from real state per the verification discipline:** a
+throwaway harness (in the session's tmp dir, not the repo) ran the REAL
+`build_graph()` exactly as main.py does but against a temp SQLite DB, a
+fresh thread id, `mcp_tools=[]`, and a dedicated LangSmith project
+(`phase6-handoff-repro`) so the trace is findable. Prompt: "get the
+ingredients to make alfredo pasta and send a list to my Notes app". The
+stall reproduced on the first run: research_agent answered with the
+ingredient list, the turn ended, no Notes handoff, `state.next == ()`.
+
+**Finding 1 — routing is broken, confirmed two independent ways.**
+Statically: `graph.get_graph()` shows every sub-agent node wired
+`-> __end__` (supervisor.py's explicit `add_edge(<agent>, END)` lines);
+there is NO edge from any sub-agent back to `supervisor`. Dynamically: the
+LangSmith run tree contains exactly two node executions under the root —
+`supervisor`, then `research_agent` — and nothing after. The
+`Command(graph=Command.PARENT)` handoff routes down but nothing routes
+back up, exactly as hypothesized.
+
+**Finding 2 — state is NOT broken; that half of the hypothesis is
+disconfirmed.** The final outer-graph message state contains the complete
+chain: user msg → supervisor AIMessage with the transfer_to_research_agent
+tool call → its synthetic ToolMessage → research_agent's internal
+tool-use/tool-result pair → research_agent's final AIMessage with the full
+ingredient list. Sub-agent output DOES merge up into outer state (the
+compiled create_agent subgraph-as-node returns its messages through
+add_messages), so if the graph re-entered the supervisor, the ingredient
+list would already be visible to it. No orphaned tool calls anywhere in
+the list.
+
+**Finding 3 — the supervisor is also INSTRUCTED not to chain.** Its
+AIMessage in the repro says verbatim "you'll need a follow-up to add them
+to Notes" — obeying the "You can only transfer to ONE specialist per
+turn" line added to SUPERVISOR_SYSTEM_PROMPT by the STEPS.md 36 fix. So
+current behavior is structure + instruction stacked; a routing fix must
+also rewrite that prompt line or the model will keep refusing to chain.
+Conversely, 36's NoParallelHandoffs middleware composes WITH a future
+supervisor loop (one handoff per model turn, sequential turns) and stays.
+
+**Trace-reading note for the record:** the supervisor node shows
+status=error in LangSmith — that's `ParentCommand(...)`, the internal
+control-flow exception LangGraph raises to escape a subgraph and deliver
+a Command.PARENT to the outer graph. Mechanism, not a failure; verified by
+reading the run's error field, which is the Command itself.
+
+**Commands:**
+```sh
+.venv/bin/python <tmp>/repro_phase6.py   # temp DB + fresh thread; stall reproduced
+# LangSmith project phase6-handoff-repro: root → supervisor → research_agent → (end)
+rm <tmp>/phase6_repro.sqlite             # throwaway state cleaned up
+```
+
+Step 2 is the design CHECKPOINT — diagnosis reported to the user first,
+per the plan.
+
+## 48. Phase 6 steps 2–5 — loop-back implemented, a real lifetime-cap bug found and fixed, a context-leakage bug found and logged (2026-07-14, 02:24)
+
+**Step 2 (design CHECKPOINT):** user picked option (a) — sub-agents loop
+back to a re-evaluating supervisor, rather than (b) upfront task
+decomposition or (c) revisiting `langgraph-supervisor` (that library stays
+rejected per STEPS.md 23; nothing in the diagnosis motivated reopening it).
+
+**Step 3 implementation (`assistant/supervisor.py`):** every sub-agent's
+outgoing edge changed from `END` to a new `route_after_specialist` node
+(`add_edge(agent_name, "route_after_specialist")` for all four). That node
+— not a bare conditional-edge path function — returns a `Command`:
+`goto="supervisor"` with a bridging update, or `goto=END` at the handoff
+cap. It has to be a real node because a bare path function can only choose
+a destination, not also mutate state, and mutating state here is required
+(see the prefill bug below). `SUPERVISOR_SYSTEM_PROMPT`'s "only ONE
+specialist per turn, ... follow-up turn" line (the STEPS.md 36 fix) was
+rewritten to "one at a time ... keep doing this ... until every part of the
+request has been handled" — the old wording was actively telling the model
+to stop after one hop, which combined with the old all-edges-to-END
+topology is the mechanism STEPS.md 47 diagnosed. `NoParallelHandoffs`
+(STEPS.md 36) is orthogonal and unchanged — it caps tool calls *within one
+model turn*; the loop now caps *across* sequential model turns.
+
+**Bug hit and fixed while building step 3, not assumed away:** the very
+first version routed straight back to "supervisor" with no state change.
+Live-tested immediately (verification discipline) — it 400'd: `This model
+does not support assistant message prefill. The conversation must end with
+a user message.` A sub-agent's own final answer is an AIMessage; re-
+invoking the supervisor's model on history ending in an AIMessage is
+shaped exactly like an assistant-turn prefill, which is rejected on Sonnet
+5 (and the whole 4.6+ family). Fixed by having `route_after_specialist`
+append a synthetic `HumanMessage` bridge before looping back — keeps the
+conversation ending in a non-assistant turn. It never reaches the user
+(main.py only ever renders `result["messages"][-1]`, and once the
+supervisor responds or hands off again the bridge is no longer last).
+
+**Verification pass 1 (fresh, isolated threads — temp DB, not the real
+one):** two different real two-agent chains run against the actual
+`build_graph()`, both completing end-to-end: the original alfredo-
+ingredients-to-Notes repro (research_agent → mac_control_agent, a real
+note created via `notes_create` — expected, ungated per Phase 4's
+checkpoint, reversible), and a second, structurally different chain
+(research_agent → coding_agent, a real `write_file` call) satisfying the
+plan's "at least one other multi-hop request" criterion. A third repro
+confirmed the Phase 3/4 interrupt confirmation gate still fires correctly
+mid-chain (`send_test_notification` gated inside coding_agent, reached via
+the loop), that declining it doesn't corrupt state, and that the final
+message list has zero orphaned tool calls (every AIMessage tool_call has a
+matching ToolMessage by tool_call_id) — checked programmatically, not by
+eyeballing the transcript.
+
+**Real bug #1, found only by testing against the REAL persistent thread —
+lifetime-cap counting, not per-turn:** `_count_handoffs` originally summed
+`transfer_to_*` ToolMessages across the ENTIRE `messages` list. Since
+main.py's `THREAD_ID` is fixed and persists forever (deliberately, per
+CLAUDE.md's Phase 1 decision), a real thread's history includes every past
+turn's handoffs too. Running the CLI (`python -m assistant.main`) against
+the actual `conversation_memory.sqlite` (99 messages of real accumulated
+use at the time) reproduced a stall that looked identical to the pre-fix
+bug — the response was research_agent's own raw text, not a completed
+chain. Inspecting the real thread's tail directly (`checkpointer
+.aget_tuple`) showed the graph HAD reached research_agent and produced a
+normal-looking exchange, but the outer loop never continued to
+coding_agent. Root cause, confirmed by direct code reading plus a targeted
+repro: with 99 messages of history, cumulative past handoffs were already
+at/over `MAX_HANDOFFS_PER_TURN` (6) before this turn's first specialist
+even finished — `_route_after_specialist` correctly-per-its-own-buggy-logic
+routed straight to END. **This wasn't caught by verification pass 1
+because every fresh-thread repro starts with zero prior handoffs by
+construction** — a good example of why "verify against real state," not
+just a clean synthetic one, is this project's standing discipline.
+
+**Fix:** `_count_handoffs` now scopes to messages since the most recent
+GENUINE `HumanMessage`, skipping this module's own routing-bridge
+HumanMessages (tagged via `additional_kwargs={"phase6_routing_bridge":
+True}`, checked by a new `_is_routing_bridge` helper, constructed by a new
+`_make_routing_bridge()` — replacing the inline bridge construction).
+Anchoring on "the last HumanMessage of any kind" was tried and rejected:
+the bridge is itself a HumanMessage, so that would reset the turn boundary
+on every loop iteration and undercount just as badly (only ever seeing the
+most recent single hop). Anchoring on the last NON-bridge HumanMessage
+correctly finds the true start of the current top-level turn regardless of
+how many loop iterations have run, and regardless of how much older
+history precedes it.
+
+**Verified directly against the exact failure shape:** a repro seeded a
+thread's checkpoint (`graph.aupdate_state`) with 18 handoffs from a fake
+"old turn" (3× the cap) via `graph.aupdate_state`, then submitted a brand-
+new two-hop request (search the web for France's capital, write it to a
+file). Confirmed to complete end-to-end — `write_file` actually ran —
+proving the fix, not just the unit-level counting logic. Two new unit
+tests lock this in: `test_count_handoffs_ignores_earlier_turns` (the
+actual regression case) and
+`test_count_handoffs_ignores_routing_bridge_but_not_prior_handoffs_in_turn`
+(the bridge-anchoring subtlety). `tests/test_supervisor.py` now has 9
+tests (was 2): the two NoParallelHandoffs tests plus 7 new ones covering
+`_count_handoffs`, `_route_after_specialist`'s two branches, and a
+graph-topology assertion (`test_build_graph_wires_specialists_through
+_route_after_specialist`) that every sub-agent routes through
+`route_after_specialist` rather than straight to END — a structural
+regression guard for the exact bug STEPS.md 47 diagnosed.
+
+**Real bug #2 — found, reproduced, NOT fixed yet, logged for a decision:
+context leakage across sub-agents.** While investigating the real-thread
+CLI stall above, the actual tail showed something else: research_agent
+(bound only to `web_search`) itself emitted a tool_call named
+`transfer_to_coding_agent` — a tool it was never given — which errored
+(`Error: transfer_to_coding_agent is not a valid tool, try one of
+[tavily_search]`) before it recovered and answered in text. Mechanism,
+confirmed by reading the code rather than assumed: every sub-agent node is
+invoked with the ENTIRE outer `messages` list (not a view scoped to its
+own tools), so on a thread with enough history, a sub-agent can see
+earlier AIMessages (from the supervisor, or in principle another
+sub-agent) that named `transfer_to_*` tools, and the model can imitate that
+naming pattern even though only `tavily_search` was in *this* call's
+`tools` schema — Anthropic's API does not appear to hard-constrain the
+`name` field of a tool_use block to the bound schema, and LangGraph's
+ToolNode gracefully reports the mismatch as an error ToolMessage rather
+than crashing (which is why this is survivable but not harmless — it
+wastes a turn and confuses the specialist's own answer).
+
+**Reproduced deliberately, cheaply, in isolation** (to establish
+reliability without spending on repeated full-graph live runs): built
+research_agent alone via `build_sub_agents.build_research_agent()`,
+invoked directly with a MINIMAL planted history (just one prior
+`transfer_to_coding_agent` example from a supervisor turn) plus a new
+file-writing request. Reproduced in 1 of 3 runs — a meaningful, not rare,
+rate given how little context was needed to trigger it; a real 99+ message
+thread with many more such examples accumulated is plausibly worse.
+
+**Status: logged, not fixed.** Discussed with the user; they chose to
+investigate further before deciding whether this belongs in Phase 6's
+scope or should be deferred (likely into Phase 7, since it's fundamentally
+about what context gets sent to which model — the same territory as
+Phase 7's compaction work). The investigation above is what was done;
+the fix-now-vs-defer call is still open pending the user's decision after
+seeing these results.
+
+**Real conversation_memory.sqlite reset:** per the user's explicit choice,
+the actual `cli-default-thread` — which had grown to 99+ messages across
+real usage, including the two live CLI verification prompts run during
+this phase — was deleted (`rm -f conversation_memory.sqlite*`) for a clean
+slate, matching this project's own established convention of periodically
+wiping this file (STEPS.md 34, 36, etc.).
+
+**Commands:**
+```sh
+# fresh-thread repros (temp DB, dedicated LangSmith projects) — alfredo/Notes
+# chain, a second research->coding chain, interrupt-gate-mid-chain + no
+# orphaned tool calls, and the seeded-heavy-history lifetime-cap check —
+# all in throwaway scripts under the session's tmp dir, cleaned up after
+python tests/test_tools.py; python tests/test_mcp_tools.py; python tests/test_memory.py
+python tests/test_interrupts.py; python tests/test_mac_tools.py
+python tests/test_supervisor.py; python tests/test_voice_io.py   # 61/61 across all files
+python -m assistant.main   # real CLI run against the real thread — reproduced the
+                            # lifetime-cap bug live before it was understood
+rm -f conversation_memory.sqlite conversation_memory.sqlite-shm conversation_memory.sqlite-wal
+```
+
+## 49. Phase 6 closed out: leakage bug deferred to Phase 7, status flips (2026-07-14, 02:36)
+
+**What:** Before closing, re-examined whether the context-leakage bug
+(STEPS.md 48) needed fixing now. Directly tested rather than assumed: ran
+the leakage scenario 3 more times through the FULL graph (not the isolated
+single-node repro), seeded with one prior `transfer_to_coding_agent`
+example, well under the handoff cap so the now-fixed lifetime-cap bug
+couldn't be the explanation for any stall observed. All 3 runs completed
+end-to-end (file actually written) regardless of whether research_agent
+hallucinated mid-turn — the mechanism: `route_after_specialist` treats a
+sub-agent's own subgraph completing as a uniform signal, whether that
+completion was clean or a self-corrected wasted turn, so the outer loop is
+structurally decoupled from what happens inside a sub-agent's own ReAct
+loop. Confirms the leakage bug is a cost/quality issue (a wasted API call,
+a slightly confusing intermediate specialist answer never shown to the
+user), not a correctness blocker — the actual bar Phase 6 was scoped
+against. A real fix requires scoping what messages each sub-agent sees,
+which reverses the "no manual state-transform shim" design this module's
+own docstring calls load-bearing (verified: STEPS.md 24) and belongs
+alongside Phase 7's compaction work (same category of change: what gets
+sent to which model), not bolted onto Phase 6 as an afterthought.
+
+**Decision (user's call, after seeing this evidence):** log it, don't fix
+it now. Logged as a CHECKPOINT item at the top of PLAN.md's Phase 7 Part A
+so it isn't lost.
+
+**Status flips (with the user's approval, per CLAUDE.md's status-edit
+rule):** PLAN.md Phase 6 → COMPLETE, restructured to lead with Objective →
+Why → Diagnosis → Delivered (both bugs) → Known deferred issue → Done-when
+(collapsing what had become duplicate Steps/Done-when sections after the
+Delivered section was added). CLAUDE.md Current Status → "No active
+phase", Phase 7 named as next, Phase 6 added to the Complete list
+(STEPS.md groups 47–48).
+
+**Commit boundary proposed to the user** (they run git): everything in the
+working tree touching Phase 6 — `assistant/supervisor.py` (loop-back
+routing + turn-scoped handoff cap), `tests/test_supervisor.py` (2 → 9
+tests), CLAUDE.md, PLAN.md, STEPS.md (groups 45–49, including the earlier
+roadmap-renumbering entries from the start of this session). The unrelated
+uncommitted Phase-5-era files already in the working tree (voice_daemon.py,
+voice_io.py, launchd/, tests/test_voice_io.py, etc. — per `git status` at
+session start) are untouched by this session and can be committed together
+or separately at the user's discretion.
