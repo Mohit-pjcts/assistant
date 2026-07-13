@@ -117,9 +117,13 @@ filtering content.
   traversal rejected via resolve-then-relative_to; dotfiles hard-blocked
   independent of the containment check.
 - **Confirmation rule (standing):** side-effectful actions — sending email,
-  creating/modifying events, Mac control — require my explicit confirmation
-  before execution; read-only actions don't. Until LangGraph interrupts are
-  wired (Phase 3), enforce this by scoping tools read-only.
+  creating/modifying events, Mac control, and (Phase 7 Part B) writing a
+  durable long-term memory fact — require my explicit confirmation before
+  execution; read-only actions don't. Until LangGraph interrupts are wired
+  (Phase 3), enforce this by scoping tools read-only. Memory writes are
+  additionally text-only, never voice-approvable (voice_daemon.py checks
+  `voice_approvable: False` on the interrupt payload) — fact content is
+  harder to vet by ear than an action verb like "send".
 - New tools (MCP-loaded included) are evaluated against this threat model
   before joining the agent. MCP tools MERGE into TOOLS; they never replace
   Phase 1's hand-secured tools.
@@ -132,8 +136,24 @@ filtering content.
 - LangGraph + LangChain (1.x line); `langchain-mcp-adapters` from Phase 2 on.
 - Anthropic SDK — Claude API (pay-per-token via Console account), NOT the
   Pro/Max subscription.
-- Memory: SQLite via `langgraph-checkpoint-sqlite` (conversation state).
-  Long-term/vector memory is out of scope until the plan says otherwise.
+- Memory: SQLite via `langgraph-checkpoint-sqlite` (conversation state,
+  `conversation_memory.sqlite`, memory.py) plus, as of Phase 7 Part B, a
+  SEPARATE plain SQLite table for durable cross-conversation facts
+  (`long_term_memory.sqlite`, memory_store.py — deliberately not sharing
+  the checkpointer's own file/schema). This reverses the earlier
+  "long-term/vector memory is out of scope" line: it's now in scope,
+  automatic-write (agent decides what's worth saving, not user-asked-for),
+  and deliberately NOT a vector store — Chroma was considered and rejected
+  at Phase 7's scope-time checkpoint in favor of plain keyword/recency
+  retrieval, since a single user's fact count is expected to stay small
+  enough that embedding-based recall would be premature complexity: revisit
+  if that assumption stops holding. Retrieval is selective (memory_store.
+  recall_facts), never a full context dump. See memory_extraction.py's
+  module docstring for the full security design (source-restricted
+  extraction, isolated extraction channel, scoped tool-content citation,
+  universal confirmation gate) — this is the load-bearing part of Part B,
+  not an implementation detail; do not weaken it without discussion, same
+  standing as the Security model section below.
 - Packaging: pyproject.toml is the source of truth (provides the `assistant`
   console script); requirements.txt is a flat mirror. Keep both in sync.
 

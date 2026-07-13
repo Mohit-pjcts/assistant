@@ -223,6 +223,18 @@ class VoiceDaemon:
 
             while "__interrupt__" in result:
                 payload = result["__interrupt__"][0].value
+                if isinstance(payload, dict) and payload.get("voice_approvable") is False:
+                    # Phase 7 Part B's memory-write confirmations set this —
+                    # fact content is harder to vet by ear than an action
+                    # verb like "send", so this gate never asks by voice.
+                    # Fail-closed (declined) rather than silently skip, same
+                    # convention as an unclear/timed-out spoken answer.
+                    logger.info("confirmation requires text — declining by voice")
+                    await asyncio.to_thread(
+                        speak, "That needs a text confirmation, so I'm skipping it for now."
+                    )
+                    result = await self._graph.ainvoke(Command(resume=False), config=self._config)
+                    continue
                 question = _spoken_question(payload)
                 logger.info("confirmation asked: %s", question)
                 approved = await self._ask_confirmation(question)

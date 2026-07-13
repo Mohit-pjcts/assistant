@@ -66,6 +66,7 @@ SUMMARIZER_MODEL_NAME = "claude-haiku-4-5"
 # it as "not a genuine user turn boundary."
 _BRIDGE_MARKER_KEY = "phase6_routing_bridge"
 _SUMMARY_MARKER_KEY = "phase7_compaction_summary"
+_RECALLED_FACTS_MARKER_KEY = "phase7_recalled_facts"
 
 _SUMMARY_PROMPT = (
     "Summarize the following personal-assistant conversation history in a "
@@ -77,18 +78,20 @@ _SUMMARY_PROMPT = (
 
 
 def is_genuine_human_turn(message: AnyMessage) -> bool:
-    """A real user-turn boundary — not the Phase 6 routing bridge (also a
-    HumanMessage, but marks a mid-turn re-entry into the supervisor after a
-    specialist finishes, not the start of a new turn). Exported: also used
-    by sub_agents.py's SubAgentWindowMiddleware to window each specialist's
-    own model calls to the CURRENT top-level turn — the same boundary this
-    module uses for compaction, since both are instances of "never split
-    what belongs to one turn," just applied to different problems (bounding
-    growth over calendar time here; bounding cross-turn context leakage
-    there — STEPS.md 48)."""
-    return isinstance(message, HumanMessage) and not bool(
-        getattr(message, "additional_kwargs", {}).get(_BRIDGE_MARKER_KEY)
-    )
+    """A real user-turn boundary — not a synthetic HumanMessage the graph
+    itself inserts (the Phase 6 routing bridge, marking a mid-turn re-entry
+    into the supervisor after a specialist finishes; or Phase 7 Part B's
+    recalled-facts injection, memory_extraction.py's recall_memory_node).
+    Exported: also used by sub_agents.py's SubAgentWindowMiddleware to
+    window each specialist's own model calls to the CURRENT top-level turn
+    — the same boundary this module uses for compaction, since both are
+    instances of "never split what belongs to one turn," just applied to
+    different problems (bounding growth over calendar time here; bounding
+    cross-turn context leakage there — STEPS.md 48)."""
+    if not isinstance(message, HumanMessage):
+        return False
+    kwargs = getattr(message, "additional_kwargs", {})
+    return not (kwargs.get(_BRIDGE_MARKER_KEY) or kwargs.get(_RECALLED_FACTS_MARKER_KEY))
 
 
 def is_compaction_summary(message: AnyMessage) -> bool:
@@ -99,6 +102,14 @@ def is_compaction_summary(message: AnyMessage) -> bool:
     thread would lose all awareness of what happened before its own handoff.
     """
     return bool(getattr(message, "additional_kwargs", {}).get(_SUMMARY_MARKER_KEY))
+
+
+def tag_recalled_facts(message: HumanMessage) -> None:
+    """Marks a HumanMessage as Part B's recalled-facts injection, in place,
+    so is_genuine_human_turn excludes it. A function rather than exposing
+    the raw marker key, so memory_extraction.py doesn't need to know the
+    literal dict shape."""
+    message.additional_kwargs[_RECALLED_FACTS_MARKER_KEY] = True
 
 
 def _find_keep_boundary(messages: list[AnyMessage]) -> int:

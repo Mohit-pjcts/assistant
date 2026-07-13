@@ -66,6 +66,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
 from assistant.compaction import compact_history_node
+from assistant.memory_extraction import extract_and_propose_memory_node, recall_memory_node
 from assistant.sub_agents import (
     build_coding_agent,
     build_life_admin_agent,
@@ -259,9 +260,14 @@ def _route_after_specialist(state: GraphState) -> Command:
 
     Capped by MAX_HANDOFFS_PER_TURN so a supervisor that never decides it's
     done can't spin the graph forever.
+
+    Routes to "extract_memory" (Phase 7 Part B), not END, at the cap — every
+    path that ends a turn must pass through memory extraction, the same way
+    every path already passes through this node before ending; see
+    build_graph()'s edges.
     """
     if _count_handoffs(state["messages"]) >= MAX_HANDOFFS_PER_TURN:
-        return Command(goto=END)
+        return Command(goto="extract_memory")
     return Command(goto="supervisor", update={"messages": [_make_routing_bridge()]})
 
 
@@ -306,13 +312,19 @@ def build_graph(
             filtered internally by build_life_admin_agent().
     """
     builder = StateGraph(GraphState)
-    # Plain top-level node, NOT create_agent-embedded — see compaction.py's
+    # Plain top-level nodes, NOT create_agent-embedded — see compaction.py's
     # module docstring for why that distinction is load-bearing (a
     # nested-subgraph SummarizationMiddleware was verified NOT to propagate
-    # its compaction back to this shared state). Runs once per top-level CLI
-    # turn; mid-turn specialist loop-backs re-enter at "supervisor" directly
-    # via route_after_specialist, not through this node again.
+    # its compaction back to this shared state; the same property is what
+    # makes recall/extraction safe to run at this level too). Both
+    # compact_history and recall_memory run once per top-level CLI turn;
+    # mid-turn specialist loop-backs re-enter at "supervisor" directly via
+    # route_after_specialist, not through either node again.
     builder.add_node("compact_history", compact_history_node)
+    # Phase 7 Part B: selective recall, injected as data before the
+    # supervisor (and every specialist, via SubAgentWindowMiddleware's
+    # append-after-turn-boundary ordering) ever sees the request.
+    builder.add_node("recall_memory", recall_memory_node)
     builder.add_node(
         "supervisor",
         build_supervisor(),
@@ -321,7 +333,7 @@ def build_graph(
             "research_agent",
             "life_admin_agent",
             "mac_control_agent",
-            END,
+            "extract_memory",
         ),
     )
     builder.add_node("coding_agent", build_coding_agent(coding_extra_tools))
@@ -331,12 +343,20 @@ def build_graph(
     builder.add_node(
         "route_after_specialist",
         _route_after_specialist,
-        destinations=("supervisor", END),
+        destinations=("supervisor", "extract_memory"),
     )
+    # Phase 7 Part B: proposes 0+ durable facts from the CURRENT turn's user
+    # text only, each individually confirmed via interrupt() before being
+    # persisted. Sits on EVERY path that ends a turn — the supervisor's own
+    # default no-handoff edge, and route_after_specialist's cap-triggered
+    # end — so no turn can complete without passing through it once.
+    builder.add_node("extract_memory", extract_and_propose_memory_node)
 
     builder.add_edge(START, "compact_history")
-    builder.add_edge("compact_history", "supervisor")
-    builder.add_edge("supervisor", END)  # default path when no handoff tool is called
+    builder.add_edge("compact_history", "recall_memory")
+    builder.add_edge("recall_memory", "supervisor")
+    builder.add_edge("supervisor", "extract_memory")  # default path when no handoff tool is called
+    builder.add_edge("extract_memory", END)
     # Loop back through route_after_specialist instead of ending outright: a
     # multi-hop request (STEPS.md 47) needs the supervisor to see this
     # specialist's output and decide whether another handoff is needed.

@@ -150,23 +150,26 @@ def test_route_after_specialist_loops_back_under_cap() -> None:
 
 
 def test_route_after_specialist_ends_at_cap() -> None:
-    """At/over MAX_HANDOFFS_PER_TURN: end the turn instead of looping —
-    this is the actual runaway-loop guard the plan required, enforced in
-    code rather than left to the supervisor's own judgment."""
+    """At/over MAX_HANDOFFS_PER_TURN: route to extract_memory (Phase 7 Part
+    B) instead of looping — every path that ends a turn passes through
+    memory extraction once, and this is the actual runaway-loop guard the
+    plan required, enforced in code rather than left to the supervisor's
+    own judgment."""
     messages = [HumanMessage(content="do things")] + [
         _transfer_tool_message(f"agent_{i}") for i in range(MAX_HANDOFFS_PER_TURN)
     ]
     result = _route_after_specialist({"messages": messages})
     assert isinstance(result, Command)
-    assert result.goto == END
+    assert result.goto == "extract_memory"
     assert result.update is None
 
 
 def test_build_graph_wires_specialists_through_route_after_specialist() -> None:
     """Structural regression guard for the actual bug this phase fixed
     (STEPS.md 47): every sub-agent must route to route_after_specialist,
-    which must be able to reach both "supervisor" (the loop) and END (the
-    cap) — not straight to END, which is what silently stalled multi-hop
+    which must be able to reach both "supervisor" (the loop) and
+    "extract_memory" (the cap, and every other turn-ending path — Phase 7
+    Part B) — not straight to END, which is what silently stalled multi-hop
     requests after the first specialist."""
     graph = build_graph(checkpointer=None, coding_extra_tools=None, mcp_tools=[])
     edges = graph.get_graph().edges
@@ -183,7 +186,10 @@ def test_build_graph_wires_specialists_through_route_after_specialist() -> None:
         )
 
     router_targets = {t for s, t in edge_pairs if s == "route_after_specialist"}
-    assert router_targets == {"supervisor", "__end__"}, router_targets
+    assert router_targets == {"supervisor", "extract_memory"}, router_targets
+    assert ("extract_memory", "__end__") in edge_pairs, (
+        "every turn-ending path must pass through extract_memory before END"
+    )
 
 
 if __name__ == "__main__":

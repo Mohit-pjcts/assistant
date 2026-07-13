@@ -11,6 +11,13 @@ dependencies = [
     "langchain-mcp-adapters==0.3.0",
     "langgraph>=0.2.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
+    # Was a transitive dependency of langgraph-checkpoint-sqlite; made
+    # explicit in Phase 7 Part B (assistant/memory_store.py), which now
+    # imports it directly for the long-term-facts SQLite table.
+    "aiosqlite>=0.20.0",
+    # Same story — transitive via langchain; made explicit in Phase 7 Part B
+    # (assistant/memory_extraction.py's structured-output extraction models).
+    "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "faster-whisper>=1.2.0",
     "sounddevice>=0.5.0",
