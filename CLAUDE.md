@@ -20,10 +20,8 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **ACTIVE: Phase 7 (Memory: short-term compaction + long-term facts)** —
-  scoping stage, per PLAN.md; the context-leakage checkpoint carried over
-  from Phase 6 is folded into Part A. No implementation until the Part A
-  budget checkpoint and Part B security/storage checkpoint are both settled.
+- **No active phase** — Phase 8 (Voice upgrade: accuracy + latency) is
+  next; read PLAN.md before beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
@@ -40,6 +38,12 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   back through a re-evaluating supervisor instead of stalling after the
   first specialist, with a correctly turn-scoped handoff cap (STEPS.md
   groups 47–48)
+- Complete: Phase 7 — short-term context compaction bundled with the Phase 6
+  leakage fix, plus long-term automatic-write memory behind a layered,
+  Opus-red-teamed security design (source-restricted extraction, isolated
+  extraction channel, hardened tool-citation opt-in, universal text-only
+  confirmation gate) — SQLite storage, selective recall (STEPS.md
+  groups 50–51)
 
 Roadmap was renumbered 2026-07-13: four phases (6 handoff-fix, 7 memory,
 8 voice-upgrade, 9 dashboard) inserted ahead of the original proactivity/
