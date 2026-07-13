@@ -20,15 +20,77 @@ from __future__ import annotations
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
+from assistant.compaction import is_compaction_summary, is_genuine_human_turn
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
 from assistant.tools import execute_shell_command, read_file, web_search, write_file
 
 # Self-contained on import, same reasoning as tools.py/agent.py.
 load_dotenv()
+
+
+class SubAgentWindowMiddleware(AgentMiddleware):
+    """Scopes what a sub-agent's own model call sees, closing STEPS.md 48's
+    context-leakage bug: every sub-agent was previously invoked with the
+    outer graph's ENTIRE shared message history (not a view scoped to its
+    own tools), so a sub-agent could see an EARLIER, UNRELATED top-level
+    turn's supervisor using a transfer_to_* tool it doesn't have, and
+    imitate the naming pattern (reproduced 1-in-3 in isolation with a single
+    planted example from a prior turn).
+
+    Window = everything since the CURRENT top-level turn started (the most
+    recent genuine user message, compaction.py's is_genuine_human_turn) —
+    NOT "since this specific agent's own handoff," which a first version of
+    this middleware used and which live end-to-end verification caught as
+    wrong: it cut off the original request and an earlier specialist's
+    findings on a multi-hop chain (research_agent -> coding_agent), leaving
+    the second specialist with no idea what it was supposed to do. Turn-
+    boundary windowing excludes leakage from PAST, unrelated turns (the
+    actual STEPS.md 48 bug) while preserving full context WITHIN the
+    current multi-hop chain, since the Phase 6 routing bridge between
+    specialists is deliberately NOT a genuine-turn boundary.
+
+    Filters ONLY what this model call receives, via wrap_model_call — NOT a
+    state-mutating before_model return. Verified via a real spike (STEPS.md,
+    this phase) that wrap_model_call leaves the outer graph's persisted/
+    checkpointed state untouched; a state-mutating approach here would
+    instead corrupt the ONE shared history every other node also reads
+    from, since GraphState.messages is shared verbatim across every
+    sub-agent (supervisor.py's own "no manual state-transform shim" design).
+
+    Turn-boundary windowing is always pairing-safe (compaction.py's own
+    _find_keep_boundary relies on the same property): a genuine HumanMessage
+    never appears mid AIMessage/ToolMessage sequence, so splitting there
+    never orphans a tool_use block — unlike the first version of this
+    middleware, which anchored on a specific ToolMessage and, when it cut
+    that message loose from the AIMessage that issued its tool_use, produced
+    exactly that corruption (caught live: "unexpected tool_use_id found in
+    tool_result blocks" — the same class of bug as STEPS.md 36, from a new
+    source).
+    """
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001, ANN201
+        """Async only — this codebase runs graph.ainvoke() exclusively
+        (CLAUDE.md load-bearing decision: MCP-loaded tools only support
+        async invocation), same reason NoParallelHandoffs in supervisor.py
+        implements awrap_model_call rather than the sync variant. Caught by
+        a real NotImplementedError on first live end-to-end run through the
+        actual graph — LangChain's middleware base class does not fall back
+        from a sync-only wrap_model_call in an async context."""
+        messages = request.messages
+        window_start = 0
+        for i, m in enumerate(messages):
+            if is_genuine_human_turn(m):
+                window_start = i
+        windowed = messages[window_start:]
+        if window_start > 0 and messages and is_compaction_summary(messages[0]):
+            windowed = [messages[0], *windowed]
+        return await handler(request.override(messages=windowed))
+
 
 # --- Coding sub-agent --------------------------------------------------
 
@@ -58,6 +120,7 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
         model=model,
         tools=tools,
         system_prompt=CODING_SYSTEM_PROMPT,
+        middleware=[SubAgentWindowMiddleware()],
         name="coding_agent",
     )
 
@@ -84,6 +147,7 @@ def build_research_agent() -> CompiledStateGraph:
         model=model,
         tools=[web_search],
         system_prompt=RESEARCH_SYSTEM_PROMPT,
+        middleware=[SubAgentWindowMiddleware()],
         name="research_agent",
     )
 
@@ -148,6 +212,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
         model=model,
         tools=_select_life_admin_tools(mcp_tools),
         system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
+        middleware=[SubAgentWindowMiddleware()],
         name="life_admin_agent",
     )
 
@@ -205,5 +270,6 @@ def build_mac_control_agent() -> CompiledStateGraph:
         model=model,
         tools=MAC_CONTROL_TOOLS,
         system_prompt=MAC_CONTROL_SYSTEM_PROMPT,
+        middleware=[SubAgentWindowMiddleware()],
         name="mac_control_agent",
     )

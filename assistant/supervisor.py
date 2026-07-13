@@ -65,6 +65,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
+from assistant.compaction import compact_history_node
 from assistant.sub_agents import (
     build_coding_agent,
     build_life_admin_agent,
@@ -305,6 +306,13 @@ def build_graph(
             filtered internally by build_life_admin_agent().
     """
     builder = StateGraph(GraphState)
+    # Plain top-level node, NOT create_agent-embedded — see compaction.py's
+    # module docstring for why that distinction is load-bearing (a
+    # nested-subgraph SummarizationMiddleware was verified NOT to propagate
+    # its compaction back to this shared state). Runs once per top-level CLI
+    # turn; mid-turn specialist loop-backs re-enter at "supervisor" directly
+    # via route_after_specialist, not through this node again.
+    builder.add_node("compact_history", compact_history_node)
     builder.add_node(
         "supervisor",
         build_supervisor(),
@@ -326,7 +334,8 @@ def build_graph(
         destinations=("supervisor", END),
     )
 
-    builder.add_edge(START, "supervisor")
+    builder.add_edge(START, "compact_history")
+    builder.add_edge("compact_history", "supervisor")
     builder.add_edge("supervisor", END)  # default path when no handoff tool is called
     # Loop back through route_after_specialist instead of ending outright: a
     # multi-hop request (STEPS.md 47) needs the supervisor to see this

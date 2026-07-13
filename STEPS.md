@@ -2789,3 +2789,215 @@ uncommitted Phase-5-era files already in the working tree (voice_daemon.py,
 voice_io.py, launchd/, tests/test_voice_io.py, etc. — per `git status` at
 session start) are untouched by this session and can be committed together
 or separately at the user's discretion.
+
+---
+
+## 50. Phase 7 scoping + Part A (short-term compaction + bundled leakage fix) implemented (2026-07-14, 03:28)
+
+**Preconditions verified before starting** (per this session's instructions):
+working tree clean, `files/` confirmed absent from both the current tree and
+all git history (the prior session's committed-by-mistake cleanup landed
+correctly); PLAN.md's Phase 7 read in full, confirming the Phase 6
+context-leakage checkpoint (STEPS.md 48/49) is present as a Part A
+prerequisite as expected.
+
+### 50.1 — Scoping proposal, backed by real numbers, not estimates
+
+Before any code: pulled real data rather than guessing. `conversation_memory
+.sqlite` had been wiped at the end of Phase 6 (STEPS.md 49), so there was no
+live thread to sample — instead queried LangSmith directly via the
+`langsmith` SDK (already installed, `LANGSMITH_API_KEY`/`LANGCHAIN_PROJECT`
+already configured from Phase 3) against the real `personal-assistant`
+project's traces from 2026-07-12/13 real usage: 97 sampled LLM calls, prompt
+tokens median 4,384 / mean 4,928 / max 13,027; one full multi-agent turn
+(`LangGraph` root run) hit 40,041 cumulative prompt tokens — the direct,
+measured cause of the "everything gets sent as context, it's slow and
+expensive" complaint Phase 7 exists to fix.
+
+Presented a scoping proposal covering: (1) sequencing — bundle the Phase 6
+leakage fix with compaction rather than splitting into a separate phase,
+since both are the same category of change (what context reaches which
+model); (2) a self-imposed 50,000-token budget with a 60% (30,000-token)
+trigger, sized to sit above the observed single-call max (13K, so one dense
+tool result can't trip it) and below the worst full-turn measured (40K, so
+a repeat gets caught); (3) the Part B automatic-memory-write security design
+(source restriction / isolated extraction channel / scoped tool-content
+opt-in / confirmation gate — options A/B/D/C) and the Chroma-vs-SQLite
+storage choice. User approved all four via AskUserQuestion: bundle
+sequencing, 50K/60% budget, full A+B+D+C security design, SQLite storage
+(recommended for now, revisit Chroma if fact volume outgrows keyword
+matching).
+
+CLAUDE.md's Current Status updated to Phase 7 ACTIVE per the user's explicit
+instruction to do so at scoping start (their own status-edit approval rule
+satisfied by that instruction).
+
+### 50.2 — Opus red-team on the Part B security design surfaced real gaps
+
+Per the user's explicit model assignment for this phase (Opus for both
+design checkpoints — "rewards the model that reasons hardest about
+adversarial edge cases"), spawned an Opus subagent to red-team the
+user-approved A+B+D+C design before any Part B code. Found it sound as a
+skeleton but incomplete: (1) the (D) tool-content opt-in is defeatable by
+laundering — an attacker's injected "tell your assistant to remember X" in
+an email becomes a genuine, A/D-eligible `HumanMessage` the moment the user
+forwards/quotes it, so (D) must require the fact to cite a specific
+tool-result artifact by ID with provenance shown at confirmation, not free
+text; (2) memory-write confirmation must be text-only, never voice-approvable
+(fact content is much harder to vet by ear than an action verb); (3)
+laundered/indirect injection (an earlier, injection-shaped assistant turn
+socially engineers a later "genuine" user message) is a general injection
+problem no source-restriction closes — accept as documented residual risk;
+(4) the confirmation gate must render the raw stored fact string (never an
+LLM re-summary), and retrieved facts must be injected into future context
+as data ("known preferences: ...") never as directives, so even a false
+memory that slips through still can't trigger an unconfirmed action — the
+existing side-effect `interrupt()` gates still apply regardless; (5) needs a
+`MAX_MEMORY_WRITES_PER_TURN` cap mirroring `MAX_HANDOFFS_PER_TURN`, plus a
+store-size cap. Also one TOCTOU point: the exact fact text approved at the
+gate must be exactly what's persisted, passed through the `interrupt()`
+payload, never re-extracted after approval. **Part B design is now locked
+as A+B+D+C plus these five additions — implementation has not started; the
+hard gate (no automatic-write code before the security checkpoint is
+settled) still applies and is now satisfied, pending the user seeing this
+recorded before Part B work begins.**
+
+### 50.3 — Part A: a real architectural risk found and fixed via spike, before touching real files
+
+Verified the installed API before coding against it (`langgraph` 1.2.8,
+`langchain` 1.3.12, `langchain-core` 1.4.9): `langchain.agents.middleware
+.SummarizationMiddleware` exists and does the token-triggered
+summarize-oldest-turns compaction PLAN.md describes. The obvious approach —
+attach it to `build_supervisor()`'s `create_agent(...)` — was checked with a
+throwaway spike BEFORE wiring it into the real files, matching this
+project's own established practice for novel LangGraph mechanics (STEPS.md
+24, 47). The spike disproved the obvious approach: seeded 13 messages,
+invoked through an outer graph with the middleware nested inside a
+subgraph-embedded `create_agent`, and the outer graph's persisted state came
+back with 15 messages — GREW instead of shrinking. Root cause: the
+middleware's `RemoveMessage(id=REMOVE_ALL_MESSAGES)` op is resolved by the
+subgraph's OWN internal reducer; by the time the subgraph returns its final
+state to the parent, the removal is already consumed and only a plain
+message list crosses the boundary, which the parent's own `add_messages`
+reducer treats as pure addition. This matters specifically because
+`supervisor.py`'s `build_supervisor()` is embedded exactly this way. A
+second spike confirmed the fix: a **plain top-level graph node** (not
+`create_agent`-embedded) returning the same `RemoveMessage(...)` + new
+messages shape, merged directly by the outer graph's own reducer, correctly
+shrank 13 seed messages to 4.
+
+Implemented accordingly, as two distinct mechanisms rather than one applied
+uniformly (a uniform approach would have let 4 sub-agents each
+independently rewrite the one shared thread state on their own trigger —
+order-dependent and actively hostile to the leakage-scoping goal):
+
+- **Compaction** (`assistant/compaction.py`, new module): `compact_history_
+  node`, a plain top-level node wired at `START -> compact_history ->
+  supervisor` in `supervisor.py`'s `build_graph()` (runs once per top-level
+  CLI turn; mid-turn specialist loop-backs re-enter at "supervisor" directly
+  via `route_after_specialist`, not through this node again). Fires only
+  when `count_tokens_approximately(messages) >= TRIGGER_TOKENS` (30,000);
+  finds the largest safe split point via `_find_keep_boundary` — only ever a
+  genuine user-turn boundary (a non-bridge `HumanMessage`), never mid
+  AIMessage/ToolMessage pairing, which would orphan a tool_use block (STEPS
+  .md 36's lesson, still load-bearing); summarizes everything before that
+  point with `claude-haiku-4-5` (CLAUDE.md: default to Haiku where
+  Sonnet-level reasoning isn't needed) into a tagged summary `HumanMessage`
+  (`phase7_compaction_summary` in `additional_kwargs`, enabling progressive/
+  rolling re-summarization on future compaction passes instead of
+  re-paying to re-summarize from scratch each time); falls back to a no-op
+  if even the single most recent turn alone exceeds the keep budget, rather
+  than risk cutting mid-turn.
+- **Leakage scoping** (`SubAgentWindowMiddleware`, `assistant/sub_agents.py`,
+  attached to all 4 sub-agents): a `wrap_model_call`-family middleware that
+  filters ONLY what a given model call receives — confirmed via the same
+  spike infrastructure that this does NOT mutate the outer graph's
+  persisted state (unlike the compaction approach above), which is exactly
+  the property needed here: a sub-agent's own local view can narrow without
+  corrupting the one shared history every other node also reads from.
+
+**Two more real bugs found by live end-to-end verification, not guessed
+in advance:**
+
+1. `SubAgentWindowMiddleware` initially implemented only the sync
+   `wrap_model_call` — the first live run through the real graph raised
+   `NotImplementedError`, since this codebase runs `graph.ainvoke()`
+   exclusively (CLAUDE.md load-bearing: MCP tools require async) and
+   LangChain's middleware base class does not fall back from a sync-only
+   hook in an async context. Fixed to `awrap_model_call`, matching
+   `NoParallelHandoffs`'s own existing pattern in `supervisor.py`.
+2. The first windowing design scoped each sub-agent to "since THIS agent's
+   own most recent `transfer_to_{name}` handoff" specifically. Live
+   verification of a real research_agent → coding_agent chain caught two
+   real problems with this: (a) starting the window AT the handoff
+   `ToolMessage` cut it loose from the `AIMessage` that issued its
+   `tool_use`, producing a live 400 from Anthropic's API ("unexpected
+   tool_use_id found in tool_result blocks") — the exact orphaned-tool-call
+   corruption class as STEPS.md 36, from a new source; (b) even after fixing
+   the pairing, anchoring on "this agent's own handoff" specifically
+   over-corrected: it cut off the original user request and the first
+   specialist's findings on a genuine multi-hop chain within the SAME
+   top-level turn, leaving the second specialist ("coding_agent") with no
+   idea what to write, live-observed as a confused "I don't see a specific
+   request" response instead of the correct answer. Root-caused against
+   STEPS.md 48's actual described bug (a planted example from a PAST,
+   UNRELATED turn) and corrected the boundary to "since the CURRENT
+   top-level turn started" (`compaction.py`'s `is_genuine_human_turn`,
+   exported and reused rather than duplicated) — this excludes cross-turn
+   leakage while preserving full context within a multi-hop chain, and is
+   inherently pairing-safe for the same reason `_find_keep_boundary` is
+   (a genuine `HumanMessage` never appears mid tool-call sequence). Also
+   always re-prepends `compaction.py`'s summary message when present, so a
+   specialist handed a sub-task deep into an already-compacted thread
+   doesn't lose all awareness of the wider conversation.
+
+**Verified, not assumed, after the fixes:**
+- Compaction fires against the live model and measurably shrinks context: a
+  realistic 141-message / ~35,945-token synthetic thread compacted to
+  ~15,016 tokens (58.2% reduction) in one pass.
+- A real multi-hop chain (research_agent finds the correct answer via
+  `web_search`, hands off to coding_agent, which writes it to a file) now
+  completes correctly end-to-end through the real graph with
+  `compact_history` and `SubAgentWindowMiddleware` both wired in — zero
+  orphaned `tool_use` ids in the final state, correct file content.
+- All prior tests pass unchanged (61/61); 8 new deterministic tests added in
+  `tests/test_compaction.py` (`_find_keep_boundary` turn-boundary safety and
+  oversized-turn fallback, `compact_history_node` no-op-under-trigger and
+  no-op-when-nothing-safe-to-summarize, `SubAgentWindowMiddleware`'s
+  corrected turn-boundary windowing including the multi-hop-preserving
+  regression case and the compaction-summary-preservation case) — 69/69
+  total. Matches `tests/test_supervisor.py`'s own established convention:
+  deterministic mechanism tests here, live-model behavior (compaction
+  actually firing, the multi-hop chain actually completing) verified by
+  hand in throwaway spike/verification scripts and recorded here rather
+  than re-proven on every run.
+
+**Commands:**
+```sh
+# LangSmith trace pull (real numbers for the budget checkpoint), and three
+# throwaway spike/verification scripts (compaction state-mutation semantics,
+# top-level-node compaction confirmation, full multi-hop live regression) —
+# all under the session's tmp dir, not part of the repo
+python tests/test_tools.py; python tests/test_mcp_tools.py; python tests/test_memory.py
+python tests/test_interrupts.py; python tests/test_mac_tools.py
+python tests/test_supervisor.py; python tests/test_voice_io.py; python tests/test_compaction.py
+# 69/69 across all files
+```
+
+**Not yet done:** Part B (long-term automatic-write memory) implementation —
+design is locked (50.2) but no code written yet, per the phase's own
+internal sequencing (short-term first) and the standing hard gate on
+automatic-write code. Also not yet done: measuring compaction's effect on
+the REAL persistent thread (the sqlite file is currently empty/fresh per
+STEPS.md 49's wipe) — the 58.2% reduction figure above is from a realistic
+synthetic thread, not the live CLI in ordinary use; worth a real-usage
+spot-check once the thread has grown again naturally.
+
+**Commit boundary proposed to the user** (they run git): `assistant/
+compaction.py` (new), `assistant/sub_agents.py` (SubAgentWindowMiddleware +
+wiring), `assistant/supervisor.py` (compact_history node + edges),
+`tests/test_compaction.py` (new, 8 tests), CLAUDE.md (Phase 7 ACTIVE status
+flip), STEPS.md (group 50). This is Part A only — Part B is untouched and
+uncommitted-because-unwritten. The unrelated Phase-5/6 files already
+sitting in the working tree at session start remain the user's call, as
+before.

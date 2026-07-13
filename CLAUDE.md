@@ -20,9 +20,10 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 7 (Memory: short-term compaction + long-term
-  facts) is next; read PLAN.md before beginning it, including the
-  context-leakage checkpoint carried over from Phase 6.
+- **ACTIVE: Phase 7 (Memory: short-term compaction + long-term facts)** —
+  scoping stage, per PLAN.md; the context-leakage checkpoint carried over
+  from Phase 6 is folded into Part A. No implementation until the Part A
+  budget checkpoint and Part B security/storage checkpoint are both settled.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
