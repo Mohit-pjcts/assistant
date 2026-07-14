@@ -25,10 +25,11 @@ _tmpdir = tempfile.mkdtemp(prefix="assistant_test_server_")
 atexit.register(shutil.rmtree, _tmpdir, ignore_errors=True)
 os.environ["ASSISTANT_CONVERSATION_DB_PATH"] = os.path.join(_tmpdir, "conversation_memory.sqlite")
 os.environ["ASSISTANT_MEMORY_DB_PATH"] = os.path.join(_tmpdir, "long_term_memory.sqlite")
+os.environ["ASSISTANT_THREADS_DB_PATH"] = os.path.join(_tmpdir, "threads.sqlite")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from assistant import memory_store, server  # noqa: E402
+from assistant import memory_store, server, thread_store  # noqa: E402
 
 
 async def test_chat_round_trips_through_the_real_graph() -> None:
@@ -191,6 +192,150 @@ async def test_cost_returns_real_langsmith_aggregates() -> None:
         assert windows["all_time"]["total_cost"] >= windows["week"]["total_cost"]
 
 
+async def test_history_response_carries_the_thread_id_it_read() -> None:
+    with TestClient(server.app) as client:
+        client.post("/chat", json={"message": "Say exactly: thread id check"})
+        response = client.get("/history")
+        assert response.status_code == 200, response.text
+        assert response.json()["thread_id"]
+
+
+async def test_threads_list_includes_the_bootstrapped_legacy_thread() -> None:
+    """Every /chat call above this point in the file used no explicit
+    thread_id, so it ran against thread_store's bootstrapped legacy default
+    (STEPS.md 66's old fixed THREAD_ID, preserved as the first-ever active
+    thread) — this is the actual 'old single-thread behavior still works'
+    done-when criterion, checked at the HTTP layer, not just thread_store's
+    own unit tests."""
+    with TestClient(server.app) as client:
+        response = client.get("/threads")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert any(t["id"] == thread_store.LEGACY_DEFAULT_THREAD_ID for t in body["threads"])
+        assert body["active_thread_id"] == thread_store.LEGACY_DEFAULT_THREAD_ID
+
+
+async def test_create_thread_becomes_the_new_active_thread() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/threads", json={"title": "Trip planning"})
+        assert response.status_code == 200, response.text
+        thread = response.json()
+        assert thread["title"] == "Trip planning"
+        assert thread["id"]
+
+        listed = client.get("/threads")
+        body = listed.json()
+        assert body["active_thread_id"] == thread["id"]
+        assert any(t["id"] == thread["id"] for t in body["threads"])
+
+
+async def test_explicit_thread_id_isolates_conversations_without_touching_active_pointer() -> None:
+    """The actual fix for STEPS.md 66's collision: two different thread_ids
+    used explicitly on /chat must never see each other's messages, and
+    using an explicit thread_id must not silently move the shared active
+    pointer out from under some other concurrent client relying on it."""
+    with TestClient(server.app) as client:
+        thread_a = client.post("/threads", json={"title": "Thread A"}).json()
+        thread_b = client.post("/threads", json={"title": "Thread B"}).json()
+        # POST /threads always activates what it just created, so thread_b
+        # (created second) is the active pointer right now.
+        active_before = client.get("/threads").json()["active_thread_id"]
+        assert active_before == thread_b["id"]
+
+        response = client.post(
+            "/chat",
+            json={"message": "Say exactly: isolated thread A reply", "thread_id": thread_a["id"]},
+        )
+        assert response.status_code == 200, response.text
+        assert "isolated thread a reply" in response.json()["content"].lower()
+
+        # The explicit-thread_id call above must NOT have moved the pointer
+        # — a second client relying on the active pointer (e.g. a live GUI
+        # session, per STEPS.md 66) would otherwise have its thread silently
+        # swapped out from under it.
+        active_after = client.get("/threads").json()["active_thread_id"]
+        assert active_after == thread_b["id"], (
+            "an explicit thread_id on /chat must not mutate the shared active pointer"
+        )
+
+        # thread_b's own history must be completely untouched by thread_a's chat.
+        client.post("/threads/active", json={"thread_id": thread_b["id"]})
+        history_b = client.get("/history").json()["messages"]
+        assert not any("isolated thread a reply" in m["content"].lower() for m in history_b)
+
+        client.post("/threads/active", json={"thread_id": thread_a["id"]})
+        history_a = client.get("/history").json()["messages"]
+        assert any("isolated thread a reply" in m["content"].lower() for m in history_a)
+
+
+async def test_chat_with_unknown_thread_id_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/chat", json={"message": "hi", "thread_id": "does-not-exist"})
+        assert response.status_code == 404
+
+
+async def test_set_active_unknown_thread_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/threads/active", json={"thread_id": "does-not-exist"})
+        assert response.status_code == 404
+
+
+async def test_rename_thread() -> None:
+    with TestClient(server.app) as client:
+        thread = client.post("/threads", json={}).json()
+        renamed = client.patch(f"/threads/{thread['id']}", json={"title": "Renamed"})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["title"] == "Renamed"
+
+        listed = client.get("/threads").json()["threads"]
+        assert any(t["id"] == thread["id"] and t["title"] == "Renamed" for t in listed)
+
+
+async def test_rename_unknown_thread_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.patch("/threads/does-not-exist", json={"title": "x"})
+        assert response.status_code == 404
+
+
+async def test_delete_non_active_thread_leaves_pointer_unchanged() -> None:
+    with TestClient(server.app) as client:
+        keep = client.post("/threads", json={"title": "keep"}).json()
+        doomed = client.post("/threads", json={"title": "doomed"}).json()
+        client.post("/threads/active", json={"thread_id": keep["id"]})
+
+        response = client.delete(f"/threads/{doomed['id']}")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["deleted"] is True
+        assert body["active_thread_id"] == keep["id"]
+
+        listed = client.get("/threads").json()
+        assert not any(t["id"] == doomed["id"] for t in listed["threads"])
+        assert listed["active_thread_id"] == keep["id"]
+
+
+async def test_delete_active_thread_reassigns_the_pointer() -> None:
+    with TestClient(server.app) as client:
+        other = client.post("/threads", json={"title": "other"}).json()
+        active = client.post("/threads", json={"title": "active"}).json()
+        # "active" is the pointer now (POST /threads always activates).
+
+        response = client.delete(f"/threads/{active['id']}")
+        assert response.status_code == 200, response.text
+        new_active_id = response.json()["active_thread_id"]
+        assert new_active_id != active["id"]
+
+        listed = client.get("/threads").json()
+        assert listed["active_thread_id"] == new_active_id
+        assert not any(t["id"] == active["id"] for t in listed["threads"])
+
+
+async def test_delete_unknown_thread_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.delete("/threads/does-not-exist")
+        assert response.status_code == 404
+
+
 if __name__ == "__main__":
     asyncio.run(test_chat_round_trips_through_the_real_graph())
     print("OK: /chat round-trips through the real graph")
@@ -206,3 +351,25 @@ if __name__ == "__main__":
     print("OK: deleting an unknown fact id returns 404")
     asyncio.run(test_cost_returns_real_langsmith_aggregates())
     print("OK: /cost returns real LangSmith aggregates across today/week/all_time")
+    asyncio.run(test_history_response_carries_the_thread_id_it_read())
+    print("OK: /history response includes the thread_id it read")
+    asyncio.run(test_threads_list_includes_the_bootstrapped_legacy_thread())
+    print("OK: /threads includes the bootstrapped legacy default thread")
+    asyncio.run(test_create_thread_becomes_the_new_active_thread())
+    print("OK: POST /threads creates a thread and activates it")
+    asyncio.run(test_explicit_thread_id_isolates_conversations_without_touching_active_pointer())
+    print("OK: explicit thread_id isolates conversations without moving the active pointer")
+    asyncio.run(test_chat_with_unknown_thread_id_returns_404())
+    print("OK: /chat with an unknown thread_id returns 404")
+    asyncio.run(test_set_active_unknown_thread_returns_404())
+    print("OK: POST /threads/active with an unknown thread_id returns 404")
+    asyncio.run(test_rename_thread())
+    print("OK: PATCH /threads/{id} renames a thread")
+    asyncio.run(test_rename_unknown_thread_returns_404())
+    print("OK: PATCH /threads/{id} on an unknown thread returns 404")
+    asyncio.run(test_delete_non_active_thread_leaves_pointer_unchanged())
+    print("OK: deleting a non-active thread leaves the pointer unchanged")
+    asyncio.run(test_delete_active_thread_reassigns_the_pointer())
+    print("OK: deleting the active thread reassigns the pointer")
+    asyncio.run(test_delete_unknown_thread_returns_404())
+    print("OK: DELETE /threads/{id} on an unknown thread returns 404")

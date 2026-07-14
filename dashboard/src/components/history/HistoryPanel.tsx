@@ -12,6 +12,14 @@ import { fetchHistory, type HistoryMessage } from "@/lib/api";
 // for. No fetch-on-a-timer / real-time sync — a manual refresh is enough
 // for a view you open to inspect, not to watch live (that's the chat tab's
 // job).
+//
+// Phase 15's thread picker briefly lived inline in this panel, then moved
+// to the persistent `ThreadSidebar` (visible from every tab, not just this
+// one) after the user asked for Claude-style thread switching from the
+// Chat tab itself — this panel remounts (`key={activeThreadId}` in
+// App.tsx) whenever the sidebar switches threads, which is what makes its
+// plain `fetchHistory()` call (no thread_id) pick up the newly active
+// thread automatically.
 export function HistoryPanel() {
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [loading, setLoading] = useState(false);

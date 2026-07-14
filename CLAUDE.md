@@ -20,8 +20,8 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 15 (multi-thread conversation support) is
-  next; read PLAN.md before beginning it.
+- **No active phase** — Phase 13 (Mac-native cluster: Apple Calendar +
+  open-URL-in-Brave) is next; read PLAN.md before beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -63,6 +63,22 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   live), and the injection-shaped-request scenario not run live. Surfaced
   Phase 15 as a spinoff (shared fixed `THREAD_ID` collides across
   concurrent clients) (STEPS.md groups 63–66).
+- Complete: Phase 15 — multi-thread conversation support: replaced the
+  single fixed `THREAD_ID` with an active-thread pointer + registry
+  (`assistant/thread_store.py`, separate `threads.sqlite`); `/chat`/
+  `/resume` gained an optional explicit `thread_id` (the actual fix for the
+  Phase 12 collision, STEPS.md 66) alongside new `/threads` list/create/
+  switch/rename/delete endpoints; CLI `--new` + `/new`/`/threads`/`/switch`;
+  voice's fail-closed local "start a new conversation" trigger phrase plus
+  per-turn active-thread resolution. Extended beyond the phase's original
+  locked scope at the user's direct request: thread delete
+  (`DELETE /threads/{id}`, reassigns the pointer or creates a replacement
+  thread if none remain) and a persistent Claude-style `ThreadSidebar`
+  (visible from every tab, not just History) for new/switch/rename/delete —
+  superseding the original History-tab-only picker. Every piece — the
+  collision fix, the voice trigger, thread switching, rename, and delete —
+  confirmed live (real launchd daemon, real Tauri window), not just
+  tests (STEPS.md groups 67–68).
 
 Roadmap history: renumbered 2026-07-13 (handoff-fix/memory/voice-upgrade/
 dashboard inserted ahead of the original polish phase). On 2026-07-14 Phase
@@ -98,12 +114,17 @@ assistant/
 │                             (long_term_memory.sqlite, separate from the checkpointer's file)
 ├── memory_extraction.py   # Phase 7 Part B: extraction, confirmation gate, recall — see its
 │                             module docstring for the full security design
+├── thread_store.py        # Phase 15: active-thread pointer + registry (threads.sqlite,
+│                             separate from both other SQLite files above) — see the
+│                             Active-thread pointer load-bearing decision below
 ├── voice_io.py            # Phase 5/8: mic capture, local STT (mlx-whisper), TTS (`say`)
-├── voice_daemon.py        # Phase 5: always-on Option+Return hotkey daemon (menu bar app)
+├── voice_daemon.py        # Phase 5: always-on Option+Return hotkey daemon (menu bar app);
+│                             Phase 15: local trigger-phrase parsing for starting a new thread
 ├── server.py              # Phase 9: FastAPI wrapper over build_graph() for the dashboard app
-│                             (/chat, /resume, /history, /memory/facts, /cost) — shares the
-│                             CLI/voice daemon's real checkpointer + THREAD_ID, NOT the
-│                             separate `langgraph dev` ephemeral store
+│                             (/chat, /resume, /history, /memory/facts, /cost, and Phase 15's
+│                             /threads endpoints) — shares the CLI/voice daemon's real
+│                             checkpointer + thread_store's active pointer, NOT the separate
+│                             `langgraph dev` ephemeral store
 └── studio.py              # LangGraph Studio / `langgraph dev` entry point (dev-time graph
                               debugger only; checkpointer=None, unrelated to server.py)
 
@@ -142,8 +163,34 @@ STEPS.md                    # build log
 - **Checkpointer lifecycle:** main.py owns the `with get_checkpointer()` block
   for the process lifetime and passes it into `build_agent()`. agent.py never
   creates its own.
-- **Fixed `THREAD_ID` constant** in main.py — per-run IDs would silently defeat
-  cross-session persistence, which is the point of the SQLite checkpointer.
+- **Active-thread pointer, not a fixed `THREAD_ID` constant (superseded
+  Phase 15, 2026-07-15):** every client previously shared one hardcoded
+  `THREAD_ID = "cli-default-thread"`, which was fine until concurrent real
+  usage collided badly enough to notice (STEPS.md 66 — a diagnostic call
+  against the shared thread interleaved with the user's live GUI session
+  and produced a confusing false "no delete access" symptom). Replaced by
+  `assistant/thread_store.py`: a separate `threads.sqlite` file holding a
+  thread registry plus a single-row active-pointer table clients read by
+  default. `/chat` and `/resume` (server.py) accept an optional explicit
+  `thread_id` that bypasses the pointer entirely — this explicit-id-with-
+  pointer-fallback model is the actual fix, since it lets one client target
+  a specific thread without mutating global state other concurrent clients
+  still depend on. Per-run IDs generated with no registry would still
+  silently defeat cross-session persistence, same reasoning as the
+  original fixed-constant decision — the pointer model doesn't relax that,
+  it just makes "which thread is the default" a stored, switchable fact
+  instead of a hardcoded one. First-run bootstrap seeds the registry with
+  `LEGACY_DEFAULT_THREAD_ID = "cli-default-thread"` (the exact old constant)
+  as both the first registered thread and the initial active pointer, so a
+  user who never touches the new thread commands keeps talking to exactly
+  the `conversation_memory.sqlite` history they already had. Full thread
+  management (list/rename/switch/create) lives in the dashboard's History
+  panel; the CLI gets `--new` plus in-session `/new`, `/threads`, `/switch`
+  commands; voice is reduced to two behaviors — continue the active thread
+  (re-resolved every turn, not cached at daemon startup) or a fixed local
+  trigger phrase ("start a new conversation") to start fresh, pattern-
+  matched on the raw transcript before it reaches the graph, same
+  fail-closed local-parsing posture as `parse_confirmation`.
 - **Web search:** `TavilySearch` from `langchain-tavily`. Do not reintroduce the
   deprecated `TavilySearchResults` or `langchain-community`.
 - **Tool errors are data, not exceptions:** failures (denylist rejections

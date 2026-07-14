@@ -8,6 +8,10 @@ import * as api from "@/lib/api";
 // HIDDEN), this proves HistoryPanel does the opposite on purpose: shows
 // everything, honestly labeled. Both are real requirements from the same
 // /history endpoint, for two different consumers (PLAN.md Phase 9 step 4).
+//
+// Thread management (list/switch/create/rename/delete) briefly lived
+// inline in this panel, then moved to the persistent `ThreadSidebar` —
+// see ThreadSidebar.test.tsx for that coverage.
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");

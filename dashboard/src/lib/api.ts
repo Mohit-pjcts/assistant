@@ -68,8 +68,67 @@ export async function fetchHistory(): Promise<HistoryMessage[]> {
   if (!response.ok) {
     throw new Error(`/history failed (${response.status}): ${await response.text()}`);
   }
-  const body = (await response.json()) as { messages: HistoryMessage[] };
+  const body = (await response.json()) as { messages: HistoryMessage[]; thread_id: string };
   return body.messages;
+}
+
+// Phase 15: multi-thread conversation support. Full thread management
+// (list/rename/switch/start-new) lives in the GUI's History panel — the
+// only surface that can actually show a picker (PLAN.md Phase 15's
+// scope-split decision, STEPS.md 66). Switching or creating a thread moves
+// the SHARED active pointer server.py's other endpoints (and the CLI/voice
+// daemon) fall back to when they don't specify a thread_id of their own —
+// a deliberately global effect, same as it always implicitly was when
+// there was only one thread.
+export interface ThreadSummary {
+  id: string;
+  title: string | null;
+  created_at: string;
+  last_active_at: string;
+}
+
+export async function fetchThreads(): Promise<{ threads: ThreadSummary[]; activeThreadId: string }> {
+  const response = await fetch(`${API_BASE_URL}/threads`);
+  if (!response.ok) {
+    throw new Error(`/threads failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { threads: ThreadSummary[]; active_thread_id: string };
+  return { threads: body.threads, activeThreadId: body.active_thread_id };
+}
+
+export async function createThread(title?: string): Promise<ThreadSummary> {
+  return postJSON<ThreadSummary>("/threads", { title: title ?? null });
+}
+
+export async function setActiveThread(threadId: string): Promise<ThreadSummary> {
+  return postJSON<ThreadSummary>("/threads/active", { thread_id: threadId });
+}
+
+export async function renameThread(threadId: string, title: string): Promise<ThreadSummary> {
+  const response = await fetch(`${API_BASE_URL}/threads/${threadId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error(`rename /threads/${threadId} failed (${response.status}): ${await response.text()}`);
+  }
+  return response.json() as Promise<ThreadSummary>;
+}
+
+// Does not purge the deleted thread's own conversation history server-side
+// (server.py's docstring on DELETE /threads/{id}) — just removes it from
+// the picker. Returns the active_thread_id AFTER deletion: deleting the
+// currently-active thread reassigns the shared pointer (thread_store's
+// "always exactly one active thread" invariant), so the caller needs to
+// know what's active now, not just that the delete succeeded.
+export async function deleteThread(threadId: string): Promise<{ activeThreadId: string }> {
+  const response = await fetch(`${API_BASE_URL}/threads/${threadId}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`delete /threads/${threadId} failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { deleted: boolean; active_thread_id: string };
+  return { activeThreadId: body.active_thread_id };
 }
 
 // Phase 7 Part B's durable facts, reviewed/managed here (PLAN.md Phase 9

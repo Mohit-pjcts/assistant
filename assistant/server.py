@@ -18,6 +18,19 @@ load-bearing for Phase 7's memory-write gate specifically: the `fact` field
 must reach the UI verbatim so it can be shown exactly as approved, per the
 red-team requirement `voice_daemon.py` already enforces by declining to
 speak it at all.
+
+Phase 15: thread routing. `/chat` and `/resume` accept an optional
+`thread_id`; when omitted, both fall back to `thread_store`'s active
+pointer (preserves every pre-Phase-15 client's behavior exactly — this is
+what makes the change backward compatible). This explicit-thread_id-with-
+pointer-fallback model is the actual fix for the STEPS.md 66 collision: one
+client can now target a specific thread via an explicit id without
+mutating the global pointer other concurrent clients still read by
+default. `/threads` (list/create/switch) and `PATCH /threads/{id}` (rename)
+manage the registry itself; switching or creating a thread changes the
+pointer, which is a deliberately GLOBAL, shared effect — same as it always
+implicitly was when there was only one thread, just now an explicit action
+instead of a hardcoded constant.
 """
 
 from __future__ import annotations
@@ -43,17 +56,13 @@ from langchain_core.messages import BaseMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 from langsmith import Client as LangSmithClient  # noqa: E402
 
-from assistant import memory_store  # noqa: E402
+from assistant import memory_store, thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
-
-# Same fixed thread as main.py — this IS the point (STEPS.md 54): the app
-# shares the CLI/voice daemon's actual conversation, not a separate one.
-THREAD_ID = "cli-default-thread"
 
 # Overridable so tests/throwaway runs can redirect to a temp copy instead of
 # the real conversation_memory.sqlite (CLAUDE.md's verification-discipline
@@ -67,6 +76,10 @@ CONVERSATION_DB_PATH = os.environ.get("ASSISTANT_CONVERSATION_DB_PATH", "convers
 # catch a later override, so it's resolved inside each function body).
 if "ASSISTANT_MEMORY_DB_PATH" in os.environ:
     memory_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_MEMORY_DB_PATH"]
+
+# Same redirect story again, for Phase 15's thread registry/pointer DB.
+if "ASSISTANT_THREADS_DB_PATH" in os.environ:
+    thread_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_THREADS_DB_PATH"]
 
 # Matches CLAUDE.md's Tech stack section (LANGCHAIN_PROJECT=personal-assistant),
 # read from the env rather than hardcoded so a differently-configured
@@ -181,10 +194,54 @@ def _serialize_turn_result(result: dict[str, Any]) -> dict[str, Any]:
 
 class ChatRequest(BaseModel):
     message: str
+    # Optional (Phase 15): a client that manages its own conversation can
+    # target a specific thread without touching the shared active pointer —
+    # the actual fix for STEPS.md 66's collision. Omitted means "whatever
+    # the active pointer currently says", preserving every pre-Phase-15
+    # client's behavior exactly.
+    thread_id: str | None = None
 
 
 class ResumeRequest(BaseModel):
     approved: bool
+    # Must match whichever thread_id the /chat call that produced the
+    # pending interrupt used — same fallback-to-active-pointer default.
+    thread_id: str | None = None
+
+
+class CreateThreadRequest(BaseModel):
+    title: str | None = None
+
+
+class SetActiveThreadRequest(BaseModel):
+    thread_id: str
+
+
+class RenameThreadRequest(BaseModel):
+    title: str
+
+
+async def _resolve_thread_id(explicit: str | None) -> str:
+    """Explicit-thread_id-with-pointer-fallback (PLAN.md Phase 15 step 1):
+    no thread_id means "the active pointer"; an explicit one must already
+    be a real, registered thread — an unrecognized id is a client bug
+    (typo'd/stale id), not something to silently paper over by creating a
+    thread nobody asked to create."""
+    if explicit is None:
+        return await thread_store.get_active_thread_id(db_path=thread_store.DEFAULT_DB_PATH)
+    thread = await thread_store.get_thread(explicit, db_path=thread_store.DEFAULT_DB_PATH)
+    if thread is None:
+        raise HTTPException(status_code=404, detail=f"No thread with id {explicit}")
+    return explicit
+
+
+def _serialize_thread(thread: thread_store.Thread) -> dict[str, Any]:
+    return {
+        "id": thread.id,
+        "title": thread.title,
+        "created_at": thread.created_at,
+        "last_active_at": thread.last_active_at,
+    }
 
 
 @asynccontextmanager
@@ -213,7 +270,10 @@ async def lifespan(app: FastAPI):
     async with get_checkpointer(CONVERSATION_DB_PATH) as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
         app.state.graph = graph
-        app.state.config = make_thread_config(THREAD_ID)
+        # No longer a single fixed config (Phase 15) — every endpoint below
+        # resolves its own thread_id per-request instead, since which
+        # thread is "active" can now change between requests (a switch, a
+        # new thread) within the same server process lifetime.
         yield
 
 
@@ -237,42 +297,105 @@ DASHBOARD_ORIGINS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=DASHBOARD_ORIGINS,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> dict[str, Any]:
+    thread_id = await _resolve_thread_id(request.thread_id)
     try:
         result = await app.state.graph.ainvoke(
             {"messages": [("user", request.message)]},
-            config=app.state.config,
+            config=make_thread_config(thread_id),
         )
     except Exception as exc:  # network errors, rate limits, etc. — data, not a crash
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
+    await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
     return _serialize_turn_result(result)
 
 
 @app.post("/resume")
 async def resume(request: ResumeRequest) -> dict[str, Any]:
+    thread_id = await _resolve_thread_id(request.thread_id)
     try:
         result = await app.state.graph.ainvoke(
             Command(resume=request.approved),
-            config=app.state.config,
+            config=make_thread_config(thread_id),
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
+    await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
     return _serialize_turn_result(result)
+
+
+@app.get("/threads")
+async def list_threads() -> dict[str, Any]:
+    threads = await thread_store.list_threads(db_path=thread_store.DEFAULT_DB_PATH)
+    active_thread_id = await thread_store.get_active_thread_id(db_path=thread_store.DEFAULT_DB_PATH)
+    return {
+        "threads": [_serialize_thread(t) for t in threads],
+        "active_thread_id": active_thread_id,
+    }
+
+
+@app.post("/threads")
+async def create_thread(request: CreateThreadRequest) -> dict[str, Any]:
+    thread = await thread_store.create_thread(title=request.title, db_path=thread_store.DEFAULT_DB_PATH)
+    return _serialize_thread(thread)
+
+
+@app.post("/threads/active")
+async def set_active_thread(request: SetActiveThreadRequest) -> dict[str, Any]:
+    try:
+        thread = await thread_store.set_active_thread(
+            request.thread_id, db_path=thread_store.DEFAULT_DB_PATH
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No thread with id {request.thread_id}")
+    return _serialize_thread(thread)
+
+
+@app.patch("/threads/{thread_id}")
+async def rename_thread(thread_id: str, request: RenameThreadRequest) -> dict[str, Any]:
+    try:
+        thread = await thread_store.rename_thread(
+            thread_id, request.title, db_path=thread_store.DEFAULT_DB_PATH
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No thread with id {thread_id}")
+    return _serialize_thread(thread)
+
+
+@app.delete("/threads/{thread_id}")
+async def delete_thread(thread_id: str) -> dict[str, Any]:
+    """Does not purge the thread's own conversation_memory.sqlite checkpoint
+    rows — see thread_store.delete_thread's docstring for why. Returns the
+    active_thread_id AFTER deletion, since deleting the currently-active
+    thread reassigns the pointer (thread_store's "always exactly one active
+    thread" invariant) — the caller needs to know what it's now looking at."""
+    try:
+        active_thread_id = await thread_store.delete_thread(
+            thread_id, db_path=thread_store.DEFAULT_DB_PATH
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No thread with id {thread_id}")
+    return {"deleted": True, "active_thread_id": active_thread_id}
 
 
 @app.get("/history")
 async def history() -> dict[str, Any]:
-    """Read the shared thread's persisted state via the public
+    """Read the active thread's persisted state via the public
     `graph.aget_state()` API — not by hand-parsing the checkpointer's own
     serialized SQLite rows (STEPS.md 54 flagged this as real parsing work
-    the wrong way to do it)."""
-    snapshot = await app.state.graph.aget_state(app.state.config)
+    the wrong way to do it). Always follows the active pointer (Phase 15):
+    a GUI picker switches threads via POST /threads/active, then re-calls
+    this — /history itself doesn't take a thread_id override, since viewing
+    a thread IS what "make it active" means for this endpoint's one caller
+    (the History panel)."""
+    thread_id = await thread_store.get_active_thread_id(db_path=thread_store.DEFAULT_DB_PATH)
+    snapshot = await app.state.graph.aget_state(make_thread_config(thread_id))
     messages: list[BaseMessage] = snapshot.values.get("messages", [])
     return {
         "messages": [
@@ -294,7 +417,8 @@ async def history() -> dict[str, Any]:
                 "name": getattr(m, "name", None),
             }
             for m in messages
-        ]
+        ],
+        "thread_id": thread_id,
     }
 
 

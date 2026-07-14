@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import assistant.voice_io as voice_io
-from assistant.voice_daemon import _spoken_question
+from assistant.voice_daemon import _is_new_thread_trigger, _spoken_question
 
 
 @contextmanager
@@ -147,6 +147,28 @@ def test_spoken_question_falls_back_to_raw_payload() -> None:
     )
 
 
+def test_new_thread_trigger_recognizes_the_fixed_phrase() -> None:
+    for text in [
+        "start a new conversation",
+        "Start a new conversation.",
+        "please start a new conversation now",
+    ]:
+        assert _is_new_thread_trigger(text) is True, f"expected True for {text!r}"
+
+
+def test_new_thread_trigger_fails_closed_on_unrelated_text() -> None:
+    """Word-boundaried, whole-phrase match — a mishearing or an unrelated
+    utterance that merely mentions 'conversation' must not accidentally
+    fire a real, irreversible thread switch."""
+    for text in [
+        "",
+        "let's have a conversation about my day",
+        "start a new project",
+        "new conversation",
+    ]:
+        assert _is_new_thread_trigger(text) is False, f"expected False for {text!r}"
+
+
 if __name__ == "__main__":
     test_parse_confirmation_recognizes_yes_phrases()
     print("OK: test_parse_confirmation_recognizes_yes_phrases")
@@ -170,4 +192,8 @@ if __name__ == "__main__":
     print("OK: test_spoken_question_prefers_spoken_prompt")
     test_spoken_question_falls_back_to_raw_payload()
     print("OK: test_spoken_question_falls_back_to_raw_payload")
-    print("\n11 tests passed")
+    test_new_thread_trigger_recognizes_the_fixed_phrase()
+    print("OK: test_new_thread_trigger_recognizes_the_fixed_phrase")
+    test_new_thread_trigger_fails_closed_on_unrelated_text()
+    print("OK: test_new_thread_trigger_fails_closed_on_unrelated_text")
+    print("\n13 tests passed")

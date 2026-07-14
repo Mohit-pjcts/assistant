@@ -2,8 +2,10 @@
 to the assistant; replies are spoken back. Runs as a menu bar app.
 
 The graph invocation is the exact same `graph.ainvoke()` path as main.py's
-text CLI (PLAN.md Phase 5 step 4), sharing the same THREAD_ID so voice and
-text turns share one conversation history. main.py itself is untouched.
+text CLI (PLAN.md Phase 5 step 4). As of Phase 15, "sharing one conversation"
+means following thread_store's active-thread pointer (re-read every turn —
+see the Phase 15 threading note below), not a hardcoded shared constant.
+main.py itself is untouched.
 
 Threading model (each constraint is hard, not convention — see STEPS.md):
 
@@ -40,12 +42,25 @@ Option+Return press submits it (no press-to-start: while a question is
 pending, recording-by-default is the ergonomic behavior the user asked
 for). Fails closed: an unclear answer, or no answer within the timeout,
 declines.
+
+Phase 15 threading: voice is deliberately reduced to exactly two behaviors
+(PLAN.md's scope-split decision, STEPS.md 66) — continue whatever
+thread_store's active pointer currently names (re-resolved at the START of
+every turn, not cached at daemon startup, so a thread switched elsewhere —
+e.g. the GUI starting a new conversation — takes effect on the very next
+utterance without a daemon restart), or start a fresh thread on a fixed
+trigger phrase ("start a new conversation") pattern-matched locally on the
+raw transcript BEFORE it ever reaches the graph — same local, fail-closed
+parsing approach as `parse_confirmation` for yes/no. Voice never resumes an
+arbitrary specific OLD thread by id; picking from a list isn't a
+voice-native interaction, so that stays GUI/CLI-only.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 import sys
 import threading
@@ -65,9 +80,10 @@ import rumps  # noqa: E402
 from pynput.keyboard import GlobalHotKeys  # noqa: E402
 from PyObjCTools import AppHelper  # noqa: E402
 
+from assistant import thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
-from assistant.main import THREAD_ID, _render_content  # noqa: E402
+from assistant.main import _render_content  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
@@ -85,6 +101,20 @@ logger = logging.getLogger(__name__)
 
 APP_NAME = "Assistant"
 HOTKEY = "<alt>+<enter>"
+
+# Fixed trigger phrase for starting a fresh thread by voice (PLAN.md Phase
+# 15 step 1) — word-boundaried so it only fires on the actual command
+# phrase, not any utterance that happens to contain "conversation"
+# somewhere. Checked locally against the raw transcript, before the graph
+# ever sees it — same fail-closed, non-model-routed posture as
+# voice_io.parse_confirmation, not a tool call the model could choose to
+# skip or a phrase an injected tool result could try to imitate mid-turn
+# (this only ever runs on the user's own freshly-transcribed utterance).
+_NEW_THREAD_TRIGGER_RE = re.compile(r"\bstart a new conversation\b")
+
+
+def _is_new_thread_trigger(text: str) -> bool:
+    return bool(_NEW_THREAD_TRIGGER_RE.search(text.strip().lower()))
 
 # pynput already coalesces OS key-repeat on a held key (its HotKey tracks
 # pressed-key state), so this debounce is NOT for repeat suppression — it
@@ -143,7 +173,6 @@ class VoiceDaemon:
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._graph = None
-        self._config: dict | None = None
         self._shutdown: asyncio.Event | None = None
         self._answer_submitted: asyncio.Event | None = None
 
@@ -216,9 +245,25 @@ class VoiceDaemon:
                 return
             logger.info("user: %s", text)
 
+            if _is_new_thread_trigger(text):
+                # Handled entirely locally, before the graph ever sees this
+                # utterance — the trigger phrase is a client-side command,
+                # not something for the model to interpret or act on.
+                thread = await thread_store.create_thread()
+                logger.info("voice trigger: started new thread %s", thread.id)
+                await asyncio.to_thread(speak, "Started a new conversation.")
+                await thread_store.touch_thread(thread.id)
+                return
+
+            # Re-resolved every turn, not cached at daemon startup — a
+            # thread switched elsewhere (e.g. the GUI) takes effect on the
+            # very next utterance (module docstring's Phase 15 section).
+            thread_id = await thread_store.get_active_thread_id()
+            config = make_thread_config(thread_id)
+
             result = await self._graph.ainvoke(
                 {"messages": [("user", text)]},
-                config=self._config,
+                config=config,
             )
 
             while "__interrupt__" in result:
@@ -233,17 +278,18 @@ class VoiceDaemon:
                     await asyncio.to_thread(
                         speak, "That needs a text confirmation, so I'm skipping it for now."
                     )
-                    result = await self._graph.ainvoke(Command(resume=False), config=self._config)
+                    result = await self._graph.ainvoke(Command(resume=False), config=config)
                     continue
                 question = _spoken_question(payload)
                 logger.info("confirmation asked: %s", question)
                 approved = await self._ask_confirmation(question)
                 logger.info("confirmation outcome: %s", "approved" if approved else "declined")
-                result = await self._graph.ainvoke(Command(resume=approved), config=self._config)
+                result = await self._graph.ainvoke(Command(resume=approved), config=config)
 
             reply = _render_content(result["messages"][-1].content)
             logger.info("assistant: %s", reply)
             await asyncio.to_thread(speak, reply)
+            await thread_store.touch_thread(thread_id)
 
         except Exception:
             logger.exception("voice turn failed")
@@ -309,7 +355,6 @@ class VoiceDaemon:
 
         async with get_checkpointer() as checkpointer:
             self._graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
-            self._config = make_thread_config(THREAD_ID)
             # First model load takes several seconds — pay it at startup,
             # not as latency on the user's first utterance.
             await asyncio.to_thread(preload_stt_model)

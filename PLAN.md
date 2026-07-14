@@ -937,13 +937,48 @@ Phase 12's two carried-forward gaps closed; STEPS.md updated.
 
 ---
 
-## Phase 15 — Multi-thread conversation support — NOT STARTED
+## Phase 15 — Multi-thread conversation support — COMPLETE (2026-07-15)
 
 **Objective:** replace the single fixed `THREAD_ID` every client (CLI, voice
 daemon, dashboard GUI) currently shares with real per-conversation threads,
 while keeping the property that made the fixed ID attractive in the first
 place — persistence that survives across sessions, not per-run IDs that
 silently defeat the checkpointer.
+
+**Delivered:** `assistant/thread_store.py` (new — active-thread pointer +
+thread registry in a separate `threads.sqlite`, bootstrapping the old fixed
+`THREAD_ID` as the first thread so pre-existing conversations keep working
+untouched); `assistant/server.py` gained optional `thread_id` on `/chat`
+and `/resume` (explicit-id-with-pointer-fallback — the actual fix for the
+STEPS.md 66 collision) plus `GET/POST /threads`, `POST /threads/active`,
+`PATCH /threads/{id}`, and `DELETE /threads/{id}`; `assistant/main.py` got
+a `--new` flag and `/new` `/threads` `/switch` in-session commands;
+`assistant/voice_daemon.py` re-resolves the active thread every turn
+(rather than caching one config at startup) and recognizes a fixed,
+fail-closed local trigger phrase ("start a new conversation") checked
+against the raw transcript before the graph ever sees it;
+`assistant/studio.py` needed no change (verified, not assumed — it has no
+`THREAD_ID` reference at all, since `langgraph dev` manages its own
+separate ephemeral persistence). Full record: STEPS.md groups 67–68.
+
+**Scope expansion (2026-07-15, after the phase's original done-when was
+already met):** the user asked directly for thread delete and Claude-style
+switching from the chat window itself — a request that reopens this
+phase's own step-1 checkpoint decision below ("full thread management
+belongs in the GUI's History panel... the only surface that can show a
+picker"). Implemented as asked rather than deferred: `thread_store.
+delete_thread()` + `DELETE /threads/{id}` (reassigns the active pointer if
+the deleted thread was active; creates a replacement thread if none
+remain — the "always exactly one active thread" invariant holds even
+here), and a persistent `ThreadSidebar` component (`dashboard/src/
+components/threads/`) replacing the History-tab-only picker — visible from
+every tab, with New chat / switch / rename / delete (`AlertDialog`-
+confirmed, matching `MemoryPanel`'s existing confirm-before-irreversible-
+delete pattern). `App.tsx` now wraps a persistent sidebar plus the
+original Tabs shell; `ChatPanel`/`HistoryPanel` remount via
+`key={activeThreadId}` on a switch rather than taking a `thread_id` prop,
+since both already default to the active pointer server-side. Full record:
+STEPS.md group 68.
 
 **Why this is its own phase, not a Phase 12 patch:** discovered during Phase
 12 step 5's live verification (STEPS.md 66) — a diagnostic call against the
@@ -974,25 +1009,32 @@ full scoping checkpoint:**
    stays GUI/CLI-only.
 
 **Steps (scope fully at phase start, same as every other phase):**
-1. Design CHECKPOINT: the active-thread pointer's storage (own small
-   SQLite table? a JSON file alongside `conversation_memory.sqlite`?),
-   exact `server.py` API surface for list/switch/create (new endpoints
-   beyond today's fixed-thread `/chat`+`/resume`), and the voice daemon's
-   trigger-phrase wording for "start a new conversation."
-2. Implement the pointer + new server endpoints; update `main.py`,
-   `voice_daemon.py`, `studio.py` to read the active pointer instead of a
-   hardcoded constant.
-3. GUI: thread list/picker in the History panel (or a new panel), wired to
-   the new endpoints.
-4. CLI: new/switch affordance.
-5. Voice: trigger-phrase handling for starting fresh; continues-active-thread
-   as the unconditional default otherwise.
-6. Verify: two clients can now safely use DIFFERENT threads concurrently
-   without collision (the actual bug this phase exists to fix); voice
-   continues the right thread by default; GUI can list/switch/start threads;
-   old single-thread behavior still works for a user who never switches.
+1. **DONE.** Design checkpoint — locked at discovery time (STEPS.md 66),
+   see the three decisions above; storage is `thread_store.py`'s dedicated
+   `threads.sqlite`, server API is the explicit-id-with-pointer-fallback
+   model, trigger phrase is "start a new conversation."
+2. **DONE (STEPS.md 67.1/67.2).** Pointer + server endpoints implemented;
+   `main.py`/`voice_daemon.py` updated to read the active pointer.
+   `studio.py` checked and left alone (see Delivered above).
+3. **DONE, then redesigned (STEPS.md 67.7, then 68.3).** Thread list/picker
+   first landed in the History panel per the original scope-split decision
+   below, then moved to a persistent cross-tab `ThreadSidebar` after the
+   scope expansion — see that note above.
+4. **DONE (STEPS.md 67.4).** `--new` flag plus `/new`/`/threads`/`/switch`
+   in-session commands.
+5. **DONE (STEPS.md 67.5).** Trigger-phrase handling for a fresh thread;
+   active-thread-by-default otherwise, re-resolved every turn.
+6. **DONE, verified live (STEPS.md 67 follow-ups, 68 follow-up).** The
+   explicit-thread_id isolation test proves the collision fix against the
+   real graph; the voice trigger, thread switching, rename, and delete were
+   each confirmed working by the user in the real launchd daemon / real
+   Tauri window, not just in tests; old single-thread behavior is proven
+   both at `thread_store`'s unit level and via the CLI smoke script
+   continuing the legacy thread by default.
 
-**Done-when:** no two clients can silently collide on shared thread state the
-way STEPS.md 66 did; GUI has a working thread picker; voice's two defined
-behaviors work; CLAUDE.md's fixed-`THREAD_ID` load-bearing decision updated
-to describe the new pointer model; tests + STEPS.md updated.
+**Done-when (all met):** no two clients can silently collide on shared
+thread state the way STEPS.md 66 did ✓; GUI has a working thread
+switcher/picker ✓ (now a persistent sidebar, exceeding the original "History
+panel" scope); voice's two defined behaviors work ✓, confirmed live; CLAUDE.
+md's fixed-`THREAD_ID` load-bearing decision updated to describe the new
+pointer model ✓; tests + STEPS.md updated ✓ (groups 67–68).

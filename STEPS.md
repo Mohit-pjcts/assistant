@@ -4553,3 +4553,382 @@ Revisit either gap opportunistically (a later phase, or if a real injection
 attempt is ever actually observed) rather than treating this as a closed,
 proven-safe line — the mitigation is in place and unit-tested in isolation;
 the live, end-to-end adversarial case specifically is what's unverified.
+
+## 67. Phase 15 — multi-thread conversation support (2026-07-15)
+
+**Objective:** replace the single fixed `THREAD_ID` every client (CLI, voice
+daemon, dashboard GUI) shared with real per-conversation threads, fixing the
+STEPS.md 66 collision, while keeping the property that made the fixed ID
+attractive in the first place — persistence that survives across sessions.
+Design checkpoint (pointer storage, server API surface, voice trigger
+wording) was already locked before this session started; this entry covers
+implementation (steps 2–6) only.
+
+**67.1 — `assistant/thread_store.py` (new module).** A separate
+`threads.sqlite` file (consistent with `memory_store.py`'s precedent of one
+small custom table per concern, not shared with the checkpointer's own
+schema) with two tables: `threads` (id/title/created_at/last_active_at) and
+a single-row `active_pointer` (the "exactly one active thread" invariant
+enforced by a `CHECK (id = 1)` constraint, not just calling-code
+convention). `get_active_thread_id()` bootstraps a completely fresh store
+by seeding `LEGACY_DEFAULT_THREAD_ID = "cli-default-thread"` — the literal
+pre-Phase-15 constant — as both the first registered thread and the
+initial pointer, which is what makes "old single-thread behavior still
+works" true rather than aspirational: a user who never touches the new
+commands keeps talking to the exact `conversation_memory.sqlite` history
+they already had, not a fresh empty thread. Bootstrap uses `INSERT OR
+IGNORE` / `ON CONFLICT DO NOTHING` plus a re-read rather than assuming the
+caller's own write won, so two processes racing to bootstrap at once (e.g.
+the CLI and the server starting simultaneously on a brand-new install)
+converge on the same answer instead of erroring. Every function takes an
+optional `db_path` resolved inside the function body against
+`DEFAULT_DB_PATH` — same late-binding reason `memory_store.py` already
+documents (a parameter default would ignore a test's later monkeypatch).
+8 new tests in `tests/test_thread_store.py`, all passing (bootstrap
+idempotency, create-activates, switch/rename/list-ordering, and both
+KeyError paths for an unknown id).
+
+**67.2 — `assistant/server.py`.** `ChatRequest`/`ResumeRequest` both gained
+an optional `thread_id: str | None`; a new `_resolve_thread_id()` helper
+implements the locked explicit-id-with-pointer-fallback model — no id means
+"whatever the active pointer says" (preserves every pre-Phase-15 client's
+behavior byte-for-byte), an explicit id must already be a real registered
+thread or the request 404s (a stale/typo'd id is a client bug, not
+something to silently paper over by creating a thread nobody asked for).
+New endpoints: `GET /threads` (list + `active_thread_id`), `POST /threads`
+(create, activates immediately), `POST /threads/active` (switch pointer,
+404 on unknown id), `PATCH /threads/{id}` (rename, 404 on unknown id) — CORS
+`allow_methods` widened to include `PATCH`. `app.state.config` (a single
+config baked at startup) is gone entirely — `/chat`, `/resume`, and
+`/history` each resolve their own thread_id and build
+`make_thread_config()` fresh per request, since which thread is "active"
+can now change between requests within one server process's lifetime.
+`/history` deliberately does NOT take a `thread_id` override (unlike
+`/chat`/`/resume`) — it always follows the active pointer, and now also
+returns the `thread_id` it read so a client can label what it's looking at;
+switching what `/history` shows is what `POST /threads/active` is for. Both
+`/chat` and `/resume` call `thread_store.touch_thread()` after a real turn
+so `last_active_at`-based list ordering reflects genuine use, not just
+creation time.
+
+**67.3 — `tests/test_server.py`.** 8 new tests against the real graph/real
+Anthropic API (no mocking, same convention as every other test in this
+file), the load-bearing one being
+`test_explicit_thread_id_isolates_conversations_without_touching_active_pointer`:
+creates two threads, sends a real message to one via an explicit
+`thread_id`, and asserts (a) the reply only appears in that thread's
+history, never the other's, and (b) the shared active pointer — which some
+other concurrent client would be relying on — was never moved by the
+explicit-id call. This is a direct regression test for the exact STEPS.md
+66 collision. Also: 404 on an unknown `thread_id` for `/chat` and
+`/threads/active`, rename round-trip + 404, and a check that `/threads`
+already lists the bootstrapped legacy thread (proven at the HTTP layer, not
+just `thread_store`'s own unit tests). All 15 tests in the file pass
+(7 pre-existing + 8 new).
+
+**67.4 — `assistant/main.py` (CLI).** Dropped the `THREAD_ID` constant.
+Added `--new` (argparse) to start a brand-new thread instead of continuing
+the active one, plus three in-session commands — `/new`, `/threads`
+(marks the active one with `*`), `/switch <id>` (graceful "no thread with
+that id" message, not a crash, on a bad id) — implemented as
+`_handle_thread_command()`, called only when the first whitespace-delimited
+token of the input is one of exactly those three strings; anything else
+starting with `/` still flows through as a normal message to the assistant,
+unchanged from before. `thread_store.touch_thread()` called after each
+successful turn, mirroring server.py. Verified with a scripted,
+temp-DB-redirected smoke test (real `_run()`, `builtins.input` monkeypatched
+to a canned sequence) exercising `/threads` → `/new` → `/threads` → a
+`/switch` to a nonexistent id → `quit`, end to end with no exception —
+main.py itself still has no dedicated test file (CLAUDE.md's "interactive
+entry points verified by hand" convention), so this ad hoc script was the
+verification, not a permanent test.
+
+**67.5 — `assistant/voice_daemon.py`.** Removed the `THREAD_ID` import from
+main.py and the `self._config` attribute entirely — `_process_turn()` now
+resolves `thread_store.get_active_thread_id()` fresh at the start of every
+turn instead of caching a config once at daemon startup. This was a
+deliberate reading of the locked "voice always continues the active
+thread" decision: re-resolving per-turn (not per-daemon-launch) means a
+thread switched elsewhere — the GUI starting a new conversation, say —
+takes effect on the voice daemon's very next utterance without needing a
+restart, which is the more useful interpretation of "the active thread" for
+a process that can run for days. New `_is_new_thread_trigger()`: a
+word-boundaried regex on the fixed phrase "start a new conversation",
+checked against the raw transcript locally, before the graph ever sees the
+utterance — same fail-closed, non-model-routed posture as
+`voice_io.parse_confirmation` (PLAN.md's explicit requirement: not a tool
+call the model could choose to skip). On a match: creates+activates a new
+thread via `thread_store.create_thread()`, speaks a short confirmation, and
+returns without ever invoking the graph on that utterance. 2 new tests in
+`tests/test_voice_io.py` (which already imports pure helpers straight out
+of `voice_daemon.py`, e.g. `_spoken_question` — same pattern reused here):
+recognizes the phrase across minor variations, and — the fail-closed
+property that actually matters, since this triggers a real irreversible
+thread switch — does NOT fire on unrelated text that merely contains the
+word "conversation" or a near-miss like "new conversation" without "start
+a". 13/13 tests pass in the file.
+
+**67.6 — `assistant/studio.py`: verified, not changed.** PLAN.md's step 2
+listed studio.py among the files needing an update, on the assumption it
+had a hardcoded thread constant like main.py/voice_daemon.py did. Checked
+against the actual code (CLAUDE.md's verification-discipline rule — check
+installed/actual reality before coding against an assumption) rather than
+applying the planned change on faith: `studio.py`'s `make_graph()` compiles
+with `checkpointer=None` specifically because the LangGraph API server
+(`langgraph dev`) manages its own separate, ephemeral persistence
+(`.langgraph_api/*.pckl`) — `grep THREAD_ID` across the whole file returns
+nothing. Studio was never part of the collision this phase fixes; no code
+change made.
+
+**67.7 — Dashboard (`dashboard/src/lib/api.ts`,
+`dashboard/src/components/history/HistoryPanel.tsx`).** `api.ts` gained
+`ThreadSummary` plus `fetchThreads`/`createThread`/`setActiveThread`/
+`renameThread`, matching server.py's new endpoints. The History panel is
+the thread picker (per the locked scope-split: full thread management
+lives only here, the one surface that can show a list) — a row of
+thread buttons above the message list, active one highlighted
+(`data-active`), `+ New` to create-and-switch, click to switch, double-click
+to rename inline (Enter submits, Escape cancels, blur also submits). No new
+UI primitives introduced — the rename input is a plain styled `<input>`
+matching the existing `Textarea`'s focus-ring classes, consistent with the
+project's "no lucide-react icons used anywhere yet" convention observed
+before adding this. 9 new component tests (list+highlight, switch reloads
+history, create, rename-on-dblclick-then-Enter, thread-list error doesn't
+break the message list) — all mock `fetchThreads` et al. explicitly rather
+than letting the real network-calling implementation run under jsdom.
+Full dashboard suite: 30/30 tests pass (was 25); `tsc && vite build` clean.
+
+**67.8 — CLAUDE.md.** Replaced the "Fixed `THREAD_ID` constant" load-bearing
+bullet with the pointer-model description (bootstrap behavior, the
+explicit-id-with-pointer-fallback fix, per-client scope split) and added
+`thread_store.py` plus the Phase 15 annotations to the Architecture tree.
+Did NOT touch the Current Status block — that requires my explicit
+approval per the Git rules, proposed separately below, not applied here.
+
+**Full regression, both stacks:** every file in `tests/` run individually
+(`python tests/test_*.py`) — all pass, zero failures, including every
+pre-Phase-15 file untouched by this phase (compaction, interrupts,
+mac_tools, mcp_tools, memory_extraction, memory_store, memory, supervisor,
+tools, write_tools). Dashboard: `npm test` (30/30) and `npm run build`
+(`tsc` + `vite build`) both clean. No stray real `threads.sqlite` or other
+state file was left at the repo root — checked via `git status` and a
+direct `ls *.sqlite` after the full run; every test/smoke-script redirected
+its DB path to a temp directory (CLAUDE.md's verification-discipline rule).
+
+**Cost impact:** none beyond what Phase 15 already implies — no new
+recurring LLM calls; `thread_store.py` is pure SQLite I/O, and the new
+server endpoints are metadata operations, not model calls. The
+per-real-API-call test cost is the same small number of "Say exactly: ..."
+turns the existing test_server.py convention already used, plus a similar
+handful for the new isolation test.
+
+**Done-when, checked against PLAN.md's Phase 15 criteria:**
+- No two clients can silently collide on shared thread state the way
+  STEPS.md 66 did ✓ — proven directly by
+  `test_explicit_thread_id_isolates_conversations_without_touching_active_pointer`
+  against the real graph, not just argued from the design.
+- GUI has a working thread picker (list/switch/create/rename) ✓ — verified
+  via component tests; not yet eyeballed in the real Tauri window (same
+  caveat pattern as Phase 9's initial pass — recommend a real-window pass
+  before treating the GUI side as fully proven, though the underlying
+  HTTP contract is proven against the real backend via test_server.py).
+- Voice's two defined behaviors work ✓ at the unit-test level
+  (`_is_new_thread_trigger`) and via code-path review (per-turn pointer
+  resolution); not yet exercised on the real launchd daemon with a live
+  microphone — flagging as unverified-live, same honesty standard as
+  Phase 8/12's accepted-gap notes, not silently claimed as fully proven.
+- Old single-thread behavior still works for a user who never switches ✓ —
+  proven both at `thread_store`'s unit level and at the HTTP layer
+  (`test_threads_list_includes_the_bootstrapped_legacy_thread`), plus the
+  CLI smoke script continuing the legacy thread by default when `--new`
+  isn't passed.
+- CLAUDE.md's fixed-`THREAD_ID` load-bearing decision updated ✓; tests +
+  STEPS.md updated ✓.
+
+**Two items left unverified live, flagged rather than silently assumed
+(candidates for a future opportunistic pass, same convention as Phase 12's
+accepted gaps):** the GUI thread picker in the actual running Tauri window,
+and the voice trigger phrase on the real launchd daemon with real
+microphone input. Both are covered by the code paths' own unit/component
+tests and by direct code review, but "runs in CI/tests" and "confirmed live
+with real hardware/a real window" are different bars, and this project's
+own convention (Phase 8, Phase 9, Phase 12) is to say so explicitly instead
+of blurring the two.
+
+**Follow-up, same day: voice trigger confirmed live — one of the two gaps
+above, closed.** First real attempt didn't work: the user spoke "start a
+new conversation" and it fell through to the graph as an ordinary message
+instead of starting a new thread (visible in Chat as a normal turn, with
+the model replying "Got it — starting fresh!" as plain conversation, not an
+actual thread switch). Root cause was environmental, not a code defect —
+the `com.mohitvuyyuru.assistant-voice` launchd daemon had been running
+continuously since before this session's `voice_daemon.py` edits landed on
+disk; a long-running Python process doesn't pick up source changes without
+being restarted. Diagnosed via `launchctl list | grep assistant` (daemon
+running, old code still resident in memory) rather than assumed. Fixed by
+quitting the menu-bar instance and relaunching by hand
+(`.venv/bin/assistant-voice`, run from the project root so `load_dotenv()`
+resolves) instead of `launchctl kickstart`, so the user could watch the
+daemon's logs stream live while re-testing. Re-tested live with a real
+utterance after the restart: the trigger phrase now correctly starts a new
+thread instead of reaching the graph, confirmed by the user directly
+("the trigger works"). Worth remembering for any future `voice_daemon.py`
+change: a launchd-managed long-running daemon needs an explicit restart to
+observe new behavior, the same lesson Phase 8's STEPS.md 53 already
+recorded when the STT backend was swapped — this is the second time it's
+bitten a live-verification pass, so it's now called out here explicitly
+rather than left implicit.
+
+Remaining open item from the two flagged above: the GUI thread picker
+still hasn't been eyeballed in the real Tauri window.
+
+**Second follow-up, same day: GUI thread picker confirmed live, with a real
+bug found and fixed.** The user confirmed the picker itself works in the
+real Tauri window — it lives in the History tab, as designed — but
+reported renaming a thread didn't work. Root cause: the original
+implementation triggered rename via `onDoubleClick` on the same `<Button>`
+element that also had `onClick` wired to switch-thread. That's a real
+design defect, not a flake — a genuine double-click ALWAYS fires two
+`click` events before the browser's `dblclick`, so every rename attempt
+first ran `handleSwitchThread`. For the already-active thread that's a
+harmless no-op (an early-return guard), which is probably why a
+`userEvent.dblClick()`-driven jsdom test caught nothing wrong; but the
+underlying `Button` is Base UI's headless primitive (`@base-ui/react/button`,
+`components/ui/button.tsx`), which does its own internal pointer-event
+handling — in the real browser this appears to have disrupted native
+double-click timing detection enough that `onDoubleClick` never fired at
+all, for any thread, active or not. Diagnosed by inspecting `button.tsx`
+(confirmed it's a headless-primitive wrapper, not a plain `<button>`)
+rather than guessing blind.
+
+**Fix:** dropped the double-click gesture entirely. Each thread now renders
+as a switch button plus a separate, always-visible `ghost`/`size="xs"`
+"Rename" button (`aria-label="Rename {title}"`) that calls `startRename`
+directly on its own `onClick` — no shared element, no gesture-timing
+dependency on a component whose internals aren't fully controlled by this
+codebase. Also more discoverable than a hidden double-click affordance was
+in the first place. `HistoryPanel.test.tsx`'s rename test rewritten to
+click the Rename button instead of simulating a double-click; added a new
+test asserting Rename does NOT also call `setActiveThread` (the actual
+switch-then-rename race the old design was exposed to). Full dashboard
+suite: 31/31 (was 30 — one new test), `tsc && vite build` clean.
+
+**Lesson worth keeping:** don't stack two different interaction affordances
+(single-click and double-click) on one interactive element from a headless
+UI primitive without verifying in a real browser — jsdom's synthetic event
+simulation doesn't necessarily reproduce a primitive's internal pointer
+handling closely enough to catch this class of bug. Both Phase 15
+live-verification gaps (voice trigger, GUI picker) are now closed, the
+second one with a real fix landed as a direct result of the user's live
+check, not just a "looks fine in tests" sign-off.
+
+---
+
+## 68. Thread delete + Claude-style persistent sidebar (2026-07-15)
+
+**Scope note, said explicitly rather than silently done:** this reopens one
+of Phase 15's own locked design decisions — "full thread management
+(list, rename, switch, start-new) belongs in the GUI's History panel — the
+only surface that can actually show a picker" (PLAN.md's step-1
+checkpoint). The user asked directly for thread switching from the chat
+window itself, "Claude like UI" — a real product-direction change, not a
+bug or a misread of the original scope. Implemented as asked; noted here so
+the History-tab-only line in PLAN.md/STEPS.md 67 isn't read as still
+current.
+
+**68.1 — `assistant/thread_store.py`: `delete_thread()`.** Raises KeyError
+on an unknown id (same convention as `rename_thread`/`set_active_thread`).
+Returns the active thread_id AFTER deletion, because deleting the
+currently-active thread must reassign the shared pointer — every other
+function in this module assumes there's always exactly one active thread,
+so a delete can't just leave it dangling. Reassignment picks the next
+most-recently-active remaining thread; if none remain (the last thread was
+just deleted), a fresh replacement thread is created automatically, same
+invariant `get_active_thread_id()`'s bootstrap already relies on.
+Deliberately does NOT purge the thread's own `conversation_memory.sqlite`
+checkpoint rows — that's `AsyncSqliteSaver`'s own concern and this module
+has no reference to a live checkpointer to purge it with; documented as a
+known, accepted gap in the docstring (not a new exposure, just no longer
+reachable through the app). 4 new tests in `tests/test_thread_store.py`
+(non-active delete leaves pointer alone; active delete reassigns to
+next-most-recent; deleting the LAST thread creates a replacement; unknown
+id raises KeyError) — 12/12 pass.
+
+**68.2 — `assistant/server.py`: `DELETE /threads/{thread_id}`.** Mirrors
+the PATCH/rename endpoint's 404 handling. Returns
+`{"deleted": true, "active_thread_id": ...}` so the caller learns
+immediately whether the pointer moved, without a second `/threads` round
+trip. 3 new tests in `tests/test_server.py` against the real graph
+(non-active delete, active-thread delete reassigning the pointer, 404 on
+unknown id) — 18/18 in the file pass.
+
+**68.3 — Frontend redesign: persistent `ThreadSidebar`, not a History-tab
+picker.** New `dashboard/src/components/threads/ThreadSidebar.tsx` — a
+fixed-width, always-visible left column (`App.tsx` now `flex`-wraps a
+sidebar + the existing Tabs shell, Claude-style) with a "New chat" button
+and a scrollable thread list; each row is click-to-switch, with Rename
+(pencil) and Delete (trash, `AlertDialog`-confirmed — same confirm-before-
+irreversible-action pattern `MemoryPanel.tsx` already established) icon
+buttons that fade in on hover (`lucide-react` — already a declared
+dependency, just unused until now; no new package added). `HistoryPanel.
+tsx` reverted to its original Phase-9-era pure log view — the picker that
+briefly lived there (STEPS.md 67.7) moved out entirely rather than being
+duplicated in two places.
+
+**Cross-component wiring, no thread_id prop drilling:** `App.tsx` holds
+`activeThreadId` in state, fed by `ThreadSidebar`'s `onActiveThreadChange`
+callback, and passes it to `ChatPanel`/`HistoryPanel` ONLY as
+`key={activeThreadId}` — forcing a full remount on every switch. Both
+panels already call their fetch functions with no explicit `thread_id`,
+which `server.py` resolves against the SAME active pointer the sidebar
+just moved, so a remount alone is enough to pick up the new thread; no new
+prop plumbing into either panel was needed.
+
+**A real bug caught by the test suite before it shipped, not by manual
+QA:** the first `ThreadSidebar` draft took `activeThreadId` as a prop FROM
+`App.tsx` (to decide which row to highlight) in addition to reporting it
+back via `onActiveThreadChange` — a round-trip (child reports up, parent
+re-renders, new value flows back down as a prop) that only resolves after
+a second render pass. Two component tests failed immediately
+(`data-active` never became `"true"`; a click-already-active guard fired
+twice) because the test harness's mock callback wasn't wired back into a
+real prop the way `App.tsx`'s real `useState` would eventually do it —
+exposing that the design was relying on a round-trip it didn't actually
+need. Fixed by having `ThreadSidebar` own `activeThreadId` as its own
+local state (populated from `fetchThreads`/`setActiveThread`/`createThread`/
+`deleteThread`'s own responses) and treating the callback as pure output,
+never read back. Cleaner besides — one fewer prop, no dependency on the
+parent's render timing. All 35 dashboard tests pass after the fix
+(10 new in `ThreadSidebar.test.tsx`: list+highlight, empty state, switch,
+new-chat, rename, rename-doesn't-also-switch, delete requires confirmation,
+cancel-delete leaves the thread, confirm-delete adopts the reassigned
+active thread, thread-list-load error). `tsc && vite build` clean.
+
+**Full regression:** every file in `tests/` passes individually (12 Python
+test files, including the 2 touched by this entry); dashboard 35/35;
+`tsc`/build clean on both passes (initial delete+sidebar work, then again
+after the round-trip fix). No stray untracked state — `git status` shows
+only the expected modified/new files; a real `threads.sqlite` now exists at
+the repo root, but that's genuine state from the user's own live testing
+earlier today (the voice-daemon restart and the real-browser rename check,
+STEPS.md 67's two follow-ups), not test pollution — confirmed gitignored
+via `git check-ignore -v`, same as `conversation_memory.sqlite`/
+`long_term_memory.sqlite` already were.
+
+**Not yet done / known gaps, flagged rather than assumed:** delete has not
+been exercised live in the real Tauri window (only rename and the picker
+itself have been, per STEPS.md 67's second follow-up) — recommend doing
+that before treating this as fully proven, same standing as every other
+"tests pass, real window unconfirmed" note in this project. The
+non-purge-of-checkpoint-data decision (68.1) is a real, documented
+trade-off, not an oversight — revisit if it ever actually matters (storage
+growth, or a user expectation that "delete" means the underlying
+conversation data is gone too, not just unlisted).
+
+**Follow-up, same day: confirmed live.** The user checked the redesigned
+sidebar directly in the real Tauri window — switching, rename, and delete
+all confirmed working ("both work well"). Closes the one remaining gap
+flagged above; delete is no longer unverified. Phase 15, including this
+extension beyond its original locked scope, is being closed out on this
+basis — see PLAN.md's Phase 15 section and CLAUDE.md's Current Status
+block for the status flip.

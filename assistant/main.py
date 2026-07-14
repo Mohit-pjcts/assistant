@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 
 # Loaded before any other import — assistant.sub_agents/assistant.supervisor
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from assistant import thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
@@ -20,12 +22,14 @@ from assistant.supervisor import build_graph  # noqa: E402
 
 from langgraph.types import Command  # noqa: E402
 
-# Fixed rather than generated per run: this is what makes conversation memory
-# actually observable across separate launches of the CLI, not just within a
-# single process. Revisit once there's a reason to support multiple threads.
-THREAD_ID = "cli-default-thread"
-
 EXIT_COMMANDS = {"exit", "quit"}
+
+# Phase 15: full thread management (list/rename/switch/create) lives in the
+# GUI's History panel — the only surface that can actually show a picker.
+# The CLI gets exactly these three in-session commands instead (PLAN.md
+# Phase 15's scope-split decision, STEPS.md 66); anything else typed with a
+# leading "/" is just a normal message to the assistant, not a command.
+_THREAD_COMMANDS = {"/new", "/threads", "/switch"}
 
 
 def _render_content(content: object) -> str:
@@ -48,9 +52,56 @@ def _render_content(content: object) -> str:
     return str(content)
 
 
-async def _run() -> None:
-    """Run the interactive CLI chat loop."""
-    print("Personal assistant. Type 'exit' or 'quit' to leave (Ctrl+C / Ctrl+D also work).")
+async def _handle_thread_command(command: str, thread_id: str) -> str:
+    """Handle a recognized /new, /threads, or /switch command. Always
+    returns the (possibly unchanged) thread_id the caller should now be
+    using — callers rebuild their invocation config from this rather than
+    inspecting any side state."""
+    parts = command.split(maxsplit=1)
+    name = parts[0].lower()
+
+    if name == "/new":
+        thread = await thread_store.create_thread()
+        print(f"[thread] started a new conversation ({thread.id})")
+        return thread.id
+
+    if name == "/threads":
+        threads = await thread_store.list_threads()
+        for t in threads:
+            marker = "*" if t.id == thread_id else " "
+            label = t.title or t.id
+            print(f"{marker} {label}  ({t.id})")
+        return thread_id
+
+    if name == "/switch":
+        if len(parts) < 2 or not parts[1].strip():
+            print("[thread] usage: /switch <thread_id>  (see /threads for ids)")
+            return thread_id
+        target = parts[1].strip()
+        try:
+            thread = await thread_store.set_active_thread(target)
+        except KeyError:
+            print(f"[thread] no thread with id {target!r} — see /threads for valid ids")
+            return thread_id
+        print(f"[thread] switched to {thread.title or thread.id}")
+        return thread.id
+
+    # Unreachable given _THREAD_COMMANDS gates the call site, but keeps this
+    # function's contract honest if that ever changes.
+    return thread_id
+
+
+async def _run(start_new: bool) -> None:
+    """Run the interactive CLI chat loop.
+
+    start_new: begin on a brand-new thread (thread_store.create_thread())
+    instead of continuing whatever thread_store's active pointer currently
+    points at — the CLI's `--new` flag.
+    """
+    print(
+        "Personal assistant. Type 'exit' or 'quit' to leave (Ctrl+C / Ctrl+D also work). "
+        "'/new' starts a fresh conversation, '/threads' lists them, '/switch <id>' switches."
+    )
 
     try:
         mcp_tools = await load_mcp_tools()
@@ -60,7 +111,14 @@ async def _run() -> None:
 
     async with get_checkpointer() as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
-        config = make_thread_config(THREAD_ID)
+
+        if start_new:
+            thread = await thread_store.create_thread()
+            thread_id = thread.id
+            print(f"[thread] started a new conversation ({thread_id})")
+        else:
+            thread_id = await thread_store.get_active_thread_id()
+        config = make_thread_config(thread_id)
 
         while True:
             try:
@@ -70,6 +128,10 @@ async def _run() -> None:
                     continue
                 if user_input.lower() in EXIT_COMMANDS:
                     break
+                if user_input.split(maxsplit=1)[0].lower() in _THREAD_COMMANDS:
+                    thread_id = await _handle_thread_command(user_input, thread_id)
+                    config = make_thread_config(thread_id)
+                    continue
 
                 result = await graph.ainvoke(
                     {"messages": [("user", user_input)]},
@@ -87,6 +149,7 @@ async def _run() -> None:
 
                 final_message = result["messages"][-1]
                 print(f"\nAssistant: {_render_content(final_message.content)}")
+                await thread_store.touch_thread(thread_id)
 
             except (EOFError, KeyboardInterrupt):
                 break
@@ -97,11 +160,22 @@ async def _run() -> None:
     print("\nGoodbye.")
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Personal assistant CLI.")
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Start a brand-new conversation thread instead of continuing the active one.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
     """Sync entry point (required by the `assistant` console script) that
     drives the async chat loop."""
+    args = _parse_args()
     try:
-        asyncio.run(_run())
+        asyncio.run(_run(start_new=args.new))
     except KeyboardInterrupt:
         # SIGINT delivered while the event loop itself (not our coroutine) is
         # on the stack — e.g. between input() returning and ainvoke() being
