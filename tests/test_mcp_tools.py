@@ -154,6 +154,16 @@ def test_calendar_read_tools_pass_through() -> None:
     assert result == {"calendarId": "primary"}
 
 
+def test_calendar_gated_write_tools_pass_through_this_interceptor() -> None:
+    """create-event/update-event/delete-event are gated by write_tools.py at
+    the model-tool-list level (Phase 12, STEPS.md 63) — this interceptor no
+    longer blocks them; it isn't the enforcement point for these three."""
+    for name in ("create-event", "update-event", "delete-event"):
+        request = MCPToolCallRequest(name=name, args={"foo": "bar"}, server_name="calendar")
+        result = asyncio.run(_block_calendar_writes(request, _echo_handler))
+        assert result == {"foo": "bar"}
+
+
 if __name__ == "__main__":
     test_download_attachment_savepath_forced_into_workspace()
     print("OK: test_download_attachment_savepath_forced_into_workspace")
@@ -175,4 +185,6 @@ if __name__ == "__main__":
     print("OK: test_calendar_write_tools_blocked_without_reaching_handler")
     test_calendar_read_tools_pass_through()
     print("OK: test_calendar_read_tools_pass_through")
-    print("\n10 tests passed")
+    test_calendar_gated_write_tools_pass_through_this_interceptor()
+    print("OK: test_calendar_gated_write_tools_pass_through_this_interceptor")
+    print("\n11 tests passed")

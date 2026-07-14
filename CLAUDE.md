@@ -20,7 +20,7 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 12 (Email + Google Calendar WRITE access) is
+- **No active phase** — Phase 15 (multi-thread conversation support) is
   next; read PLAN.md before beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
@@ -52,11 +52,25 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   `frontend-design` and `find-skills`; confirmed no skill artifacts in git
   history or settings; standing vetting policy added to the Security model
   section below (STEPS.md group 62).
+- Complete: Phase 12 — Email + Google Calendar WRITE access: gated
+  send_email/modify_gmail_labels/create+update+delete_calendar_event/
+  create+delete_gmail_filter tools (`assistant/write_tools.py`), each a
+  local wrapper calling `interrupt()` itself with verbatim content (raw MCP
+  write tools never reach a model's tool list); per-turn write cap +
+  no-parallel-writes guard; `InterruptGate.tsx` per-action renderers.
+  Verified live against real Gmail/Calendar (STEPS.md 66) with two
+  explicitly accepted gaps: `update_calendar_event` unit-tested only (not
+  live), and the injection-shaped-request scenario not run live. Surfaced
+  Phase 15 as a spinoff (shared fixed `THREAD_ID` collides across
+  concurrent clients) (STEPS.md groups 63–66).
 
 Roadmap history: renumbered 2026-07-13 (handoff-fix/memory/voice-upgrade/
 dashboard inserted ahead of the original polish phase). On 2026-07-14 Phase
 10 was parked and Phases 11–14 added: 11 skills-cleanup, 12 email+calendar
-WRITE, 13 Apple Calendar + open-URL-in-Brave, 14 UI rework. See PLAN.md.
+WRITE, 13 Apple Calendar + open-URL-in-Brave, 14 UI rework. Phase 15
+(multi-thread conversation support) added the same day, discovered mid-Phase
+12 (STEPS.md 66) — the shared fixed `THREAD_ID` collides across concurrent
+clients; kept as its own phase rather than folded into 12. See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -72,6 +86,9 @@ assistant/
 ├── sub_agents.py          # coding/research/life-admin worker sub-agent graphs
 ├── tools.py               # Phase 1 hand-secured tools: web search (Tavily), file r/w, shell exec
 ├── mcp_tools.py           # Phase 2+ MCP-loaded tools (Gmail/Calendar), merged into TOOLS
+├── write_tools.py         # Phase 12: gated write-tool wrappers (send/label/calendar/filter) —
+│                             see its module docstring for the local-wrapper-not-raw-MCP-tool
+│                             architecture and why the gate can't sit on mcp_tools.py's tools
 ├── mac_tools.py           # Mac-native control: osascript/open/shortcuts behind a hard allowlist
 ├── interrupts.py          # confirmation-gated dummy tool demonstrating the interrupt mechanic
 ├── memory.py              # get_checkpointer() context manager over AsyncSqliteSaver
@@ -165,14 +182,30 @@ filtering content.
 - File tools: confined to `workspace/` anchored at the project root (not cwd);
   traversal rejected via resolve-then-relative_to; dotfiles hard-blocked
   independent of the containment check.
-- **Confirmation rule (standing):** side-effectful actions — sending email,
-  creating/modifying events, Mac control, and (Phase 7 Part B) writing a
-  durable long-term memory fact — require my explicit confirmation before
-  execution; read-only actions don't. Until LangGraph interrupts are wired
-  (Phase 3), enforce this by scoping tools read-only. Memory writes are
-  additionally text-only, never voice-approvable (voice_daemon.py checks
-  `voice_approvable: False` on the interrupt payload) — fact content is
-  harder to vet by ear than an action verb like "send".
+- **Confirmation rule (standing):** side-effectful actions require my
+  explicit confirmation before execution; read-only actions don't. Named
+  explicitly as of Phase 12 (STEPS.md 63/64), since "email/calendar" stopped
+  being a read-only-by-construction category: **sending an email**,
+  **modifying Gmail labels on a message** (including archiving),
+  **creating/updating/deleting a Google Calendar event**, **creating/
+  deleting a Gmail filter**, Mac control (`run_shortcut`), and writing a
+  durable long-term memory fact. Every one of these is a LOCAL wrapper tool
+  that calls `interrupt()` itself and shows the real content verbatim — see
+  `assistant/write_tools.py`'s module docstring for why the gate can't sit on
+  the raw Gmail/Calendar MCP tools directly (separate Node process, can't
+  call `interrupt()`), and `sub_agents.py`'s `_select_life_admin_tools` for
+  the actual enforcement point (raw write tool names are never added to a
+  model's tool list — only their gated wrappers are). Memory writes, email
+  sends, calendar create/update, and Gmail filter writes are all additionally
+  text-only, never voice-approvable (`voice_daemon.py` checks
+  `voice_approvable: False` on the interrupt payload) — free-text content
+  (a fact, an email body, an event description, a filter's forward target)
+  is harder to vet by ear than an action verb like "send". The one deliberate
+  exception is calendar event **delete**, which IS voice-approvable — it
+  carries no free-text payload to hide an injection in, unlike every other
+  gated action here (STEPS.md 63); Gmail filter delete does NOT get the same
+  exception, since identifying which filter is being removed requires
+  reading its forward-target/criteria content aloud (STEPS.md 64).
 - New tools (MCP-loaded included) are evaluated against this threat model
   before joining the agent. MCP tools MERGE into TOOLS; they never replace
   Phase 1's hand-secured tools.

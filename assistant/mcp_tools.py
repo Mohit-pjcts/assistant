@@ -88,20 +88,29 @@ async def _cap_result_size(
 # (verified by reading src/auth/server.ts directly; see STEPS.md 17). Its
 # ENABLED_TOOLS startup flag is a hard allowlist — tools not listed are never
 # registered with the MCP protocol, so the model can't see or call them —
-# but that's a server-config guarantee, not an OAuth-grant one. This
-# interceptor is the defense-in-depth layer underneath it: even if
-# ENABLED_TOOLS were ever misconfigured or the server's own filtering had a
-# bug, write-capable tool names are refused here unconditionally, before
-# `handler` (and therefore the server) is ever called.
-_CALENDAR_READONLY_TOOLS = (
+# but that's a server-config guarantee, not an OAuth-grant one.
+#
+# Phase 12 (STEPS.md 63): create-event/update-event/delete-event are now
+# ENABLED — but only assistant.write_tools' gated wrappers ever get a chance
+# to call them, since _select_life_admin_tools (sub_agents.py) never exposes
+# these raw names to the model directly. This interceptor is the
+# defense-in-depth layer underneath THAT guarantee: even if the sub-agent's
+# tool selection were ever misconfigured and these raw names leaked into the
+# model's tool list, write-capable tool names are refused here unconditionally
+# for anything not yet designed a gate for (bulk create, invite responses,
+# account management) — and even for the three that DO have a gate, this
+# interceptor cannot distinguish "the model called this directly" from "the
+# approved wrapper called this after interrupt() returned true", since both
+# paths go through the same MultiServerMCPClient. The real enforcement point
+# for those three is the model's tool list, not this interceptor — see
+# write_tools.py's module docstring.
+_CALENDAR_ENABLED_TOOLS = (
     "list-calendars,list-events,search-events,get-event,"
-    "list-colors,get-freebusy,get-current-time"
+    "list-colors,get-freebusy,get-current-time,"
+    "create-event,update-event,delete-event"
 )
 _CALENDAR_BLOCKED_TOOLS = {
-    "create-event",
     "create-events",
-    "update-event",
-    "delete-event",
     "respond-to-event",
     "manage-accounts",
 }
@@ -111,16 +120,19 @@ async def _block_calendar_writes(
     request: MCPToolCallRequest,
     handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
 ) -> MCPToolCallResult:
-    """Refuse write-capable calendar tool calls outright, without invoking
-    the handler — belt-and-suspenders under the ENABLED_TOOLS allowlist."""
+    """Refuse calendar tool calls not yet designed a confirmation gate for —
+    belt-and-suspenders under the ENABLED_TOOLS allowlist. create-event/
+    update-event/delete-event are NOT in this set: those are gated by
+    write_tools.py instead, at the model-tool-list level (see comment above
+    _CALENDAR_ENABLED_TOOLS)."""
     if request.name in _CALENDAR_BLOCKED_TOOLS:
         return CallToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=(
-                        f"'{request.name}' is disabled — this assistant's "
-                        "Calendar access is read-only."
+                        f"'{request.name}' is disabled — not yet supported by "
+                        "this assistant."
                     ),
                 )
             ],
@@ -182,7 +194,7 @@ async def load_mcp_tools() -> list[BaseTool]:
                 "args": [_calendar_server_path()],
                 "env": {
                     "GOOGLE_OAUTH_CREDENTIALS": _calendar_credentials_path(),
-                    "ENABLED_TOOLS": _CALENDAR_READONLY_TOOLS,
+                    "ENABLED_TOOLS": _CALENDAR_ENABLED_TOOLS,
                 },
             },
         },
