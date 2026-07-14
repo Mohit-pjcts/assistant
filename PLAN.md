@@ -454,7 +454,7 @@ out-of-scope note updated ✓; STEPS.md updated (groups 50–51) ✓.
 
 ---
 
-## Phase 8 — Voice upgrade (accuracy + latency) — NOT STARTED
+## Phase 8 — Voice upgrade (accuracy + latency) — COMPLETE (2026-07-14)
 
 **Objective:** fix the two real complaints with Phase 5's voice — it's slow and
 it sometimes mishears — now that the hardware ceiling is known to be high.
@@ -464,13 +464,46 @@ it sometimes mishears — now that the hardware ceiling is known to be high.
 other; on an M4 Pro they largely don't — a large model can run fast. This is
 close to "swap backend, bump model, benchmark," not a research slog.
 
-**Starting recommendation (benchmark, don't assume):** switch STT backend from
-faster-whisper (CTranslate2) to `mlx-whisper` (Apple MLX, built for Apple
-Silicon unified memory) and move from the current `base` model to `large-v3`.
-Expectation: `large-v3` fixes mishearing (accent + noise), MLX's Apple-Silicon
-optimization absorbs the latency a bigger model would otherwise add. Also worth
-benchmarking on the same machine: `whisper.cpp` + CoreML, and `distil-large-v3`
-as a speed/accuracy midpoint.
+**Delivered:** a real four-way benchmark on this machine (STEPS.md 52) —
+`faster-whisper base` (prior production model), `faster-whisper large-v3`,
+`faster-whisper distil-large-v3`, and `mlx-whisper large-v3` — against 3 real
+clips of the user's own voice (clear, harder vocabulary, deliberate
+background noise), scored with `jiwer` against known ground truth. Backend
+swapped to `mlx-whisper large-v3` in `assistant/voice_io.py` (STEPS.md 53),
+behind the exact same `preload_stt_model()`/`transcribe()` seam
+`voice_daemon.py` already used — confirming Phase 5's isolation held, zero
+daemon changes needed. `requirements.txt`/`pyproject.toml` updated
+(faster-whisper removed, mlx-whisper added with an arm64-only platform
+marker — Apple MLX ships no Intel/Linux wheels).
+
+**CHECKPOINT result:** user picked `mlx-whisper large-v3` on the latency
+evidence (6-8x faster than `faster-whisper large-v3` on CPU, near-`base`
+speed) plus the accuracy-ceiling argument (same weights as `large-v3`, just a
+faster runtime) — NOT on a proven WER win, which the benchmark didn't show
+(see caveat below).
+
+**Verified, live, on the real launchd daemon** (STEPS.md 53) — restarted to
+pick up the new code, not just unit-tested: model preload at startup, a real
+hotkey→record→transcribe→respond round trip (including an accidental 185s
+capture, transcribed correctly in ~4.5s), Phase 7's text-only memory gate
+still correctly declining voice approval after a live mishearing ("window
+seats" → "Windows Eats"), and a real gated Mac-control action's full
+spoken confirm→approve→execute cycle. Text CLI (`main.py`/`agent.py`)
+confirmed untouched via `git diff --stat`. 81/81 tests pass (1 test updated
+for the new backend, count unchanged).
+
+**Known caveat — one done-when criterion not literally met, accepted
+knowingly:** the benchmark's WER was TIED across all four candidates
+(including `base`) on the 3-clip sample — it does NOT demonstrate an
+accuracy improvement, the phase's original bar. Root-caused rather than
+ignored: all four models dropped/garbled the same leading words after the
+recording's beep cue, a shared artifact, not a per-model differentiator;
+n=3 clips/one session is too small to conclude model size doesn't matter for
+accuracy either way. The user chose to proceed on `large-v3`'s known-larger
+capacity as the reasonable bet for real-world accented/noisy speech this
+small sample didn't exercise, rather than block the phase on a bigger
+benchmark pass. Real-world daily use is the actual accuracy test going
+forward, not this session's synthetic sample.
 
 **Steps:**
 1. Benchmark candidates on THIS machine with real utterances (include accented
@@ -485,10 +518,14 @@ as a speed/accuracy midpoint.
    confirmation gate) still works with the new backend; the text CLI stays
    untouched.
 
-**Done-when:** measured transcription accuracy on real accented/noisy speech
-improves over base, AND end-to-end latency is acceptable (ideally at/below
-current); the daemon + hotkey + spoken confirmation gate all still work; text
-CLI unchanged; STEPS.md updated with the benchmark numbers.
+**Done-when (met, with the accuracy caveat above):** measured transcription
+accuracy on real accented/noisy speech improves over base — **not proven by
+this sample (tied, not improved); accepted knowingly rather than blocking**
+✓*; end-to-end latency is acceptable (near-`base`, decisively better than any
+other large-model option) ✓; the daemon + hotkey + spoken confirmation gate
+all still work — verified live on the real launchd daemon, not just unit
+tests ✓; text CLI unchanged ✓; STEPS.md updated with the benchmark numbers
+✓ (groups 52-53).
 
 ---
 

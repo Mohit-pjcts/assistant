@@ -20,8 +20,8 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 8 (Voice upgrade: accuracy + latency) is
-  next; read PLAN.md before beginning it.
+- **No active phase** — Phase 9 (Dashboard app) is next; read PLAN.md before
+  beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
@@ -44,6 +44,13 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   extraction channel, hardened tool-citation opt-in, universal text-only
   confirmation gate) — SQLite storage, selective recall (STEPS.md
   groups 50–51)
+- Complete: Phase 8 — voice upgrade: real 4-way STT benchmark on the M4 Pro
+  (STEPS.md 52), swapped to mlx-whisper large-v3 behind voice_io.py's
+  existing interface, verified live on the real launchd daemon (STEPS.md
+  53). One accepted caveat: the benchmark's accuracy result was tied across
+  candidates, not an improvement — the swap proceeded on the latency win
+  plus large-v3's accuracy-ceiling argument, not a proven WER win; see
+  PLAN.md Phase 8 for the full caveat.
 
 Roadmap was renumbered 2026-07-13: four phases (6 handoff-fix, 7 memory,
 8 voice-upgrade, 9 dashboard) inserted ahead of the original proactivity/

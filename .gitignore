@@ -18,7 +18,12 @@ tokens.json
 # Conversation memory (SQLite checkpointer) — private conversation history,
 # incl. anything the email/calendar tools pulled into context. *.db above
 # does not match .sqlite, which is what memory.py actually writes.
+# WAL-mode journal files (-shm/-wal) are separate filename suffixes that
+# *.sqlite alone doesn't match — surfaced as untracked files by real daemon
+# use during Phase 8 testing (STEPS.md 53).
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # LangGraph Studio (`langgraph dev`) local runtime state
 .langgraph_api/

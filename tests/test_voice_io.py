@@ -6,9 +6,10 @@ need real hardware/GUI and are verified by hand instead (CLAUDE.md's
 "interactive entry points verified by hand" rule). What's tested here:
 parse_confirmation's fail-closed behavior — the piece the confirmation
 gate's safety actually depends on — transcribe()'s empty-audio short
-circuit, the TTS voice-fallback logic (monkeypatched installed-voice set,
-following test_mac_tools.py's monkeypatch pattern), speak()'s argv shape,
-and the daemon's spoken_prompt fallback for interrupt payloads.
+circuit (mlx-whisper as of Phase 8, STEPS.md 52-53), the TTS voice-fallback
+logic (monkeypatched installed-voice set, following test_mac_tools.py's
+monkeypatch pattern), speak()'s argv shape, and the daemon's spoken_prompt
+fallback for interrupt payloads.
 """
 
 import os
@@ -63,16 +64,16 @@ def test_parse_confirmation_no_takes_priority_when_both_present() -> None:
 
 
 def test_transcribe_empty_audio_returns_empty_string_without_loading_model() -> None:
-    original_get_model = voice_io._get_stt_model
+    original_transcribe = voice_io.mlx_whisper.transcribe
 
-    def _fail_if_called() -> None:
-        raise AssertionError("transcribe() should not load the STT model for empty audio")
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("transcribe() should not invoke the STT model for empty audio")
 
-    voice_io._get_stt_model = _fail_if_called
+    voice_io.mlx_whisper.transcribe = _fail_if_called
     try:
         assert voice_io.transcribe(np.zeros(0, dtype="float32")) == ""
     finally:
-        voice_io._get_stt_model = original_get_model
+        voice_io.mlx_whisper.transcribe = original_transcribe
 
 
 def test_resolve_tts_voice_uses_configured_voice_when_installed() -> None:

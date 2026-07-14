@@ -3220,3 +3220,170 @@ contradict the reversed out-of-scope decision), STEPS.md (group 51). This
 completes Phase 7 both parts, pending the user's own review before
 flipping PLAN.md's phase status and CLAUDE.md's Current Status to
 COMPLETE.
+
+---
+
+## 52. Phase 8 step 1 — STT candidate benchmark on the real M4 Pro (2026-07-14, 05:38)
+
+Ran the four-way benchmark PLAN.md's step 1 calls for: `faster-whisper base`
+(current production model), `faster-whisper large-v3`, `faster-whisper
+distil-large-v3`, and `mlx-whisper large-v3` — all against the same 3 real
+clips of the user's own voice recorded live for this benchmark (not a public
+dataset — decided at a CHECKPOINT so the numbers reflect this user's actual
+voice/accent/room, not a stand-in), via a beep-cued recorder script
+(`sd.rec` + `soundfile`, throwaway, session tmp dir): a clear short sentence,
+a longer sentence with harder vocabulary, and the short sentence again with
+deliberate background noise. Transcripts scored against known ground truth
+with `jiwer` (WER, punctuation/case-normalized) — also throwaway benchmark
+deps (`soundfile`, `jiwer`), not added to `requirements.txt`/`pyproject.toml`.
+
+**Verified before benchmarking (not assumed):** `mlx-whisper` installs and
+imports cleanly on this project's 3.12 arm64 venv (`pip install mlx-whisper`
+— pulls `mlx` 0.32.0 built for this machine's arm64/macOS wheel tags, exit
+0, clean import) — the actual precondition step 1 called for.
+
+**Results:**
+
+| Candidate | One-time load | clip1 (clear) | clip2 (hard) | clip3 (noisy) | WER (1 / 2 / 3) |
+|---|---|---|---|---|---|
+| base (current) | 0.5s | 0.30s | 0.31s | 0.27s | 0.25 / 0.29 / 0.58 |
+| faster-whisper large-v3 | 3.3s* | 5.82s | 5.79s | 5.14s | 0.25 / 0.29 / 0.58 |
+| faster-whisper distil-large-v3 | 423s (first download) | 4.06s | 4.08s | 4.03s | 0.25 / 0.29 / 0.58 |
+| mlx-whisper large-v3 | ~14.5 min (first download)** | 0.85s*** | 0.66s | (see below) | 0.25 / 0.29 / 0.58 |
+
+\* weights already cached from the distil run's shared download.
+\*\* one-time HF Hub download of the MLX-converted weights; hit real HF
+Hub rate-limiting unauthenticated (see below), resolved with a user-supplied
+`HF_TOKEN` exported for this one process only — never written to `.env` or
+any repo file, not a project secret, discarded after the run.
+\*\*\* clip1 and clip2's numbers are swapped relative to clip order because
+clip1's very first mlx call absorbed the full model load (865.8s combined,
+not a real inference number) — clip2 (0.85s) and clip3 (0.66s) are the
+clean, load-free inference times and are what the table's clip1/clip2
+columns actually reflect for mlx.
+
+**Real, honest finding — WER tied across every candidate:** all four
+model/backend combinations produced near-identical transcripts and
+identical WER on every single clip. This does NOT confirm the phase's
+"larger model fixes mishearing" hypothesis on this data — `base` matched
+`large-v3` exactly on this 3-clip sample. Root-caused, not hand-waved: the
+per-clip errors are the SAME leading words dropped/garbled on every model
+(e.g. "please schedule" -> missing on all four for clip1) — checked the raw
+waveform (RMS energy per 0.25s window) and confirmed real speech energy
+from t=0, ruling out a truncated-recording artifact; more likely a soft/
+rushed vocal onset right after the beep cue that trips up Whisper's
+leading-word detection uniformly regardless of model size. Background noise
+(clip3) still produced a real, consistent WER increase (0.58 vs 0.25)
+across all four — noise sensitivity is real, just not something the bigger
+models suppressed. **Caveat: n=3 clips, one speaker, one session** — too
+small to conclude model size truly doesn't matter for accuracy; the
+"doesn't understand me" complaint that motivated this phase needs a larger/
+more varied sample before ruling large-v3's accuracy ceiling out.
+
+**Clear, decisive finding on latency:** `mlx-whisper large-v3` runs
+inference in 0.66-0.85s once loaded — roughly 6-8x faster than
+`faster-whisper large-v3` on CPU int8 (5.1-5.8s) for byte-identical
+accuracy, and close to `base`'s own latency (0.27-0.31s) despite being the
+largest model in the comparison. This is exactly the phase's starting
+hypothesis ("a large model can run fast" on this hardware) — confirmed by
+measurement, not assumed. `distil-large-v3` is dominated: same WER as
+large-v3, ~4s latency (worse than mlx, no accuracy edge over base to
+justify it).
+
+**CHECKPOINT (per PLAN.md step 1): presented to the user — resolved.** User
+picked `mlx-whisper large-v3` on the latency evidence (decisive, matches
+phase objective #1) while accepting that objective #2 ("mishears me") isn't
+proven fixed by this small sample — the accuracy ceiling argument (same
+weights as large-v3, just a different runtime) carried the decision rather
+than waiting on a bigger benchmark pass.
+
+**Commands:**
+```sh
+.venv/bin/pip install mlx-whisper soundfile jiwer  # benchmark-only, not in requirements.txt
+.venv/bin/python <session-tmp>/record_utterance.py <path> <duration>  # x3, live mic
+.venv/bin/python <session-tmp>/benchmark_stt.py  # full 4-candidate x 3-clip run
+```
+
+## 53. Phase 8 step 2/3 — backend swap + live end-to-end re-verification (2026-07-14, 06:00)
+
+**Swap (`assistant/voice_io.py`):** replaced `faster_whisper.WhisperModel` with
+`mlx_whisper`, keeping the module's existing `preload_stt_model()` /
+`transcribe(audio) -> str` seam exactly as `voice_daemon.py` already
+consumed it — no changes needed in the daemon itself, confirming CLAUDE.md's
+note that STT was already properly isolated behind an interface.
+`mlx_whisper.transcribe()` has no public "load a persistent model" API on
+its surface; its own module-level `ModelHolder` class (in
+`mlx_whisper.transcribe`) caches the loaded model keyed on the repo-path
+string, which is what actually made the benchmark's clip2/clip3 calls fast
+after clip1 paid the load cost. `preload_stt_model()` now calls
+`ModelHolder.get_model(STT_MODEL_REPO, mx.float16)` directly at startup —
+`float16` chosen to match `transcribe()`'s own internal default
+(`fp16=True`) exactly, so the cache the daemon warms at launch is the same
+one real transcription calls will hit, not a different dtype variant.
+`STT_MODEL_REPO = "mlx-community/whisper-large-v3-mlx"`.
+
+**Dependencies:** `faster-whisper` removed, `mlx-whisper` added, in both
+`requirements.txt` and `pyproject.toml` — with a platform marker
+(`sys_platform == "darwin" and platform_machine == "arm64"`) since Apple MLX
+only ships Apple Silicon wheels, no Intel Mac or Linux build; `faster-whisper`
+uninstalled from the venv after confirming no other module imports it.
+`soundfile`/`jiwer` (benchmark-only) deliberately NOT added to either file.
+
+**Tests:** `tests/test_voice_io.py`'s
+`test_transcribe_empty_audio_returns_empty_string_without_loading_model`
+referenced the now-deleted `voice_io._get_stt_model` — updated to monkeypatch
+`voice_io.mlx_whisper.transcribe` instead, same assertion (empty audio short-
+circuits before the model is ever invoked). All 81 tests still pass
+project-wide after the swap.
+
+**Live re-verification (real hardware, real daemon, not simulated):**
+- The Phase 5 launchd daemon had been running 21+ hours on the pre-swap code
+  (Python caches imports at process start) — restarted with `launchctl
+  kickstart -k gui/<uid>/com.mohitvuyyuru.assistant-voice` to load the new
+  `voice_io.py`. Startup log showed the mlx model cache hit instantly
+  (already warm from the benchmark run) and `daemon ready — hotkey
+  <alt>+<enter>`.
+- A `This process is not trusted!` line from pynput's `AXIsProcessTrusted()`
+  check appeared at startup — investigated rather than dismissed as
+  boilerplate (confirmed via `pynput/_util/darwin.py` source that this is a
+  real, conditional check, not always-printed). Turned out not to be
+  load-bearing: the hotkey fired correctly on the very next live test, so
+  Input Monitoring trust was intact despite the log line.
+- Real hotkey -> record -> transcribe -> respond round trip verified live:
+  first take accidentally captured 185.3s (stop trigger missed) — mlx
+  transcribed the full clip (mostly silence) in ~4.5s and correctly returned
+  "What time is it? . . . . . .", proving both correctness on a real oversized
+  clip and that latency scales sanely, not catastrophically, with duration.
+- **Phase 7's text-only memory gate, re-verified with the new backend:**
+  spoken "I prefer window seats when I fly" was mistranscribed by
+  mlx-whisper as "I prefer Windows Eats when I fly" (a real, live mishearing
+  — relevant data point for the phase's unresolved accuracy question, STEPS.md
+  52) — daemon logged `confirmation requires text — declining by voice`
+  exactly as Phase 7 designed, and the agent's spoken reply showed it had
+  still correctly inferred "window seats" at the LLM level despite the
+  garbled transcript, asking a sensible follow-up instead of silently
+  proceeding.
+- **Real gated-action confirmation, fired live (not just via the automated
+  interrupt tests):** "Run clipboard to note" -> daemon logged `confirmation
+  asked: Permission to run the 'Clipboard to note' shortcut?` -> spoken
+  "Yes." transcribed correctly -> `confirmation outcome: approved` ->
+  `run_shortcut` executed successfully. Also observed, correctly: an
+  ambiguous first attempt ("run the shortcut clipboard denote", a
+  mishearing) did NOT blindly invoke `run_shortcut` — the agent asked for
+  name clarification first, and a hotkey press while a turn was still
+  in-flight was correctly ignored (`trigger ignored — a turn is already in
+  flight`) rather than double-processing.
+- Text CLI (`main.py`, `agent.py`) confirmed untouched — `git diff --stat`
+  shows zero changes to either file for this phase.
+
+**Commands:**
+```sh
+.venv/bin/pip uninstall -y faster-whisper
+.venv/bin/pip install -e .   # picks up mlx-whisper from pyproject.toml
+python tests/test_tools.py; python tests/test_mcp_tools.py; python tests/test_memory.py
+python tests/test_interrupts.py; python tests/test_mac_tools.py
+python tests/test_supervisor.py; python tests/test_voice_io.py; python tests/test_compaction.py
+python tests/test_memory_store.py; python tests/test_memory_extraction.py
+# 81/81 across all files, unchanged count
+launchctl kickstart -k gui/$(id -u)/com.mohitvuyyuru.assistant-voice
+```
