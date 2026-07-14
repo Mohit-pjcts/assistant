@@ -20,95 +20,95 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **Active: Phase 9 — Dashboard app.** Scoping checkpoint locked 2026-07-14
-  (STEPS.md 54, PLAN.md Phase 9): Tauri shell, a thin FastAPI wrapper
-  (`assistant/server.py`) over `build_graph()` sharing the CLI's real
-  `AsyncSqliteSaver`/`conversation_memory.sqlite`/`THREAD_ID` — NOT the
-  `langgraph dev` REST API, which turned out to use a separate ephemeral
-  store. Voice-in-app deferred to a later checkpoint; `voice_daemon.py`
-  keeps running unchanged. **Steps 1–6 complete** (STEPS.md 55–60) —
-  Phase 9's ENTIRE initial panel set is built and tested: backend wrapper
-  (`/chat`, `/resume`, `/history`, `/memory/facts`, `/cost`); `dashboard/`
-  Tauri 2 + React + TypeScript + shadcn/ui scaffold (Rust toolchain
-  installed — `cargo`/`rustc` need `source "$HOME/.cargo/env"`, not on PATH
-  by default, deliberately not auto-added to `~/.zshrc`); chat panel with
-  the interrupt-gate UI (memory-write facts shown byte-for-byte verbatim,
-  no voice affordance) and a CORS allowlist restricted to the dashboard's
-  own origins; history panel showing the full, unfiltered `/history` feed
-  (tool/system/empty/synthetic messages included, labeled); memory panel
-  (view + delete, delete behind a client-side confirm dialog — NOT the
-  interrupt gate, which is for the agent's own autonomous writes only);
-  cost panel (real LangSmith aggregates via `Client.get_run_stats()`,
-  today/week/all-time windows, degrades to a clear "not configured" state
-  rather than breaking the rest of the app if `LANGSMITH_API_KEY` is
-  missing). Full regression as of step 6: Python 88/88, frontend build
-  clean, vitest 21/21. **Real-window bug found and fixed (STEPS.md 61):**
-  the user's live check surfaced a real layout bug jsdom-based tests
-  structurally can't catch — each panel's scrollable list was missing
-  `min-h-0` alongside `flex-1` (flex items default to `min-height: auto`),
-  so a growing list pushed the whole page past the window's height and the
-  auto-scroll-to-bottom effect carried the header/tab bar off-screen.
-  Fixed in all three list-based panels; confirmed visible again by the
-  user. Same check also confirmed the security-critical property: the
-  confirmation-gate card genuinely appears and requires a real Approve
-  click. **Caveat before calling the initial pass truly done:** History,
-  Memory, and Cost panels' own CONTENT (not just the now-visible tab bar)
-  still haven't been individually clicked through. **Not yet done:** the
-  Tauri shell
-  doesn't spawn/own the Python backend's process lifecycle (started by
-  hand); step 7 (voice-in-app sequencing checkpoint) hasn't started; PLAN.md's
-  Phase 9 header isn't flipped to COMPLETE without a full 4-tab visual
-  check plus the user's explicit sign-off. Read PLAN.md's Phase 9 before
-  continuing this phase's work.
+- **No active phase** — Phase 12 (Email + Google Calendar WRITE access) is
+  next; read PLAN.md before beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
-- Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
-  (STEPS.md groups 9–20)
+- Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
+  migration (STEPS.md groups 9–20)
 - Complete: Phase 3 — supervisor + 3 sub-agents, LangGraph handoff routing,
   interrupt-based confirmation gate (STEPS.md groups 21–25)
 - Complete: Phase 4 — Mac-native control via osascript/`open`/`shortcuts`
-  bridge + mac_control_agent, plus a shell-tool security hardening pass
+  bridge + mac_control_agent, plus a shell-tool hardening pass
   (STEPS.md groups 29–33)
-- Complete: Phase 5 — voice I/O: local faster-whisper STT, always-on
-  Option+Return hotkey daemon (pynput + rumps menu bar), spoken
-  confirmation gate, launchd autostart (STEPS.md groups 37–43)
-- Complete: Phase 6 — fixed cross-agent handoff routing: sub-agents now loop
-  back through a re-evaluating supervisor instead of stalling after the
-  first specialist, with a correctly turn-scoped handoff cap (STEPS.md
-  groups 47–48)
-- Complete: Phase 7 — short-term context compaction bundled with the Phase 6
-  leakage fix, plus long-term automatic-write memory behind a layered,
-  Opus-red-teamed security design (source-restricted extraction, isolated
-  extraction channel, hardened tool-citation opt-in, universal text-only
-  confirmation gate) — SQLite storage, selective recall (STEPS.md
-  groups 50–51)
-- Complete: Phase 8 — voice upgrade: real 4-way STT benchmark on the M4 Pro
-  (STEPS.md 52), swapped to mlx-whisper large-v3 behind voice_io.py's
-  existing interface, verified live on the real launchd daemon (STEPS.md
-  53). One accepted caveat: the benchmark's accuracy result was tied across
-  candidates, not an improvement — the swap proceeded on the latency win
-  plus large-v3's accuracy-ceiling argument, not a proven WER win; see
-  PLAN.md Phase 8 for the full caveat.
+- Complete: Phase 5 — voice I/O: local STT, Option+Return hotkey daemon
+  (pynput + rumps), spoken confirmation gate, launchd autostart
+  (STEPS.md groups 37–43)
+- Complete: Phase 6 — cross-agent handoff routing fixed (loop-back through a
+  re-evaluating supervisor, turn-scoped handoff cap) (STEPS.md groups 45–49)
+- Complete: Phase 7 — short-term compaction + long-term automatic-write memory
+  behind a layered, Opus-red-teamed security design (STEPS.md groups 50–51)
+- Complete: Phase 8 — STT swapped to mlx-whisper large-v3 (6–8x latency win;
+  accuracy question left open) (STEPS.md groups 52–53)
+- Complete: Phase 9 — Tauri desktop dashboard as a peer client of the graph
+  (chat/history/memory/cost panels, gated-action GUI) (STEPS.md groups 54–61)
+- **PARKED: Phase 10** — proactivity + polish, parked 2026-07-14 to run the
+  write-access/browser/UI arc; its deferred-debt checklist is recorded in
+  PLAN.md's Phase 10 park note (voice accuracy, extended-thinking re-enable,
+  Haiku eval, backend lifecycle, README/pytest/CI, the briefing itself).
+- Complete: Phase 11 — skills cleanup + vetting policy: removed the
+  High-Risk `browser-use` skill, the ~1,840-skill `antigravity-awesome-skills`
+  bulk install, and the full `anthropics/skills` clone; kept only
+  `frontend-design` and `find-skills`; confirmed no skill artifacts in git
+  history or settings; standing vetting policy added to the Security model
+  section below (STEPS.md group 62).
 
-Roadmap was renumbered 2026-07-13: four phases (6 handoff-fix, 7 memory,
-8 voice-upgrade, 9 dashboard) inserted ahead of the original proactivity/
-polish phase, now Phase 10. See PLAN.md for all phase plans.
+Roadmap history: renumbered 2026-07-13 (handoff-fix/memory/voice-upgrade/
+dashboard inserted ahead of the original polish phase). On 2026-07-14 Phase
+10 was parked and Phases 11–14 added: 11 skills-cleanup, 12 email+calendar
+WRITE, 13 Apple Calendar + open-URL-in-Brave, 14 UI rework. See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
 
-## Architecture (as built - phase 1)
+## Architecture (as built - through phase 9)
 
 ```
 assistant/
-├── main.py      # CLI loop; owns checkpointer lifetime; fixed THREAD_ID
-├── agent.py     # build_agent(checkpointer) + make_thread_config(thread_id)
-├── tools.py     # TOOLS: web search (Tavily), file r/w, shell exec
-└── memory.py    # get_checkpointer() context manager over SqliteSaver
-tests/           # pytest-shaped, runnable with plain python
-workspace/       # the ONLY dir file/shell tools may touch (runtime-created)
-PLAN.md          # the six phase plans; read the active one each session
-STEPS.md         # build log
+├── main.py               # CLI loop; owns checkpointer lifetime; fixed THREAD_ID
+├── agent.py               # shared invocation-config helper (make_thread_config); graph
+│                             construction itself lives in supervisor.py/sub_agents.py (Phase 3)
+├── supervisor.py          # supervisor + outer StateGraph assembly; Command handoff routing
+├── sub_agents.py          # coding/research/life-admin worker sub-agent graphs
+├── tools.py               # Phase 1 hand-secured tools: web search (Tavily), file r/w, shell exec
+├── mcp_tools.py           # Phase 2+ MCP-loaded tools (Gmail/Calendar), merged into TOOLS
+├── mac_tools.py           # Mac-native control: osascript/open/shortcuts behind a hard allowlist
+├── interrupts.py          # confirmation-gated dummy tool demonstrating the interrupt mechanic
+├── memory.py              # get_checkpointer() context manager over AsyncSqliteSaver
+│                             (conversation_memory.sqlite)
+├── compaction.py          # Phase 7 Part A: short-term context compaction
+├── memory_store.py        # Phase 7 Part B: durable cross-conversation facts storage
+│                             (long_term_memory.sqlite, separate from the checkpointer's file)
+├── memory_extraction.py   # Phase 7 Part B: extraction, confirmation gate, recall — see its
+│                             module docstring for the full security design
+├── voice_io.py            # Phase 5/8: mic capture, local STT (mlx-whisper), TTS (`say`)
+├── voice_daemon.py        # Phase 5: always-on Option+Return hotkey daemon (menu bar app)
+├── server.py              # Phase 9: FastAPI wrapper over build_graph() for the dashboard app
+│                             (/chat, /resume, /history, /memory/facts, /cost) — shares the
+│                             CLI/voice daemon's real checkpointer + THREAD_ID, NOT the
+│                             separate `langgraph dev` ephemeral store
+└── studio.py              # LangGraph Studio / `langgraph dev` entry point (dev-time graph
+                              debugger only; checkpointer=None, unrelated to server.py)
+
+dashboard/                 # Phase 9: Tauri 2 + React + TypeScript + shadcn/ui desktop app
+├── src/
+│   ├── App.tsx             # tab shell (chat/history/memory/cost)
+│   ├── lib/api.ts          # typed client for assistant/server.py's endpoints
+│   └── components/
+│       ├── chat/           # ChatPanel + InterruptGate (confirmation-gate UI affordance)
+│       ├── history/        # HistoryPanel — full unfiltered /history feed
+│       ├── memory/         # MemoryPanel — view + delete (client-confirm, not interrupt-gated)
+│       ├── cost/           # CostPanel — LangSmith aggregates, today/week/all-time
+│       └── ui/             # shadcn/ui primitives
+└── src-tauri/              # Rust shell (process lifecycle not yet wired to server.py — started
+                               by hand as of Phase 9 step 6)
+
+tests/                      # pytest-shaped, runnable with plain python; one test file per
+                               assistant/ module (test_server.py, test_supervisor.py, etc.)
+launchd/                    # com.mohitvuyyuru.assistant-voice.plist — voice_daemon.py autostart
+workspace/                  # the ONLY dir file/shell tools may touch (runtime-created)
+PLAN.md                     # the phase plans; read the active one each session
+STEPS.md                    # build log
 ```
 
 ## Load-bearing decisions — do not undo without discussion
@@ -176,6 +176,19 @@ filtering content.
 - New tools (MCP-loaded included) are evaluated against this threat model
   before joining the agent. MCP tools MERGE into TOOLS; they never replace
   Phase 1's hand-secured tools.
+- **Skill-vetting policy (Phase 11, 2026-07-14):** a Claude Code skill is
+  instruction-bearing content loaded into agent context — the same threat
+  model as any other untrusted input, not an exception to it. No skill is
+  installed into this project without reading it first. High/Medium-risk-rated
+  community skills are declined by default. Bulk/marketplace installs (e.g.
+  `npx antigravity-awesome-skills`, or any tool that installs more than the
+  skill(s) explicitly asked for) are never used — one skill install event
+  brought in ~1,840 unreviewed third-party skills plus a High-Risk-rated
+  browser-automation skill (`browser-use`) under "full agent permissions"
+  before this policy existed; see STEPS.md for the cleanup. First-party
+  (Anthropic/Claude-Code-team) skills are the default preference over
+  community ones. Same standing as the rest of this security model — do not
+  weaken without discussion.
 
 ## Tech stack
 

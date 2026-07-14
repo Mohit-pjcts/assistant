@@ -531,6 +531,17 @@ tests ✓; text CLI unchanged ✓; STEPS.md updated with the benchmark numbers
 
 ## Phase 9 — Dashboard app — IN PROGRESS (scoping checkpoint locked 2026-07-14)
 
+**Delivered (new files, steps 1–6):** `assistant/server.py` (FastAPI wrapper —
+`/chat`, `/resume`, `/history`, `/memory/facts` list+delete, `/cost`); the
+entire `dashboard/` Tauri 2 + React + TypeScript + shadcn/ui app —
+`src/App.tsx` (tab shell), `src/lib/api.ts` (typed backend client),
+`src/components/chat/ChatPanel.tsx` + `InterruptGate.tsx`,
+`src/components/history/HistoryPanel.tsx`,
+`src/components/memory/MemoryPanel.tsx`, `src/components/cost/CostPanel.tsx`
+(each with a matching `.test.tsx`), `src/components/ui/*` (shadcn/ui
+primitives), and the `src-tauri/` Rust shell. See CLAUDE.md's Architecture
+section for the full annotated tree.
+
 **Objective:** a desktop app with a dashboard for the assistant — live chat,
 conversation history, and token/cost tracking. Voice I/O moving into the app
 is now a LATER pass within this phase, not this pass (see Decision 3 below) —
@@ -671,44 +682,184 @@ a fourth natural panel — "what the assistant knows about me."
 
 ---
 
-## Phase 10 — Proactivity + polish — NOT STARTED
+## Phase 10 — Proactivity + polish — PARKED (2026-07-14)
 
-*(This was the original Phase 6, renumbered when the handoff-fix / memory /
-voice-upgrade / dashboard work was inserted ahead of it on 2026-07-13. Content
-unchanged except where Phase 5 v2 already settled a step.)*
+Deliberately parked mid-flight to start the write-access/browser/UI arc
+(Phases 11–14) while that work was top-of-mind. Nothing in Phase 10 was
+left half-implemented — it was still mostly at the checklist stage. Resumable
+at any time.
 
-**Objective:** the assistant does something useful unprompted, and the repo
-is portfolio-finished.
+**Explicitly deferred with it (do NOT lose this debt — it's the reason this
+park note is verbose):**
+- Voice ACCURACY still unresolved — Phase 8 fixed latency only; "mishears me"
+  never proven fixed (n=3 benchmark). Larger benchmark + initial_prompt/VAD
+  tuning, or a documented decision to accept as-is.
+- Extended thinking still globally DISABLED (STEPS.md 28) for a Studio-only
+  bug the CLI never hits — check for a langchain-anthropic fix past 1.4.8 and
+  re-enable, or decide explicitly to leave off.
+- Haiku evaluation for research_agent, deferred since Phase 3 — decide on real
+  LangSmith trace data (the Phase 9 Cost panel helps).
+- Tauri shell doesn't spawn/kill the Python backend yet (Phase 9) — uvicorn
+  started by hand; automate or document.
+- README refresh (portfolio-critical), pytest adoption, optional CI.
+- Core Phase 10 build itself: morning briefing (calendar + unread email) via
+  launchd, behind the hard unattended-cost gate (Console spend cap + per-run/
+  per-month estimate before anything is scheduled).
+
+---
+
+## Phase 11 — Skills cleanup + skill-vetting policy — COMPLETE (2026-07-14)
+
+**Objective:** remove the unreviewed/high-risk skills bulk-installed on
+2026-07-14, and write a standing policy so it can't recur. Small phase, but
+it's a security event in a security-focused project and belongs in the log.
+
+**What happened (context):** an exploratory session ran `npx skills add
+browser-use` (rated **High Risk** by the installer, proceeded past the
+warning), `npx antigravity-awesome-skills` (bulk install, ~19,719 files into
+`~/.agents/skills`), and cloned the full anthropics/skills repo. All run with
+"full agent permissions" per the installer's own closing warning. This
+directly contradicts the project's core security principle (external,
+unreviewed content must not be able to induce agent actions) — a skill file
+is exactly untrusted instruction-bearing content loaded into agent context.
 
 **Steps:**
-1. Morning briefing: a separate entry point (e.g. `assistant.briefing`) that
-   runs one agent turn — today's calendar + unread email summary — delivered
-   via notification/`say`/terminal (or the Phase 9 app, if it exists by now);
-   scheduled with launchd.
-2. Unattended-cost gate BEFORE scheduling anything: estimate per-run and
-   per-month token cost; confirm the Console spend cap is set. CHECKPOINT:
-   nothing runs on a schedule without the user's sign-off on both.
-3. Interface hardening — SETTLED by Phase 5 v2 (it's a rumps menu bar app plus
-   global hotkey): wrap the daemon in a stable `.app` bundle so the four TCC
-   grants (STEPS.md 42) attach to a bundle ID instead of a versioned Homebrew
-   Cellar path that `brew upgrade python@3.12` silently invalidates. (If Phase
-   9 moved voice into the app, this may be moot — reconcile at scope time.)
-4. Repo polish: README refresh (architecture diagram, demo GIF), pytest
-   adoption for the existing test files, optional GitHub Actions to run the
-   suite.
-5. Revisit the globally-disabled extended thinking (STEPS.md 28): turned off
-   everywhere to work around a `langchain-anthropic` 1.4.8 SSE-merging bug that
-   only manifested in Studio's streaming UI — the CLI's non-streaming
-   `ainvoke()` was never at risk, so it's been paying lost reasoning depth for
-   a bug it never hits. Check for a fixed release past 1.4.8; if present,
-   re-enable (adaptive/default, matching STEPS.md 8.2) and confirm Studio no
-   longer reproduces the `BadRequestError`. Explicit decision either way — don't
-   let the disable become permanent by default.
-6. Final cost review: measure real daily spend from traces/Console; adjust
-   model assignments if needed. Includes the Haiku evaluation deferred from
-   Phase 3 step 3 (STEPS.md 24/25): `research_agent` is the best candidate —
-   decide using real LangSmith trace data.
+1. Remove `browser-use` (High Risk) and its symlinks; remove the
+   `antigravity-awesome-skills` bulk install (`~/.agents/skills`); remove the
+   full anthropics/skills clone. KEEP only `frontend-design` (Anthropic
+   first-party, needed for Phase 14) and optionally `find-skills` (rated Safe).
+2. Audit `.claude/settings.json` / `settings.local.json` for skill entries the
+   installers added; audit the repo path for leftover symlinks
+   (`find PA/.claude -type l`).
+3. Gitignore skill-install artifacts so they never enter the portfolio repo's
+   history (`.claude/skills/.agents/`, the cloned `skills/` dir); confirm
+   nothing skill-related is staged (`git status` before any commit).
+4. Add a **skill-vetting policy to CLAUDE.md's security model**: no skill is
+   installed into this project without reading it first; High/Med-risk-rated
+   community skills are declined by default; bulk installs are never used;
+   first-party (Anthropic) skills are the default preference. Same standing as
+   the rest of the security model — don't weaken without discussion.
 
-**Done-when:** the briefing fires on schedule for a week without intervention;
-the spend cap is verified; the README and repo are presentable enough to send
-to a recruiter without a warning attached.
+**Done-when:** only vetted skills remain; settings + repo confirmed clean of
+unwanted skill artifacts; nothing skill-related in git history; the vetting
+policy is written into CLAUDE.md; STEPS.md updated.
+
+---
+
+## Phase 12 — Email + Google Calendar WRITE access — NOT STARTED
+
+**Objective:** the agent can send email and create/modify/delete Google
+Calendar events — every such action behind the confirmation gate. This is the
+deliberate reversal of Phase 2's read-only scoping, which explicitly deferred
+send/modify to "a future, separately-approved step behind the confirmation
+gate." That step is now.
+
+**Why this is the highest-consequence phase in the project:** an agent that
+can send email, under the standing prompt-injection threat model, is the
+single most dangerous capability here — a malicious web/email payload reaching
+the agent could try to make it send mail as the user. The confirmation gate is
+the one thing between "injection" and "injection that acts as you." No write
+tool ships ungated.
+
+**Steps:**
+1. Widen OAuth scopes: Gmail readonly → send (and modify if archive/label is
+   wanted); Calendar readonly → read/write. USER does the Google Cloud Console
+   scope changes (same as Phase 2). Note: re-consent required; the weekly
+   refresh-token expiry (Testing publish status, STEPS.md Phase 2) still
+   applies.
+2. Design CHECKPOINT — the load-bearing one: what exactly is gated, and how the
+   gate RENDERS. Sending email approves *content* (recipient + subject + body),
+   not a verb. Inherit Phase 7's red-team rule directly: show the RAW artifact
+   verbatim at confirmation (actual recipient, actual body) — NEVER an LLM
+   re-summary like "I'll email your professor." The injection attack is a
+   payload the user would wave through if shown only a summary. Same for
+   calendar writes (show the real event details). Decide the exact gate payload
+   shape and how server.py/the Phase 9 GUI + voice_daemon render it. Voice:
+   email/calendar sends should almost certainly be text-only-approvable
+   (voice_approvable: False), same reasoning as memory writes — content is hard
+   to vet by ear. Confirm at the checkpoint.
+3. Implement write tools behind `interrupt()`, merged into the MCP tool set the
+   same way read tools were. Per-turn write cap (mirror MAX_HANDOFFS/
+   MAX_MEMORY_WRITES). The TOCTOU rule from Phase 7 applies: the exact content
+   approved at the gate is exactly what's sent — no re-generation after
+   approval.
+4. Update CLAUDE.md's standing confirmation rule to name email-send and
+   calendar-write as gated side effects (it currently names email/calendar
+   generically from when they were read-only).
+5. Verify: a real send fires the gate showing verbatim content; decline
+   actually cancels; approve actually sends; an injection-shaped request
+   (e.g. a crafted email body asking the agent to forward something) still
+   surfaces the real action at the gate rather than executing silently.
+
+**Done-when:** agent can send an email and create/modify a calendar event,
+each only after a gate showing verbatim content; decline cancels; scopes
+confirmed; injection-attempt surfaces at the gate; CLAUDE.md updated; tests +
+STEPS.md updated.
+
+---
+
+## Phase 13 — Mac-native cluster: Apple Calendar + open-URL-in-Brave — NOT STARTED
+
+**Objective:** two Mac-native capabilities that share the Phase 4
+`osascript`/`open` + TCC-permission pattern, so they're one coherent phase.
+(a) Apple Calendar read + gated write via EventKit/osascript; (b) open a URL
+in Brave — NARROW: open/navigate only, explicitly NOT browser automation
+(clicking/typing/form-fill), a scope the user deliberately chose over the
+full-automation `browser-use` approach after weighing the injection risk.
+
+**Steps:**
+1. Apple Calendar: EventKit/osascript bridge, Phase 4 pattern (model values as
+   argv, never interpolated into script source). Reads ungated; creates/edits
+   behind the confirmation gate showing verbatim event details (same rule as
+   Phase 12). TCC: macOS will prompt for Calendar access — USER grants it,
+   flag it like the Phase 4 Automation prompts.
+2. open-URL-in-Brave: `open -a "Brave Browser" <url>` style tool, url as argv.
+   Injection CHECKPOINT: a URL from the USER'S direct request ("open my email")
+   is fine ungated; a URL the agent CHOSE from tool-result content it just read
+   is the injection-to-navigation path (a malicious page saying "open
+   evil.com/?data=..."). Decide: gate agent-originated navigation, or
+   domain-allowlist, or both. Do NOT treat all navigation as equal. Explicitly
+   scope out automation — no clicking/typing/scraping; that's a separate,
+   sandboxed project if ever.
+3. Wire both as tools; if a new mac-native sub-agent split makes sense vs.
+   extending mac_control_agent, decide at scope time (respect Phase 3's routing
+   lesson: whatever owns these must be described in SUPERVISOR_SYSTEM_PROMPT).
+4. Verify each capability live, plus the injection-navigation guard (an
+   agent-chosen URL from web content is gated/blocked as decided).
+
+**Done-when:** Apple Calendar read works and writes fire the gate; open-URL in
+Brave works for user-requested URLs and the agent-originated-navigation guard
+behaves as decided; automation confirmed out of scope; TCC grants documented;
+tests + STEPS.md updated.
+
+---
+
+## Phase 14 — UI rework — NOT STARTED
+
+**Objective:** improve the Phase 9 dashboard — visual polish AND surfacing the
+new gated actions (email sends, calendar writes, browser opens) in one
+coherent approval experience. Uses the `frontend-design` skill (Anthropic
+first-party, the one skill kept from the 2026-07-14 cleanup).
+
+**Why last in this arc:** by now email/calendar-write and browser-open all
+produce gated actions; the UI can present a unified "approval inbox" for every
+pending confirmation rather than a per-tool afterthought. Building UI last lets
+it surface the full set.
+
+**Steps (scope fully at phase start):**
+1. Define "better" at a CHECKPOINT — visual polish vs. new capability surfacing
+   vs. interaction-model rework. Likely some of each; pick priorities.
+2. Apply frontend-design skill guidance for a real visual pass on the existing
+   four panels.
+3. Unified approval view: every gated action (memory write, email send,
+   calendar write, browser navigation) rendered with its VERBATIM content
+   (never re-summarized — the standing rule across Phases 7/12/13), approve/
+   decline, correct voice_approvable handling per action type.
+4. Re-verify the security-critical property end to end in the real window: no
+   gated action can complete without an explicit approval, and every approval
+   shows the real artifact, not a summary.
+
+**Done-when:** the dashboard is visibly improved; all gated actions across the
+project surface in a coherent approval UI showing verbatim content; the
+no-ungated-side-effect property holds through the GUI; real-window verified;
+STEPS.md updated.

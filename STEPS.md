@@ -4108,3 +4108,73 @@ cd dashboard
 npm run build
 npm run test
 ```
+
+## 62. Phase 11 — skills cleanup + vetting policy (2026-07-14)
+
+**Context:** an earlier exploratory session ran `npx skills add browser-use`
+(installer rated it **High Risk**, proceeded past the warning anyway), then
+`npx antigravity-awesome-skills` (a bulk marketplace install — ~1,840
+unreviewed third-party skill directories dropped into `~/.agents/skills`),
+plus a full clone of `anthropics/skills` inside the project's own
+`.claude/skills/`. All of it installed under "full agent permissions" per the
+installer's own closing warning. This directly contradicts the project's core
+threat model: a skill file is untrusted instruction-bearing content loaded
+into agent context, exactly like web/email content — it needed the same
+scrutiny this project already applies to tools, and got none at install time.
+
+**62.1 — Inventory before touching anything.** Traced the actual layout
+(different from what a first glance suggested):
+- `~/.agents/skills/` (home dir, outside the repo): the real bulk-install
+  location, 1,841 directories, plus `.antigravity-install-manifest.json`
+  (1,936-entry manifest from the antigravity installer).
+- `~/.agents/.skill-lock.json`: the *legitimate* `npx skills` tool's own lock
+  file — turned out to only track `find-skills` (vercel-labs/skills, rated
+  Safe). Left untouched; it was never the problem.
+- `~/.claude/skills/` (global Claude Code skill registration point): only
+  `find-skills` was actually symlinked in here (→ `~/.agents/skills/
+  find-skills`). `frontend-design` sat in `~/.agents/skills/` but was never
+  registered/symlinked — inert either way, so left as-is; Phase 14 can wire
+  it up when it's actually needed.
+- Project-local `.claude/skills/` (repo dir): a separate, self-contained
+  `browser-use` install — `.claude/skills/.agents/skills/browser-use` (the
+  skill content), `.claude/skills/.claude/skills/browser-use` (a symlink to
+  it), and `.claude/skills/skills/` (the full `anthropics/skills` git clone,
+  origin confirmed as `github.com/anthropics/skills`), plus a
+  `skills-lock.json` tracking only `browser-use`. Confirmed via `git
+  check-ignore` that all of `.claude/` (this included) was already covered by
+  the existing `.gitignore` line 34 (`.claude/`) — so none of this was ever
+  at risk of entering git history; the risk was purely "unreviewed content
+  sitting in agent-readable context," not a git-hygiene problem.
+
+**62.2 — Removal.** Two destructive actions, each confirmed explicitly with
+the user before running (the harness's own auto-mode classifier additionally
+blocked the first attempt at the `~/.agents/skills` deletion as
+irreversible/out-of-project-scope until the user named that exact target,
+which was the right call — worth remembering as a pattern, not a one-off):
+1. `~/.agents/skills/`: deleted all 1,838 directories except `frontend-design`
+   and `find-skills`, plus the antigravity manifest file (now stale/
+   misleading once most of what it listed was gone).
+2. Project-local `.claude/skills/`: deleted the entire directory (browser-use
+   install + symlink + anthropics/skills clone + its lock file) — nothing in
+   it was worth keeping since browser-use itself is the thing being removed.
+
+**62.3 — Audit.** `.claude/settings.json` and `.claude/settings.local.json`
+had no skill-related entries (nothing to clean there). `find .claude -type l`
+after the removal returns nothing — no leftover symlinks. `git status
+--porcelain` shows only the pre-existing `CLAUDE.md`/`PLAN.md` edits, nothing
+skill-related, confirming the gitignore coverage from 62.1 held throughout.
+
+**62.4 — Standing policy.** Added a new bullet to CLAUDE.md's Security model
+section (same standing as the rest of that section — not to be weakened
+without discussion): no skill installed without reading it first,
+High/Medium-risk community skills declined by default, bulk/marketplace
+installers never used again, first-party skills preferred by default. The
+policy names this incident directly so the "why" survives even after the
+cleanup itself is old news.
+
+**Verification:** `~/.agents/skills` now contains exactly `frontend-design`
+and `find-skills`; `~/.claude/skills/find-skills` symlink still resolves
+correctly (untouched by the cleanup); project repo has no `.claude/skills/`
+directory at all; `git status` clean of skill artifacts. PLAN.md's Phase 11
+header flipped to COMPLETE; CLAUDE.md's Current Status block updated to point
+at Phase 12 next.
