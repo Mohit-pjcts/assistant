@@ -3387,3 +3387,188 @@ python tests/test_memory_store.py; python tests/test_memory_extraction.py
 # 81/81 across all files, unchanged count
 launchctl kickstart -k gui/$(id -u)/com.mohitvuyyuru.assistant-voice
 ```
+
+---
+
+## 54. Phase 9 scoping checkpoint — shell, transport, voice sequencing locked (2026-07-14)
+
+**Precondition confirmed before starting:** working tree clean, Phase 8 (STEPS.md
+53) is the tip commit.
+
+**Read the actual code behind PLAN.md's Phase 9 assumptions before proposing
+anything** (not just PLAN.md's own text) — `studio.py`, `main.py`,
+`interrupts.py`, `memory_extraction.py`, `voice_daemon.py`, `memory_store.py`,
+STEPS.md 27. This surfaced a real correction to PLAN.md's stated default.
+
+**Decision 1 — desktop shell: Tauri**, over Electron. Reasoning: the Python
+graph is a separate local process either way, so Electron's Node-process
+story isn't decisive; Tauri wins on bundle size/idle memory (a checkable
+portfolio number) and reads as the current-generation choice. Accepted
+tradeoff: Rust is a second language in the repo, thinner plugin ecosystem
+than Electron if a native integration is needed later. shadcn/ui works
+identically under either (it's just React) — no tension with the shell pick.
+
+**Decision 2 — transport: a thin custom wrapper, NOT `langgraph dev`. This
+reverses PLAN.md's stated default**, which assumed the already-verified
+`langgraph dev` REST API (STEPS.md 27) was the seam. Checked the actual code
+first: `studio.py`'s `make_graph()` compiles with `checkpointer=None`
+because the LangGraph API server manages persistence itself in `local_dev`
+mode and *raises* if the graph brings its own (STEPS.md 27's documented
+constraint) — meaning the dev server's threads live in its own store
+(`.langgraph_api/*.pckl`, gitignored, dev-scratch), completely separate from
+`conversation_memory.sqlite`, the file `main.py`/`voice_daemon.py` both
+write to via the fixed `THREAD_ID` + real `AsyncSqliteSaver`. Talking to
+`langgraph dev` would give the app its own disconnected conversation, not
+the same one the CLI and voice share (the property Phase 5 built), and would
+break PLAN.md's own History-panel premise ("reads the SQLite the graph
+already writes") since there'd be no single SQLite of record. `langgraph
+dev`'s in-memory runtime is also documented as dev-only, not meant as an
+always-on backend a shipped app depends on.
+
+Locked instead: a small local FastAPI/uvicorn server (`assistant/server.py`,
+new) that imports `build_graph()` directly, wired to the SAME
+`AsyncSqliteSaver` / `conversation_memory.sqlite` / fixed `THREAD_ID` main.py
+already uses — the app becomes a genuine peer of the CLI and voice daemon,
+not a fork. `langgraph.json`/`studio.py`/`langgraph dev` are UNCHANGED and
+kept for what they're actually good at (Studio's visual graph debugger
+during development); the shipped app just doesn't depend on that server.
+
+**Interrupt-gate UI requirement (load-bearing, carried forward from Phase
+7's security design):** the wrapper relays the raw interrupt payload dict
+unmodified — same `action`/`spoken_prompt`/`voice_approvable` shape every
+gated tool already produces. For memory writes (`voice_approvable: False`,
+`assistant/memory_extraction.py`), the app UI must show the `fact` string
+**verbatim**, no LLM re-summary, and must not offer a voice affordance for
+that specific gate — the same red-team requirement `voice_daemon.py`
+already enforces by refusing to speak it. This is the first GUI rendering
+of an interrupt payload this project has had; treat it as needing its own
+explicit verification pass, not an afterthought of the chat panel.
+
+**Decision 3 — voice sequencing: deferred**, not built in this phase.
+Reasoning: bundling a first-ever custom transport + first-ever GUI
+interrupt affordance together with moving mic/hotkey/playback into the app
+is two new integration surfaces in one pass, and the security-critical
+piece (the gate) is exactly the thing not to rush to get to voice sooner.
+`voice_daemon.py` keeps running unchanged; retiring it is a future
+checkpoint once voice-in-app reaches real parity (global-hotkey-from-any-app
+is a nontrivial platform capability in Tauri too, not just a mic button).
+
+**Panel-inventory corrections vs. PLAN.md's "already half-built" framing**
+(found by reading the code, not assumed):
+- History: `conversation_memory.sqlite` is `AsyncSqliteSaver`'s own
+  serialized checkpoint format, not a flat messages table — real parsing
+  work. Plan: use `graph.aget_state(config)` (the public LangGraph API,
+  not hand-parsing the SQLite file) from the wrapper's `/history` endpoint.
+- Cost/tokens: no code anywhere queries LangSmith today; `langsmith` SDK
+  (0.10.1) is present only as a transitive dependency. This panel needs new
+  retrieval code, not existing code to expose.
+- Memory: closest to actually half-built — `memory_store.py` already has
+  `save_fact`/`list_facts`/`recall_facts`; missing `delete_fact` (checked —
+  does not exist). Deleting is the user curating their own already-saved
+  data, not a new agent side effect, so it does NOT need an `interrupt()`
+  gate — that gate exists for autonomous writes, not user-initiated review.
+
+**Environment checked before committing to the shell choice:** `node`/`npm`
+present (v25.9.0 / 11.12.1); `cargo`/`rustc`/`tauri` CLI NOT installed —
+Tauri's Rust toolchain install is deferred to the frontend-scaffolding step,
+flagged separately since it's a real environment change (not done as part of
+this checkpoint).
+
+**Next:** implement `assistant/server.py` (backend wrapper: `/chat`,
+`/resume`, `/history`, `/memory/facts` list+delete) first — the highest-risk,
+most load-bearing piece, and the dependency every panel sits on top of —
+before any frontend scaffolding.
+
+---
+
+## 55. Phase 9 step 1 — backend wrapper implemented and verified (2026-07-14)
+
+**Delivered:** `assistant/server.py` (new) — a FastAPI app built exactly per
+STEPS.md 54's locked decision: its `lifespan` opens `get_checkpointer()` and
+calls `build_graph()` directly, same as `main.py`, over the SAME fixed
+`THREAD_ID = "cli-default-thread"`. Default DB path is the real
+`conversation_memory.sqlite`; both it and the long-term facts DB are
+overridable via `ASSISTANT_CONVERSATION_DB_PATH`/`ASSISTANT_MEMORY_DB_PATH`
+env vars (read at import time), added specifically so tests/throwaway runs
+never touch real data — same "redirect DB paths, clean up after" rule
+CLAUDE.md's verification-discipline section requires.
+
+**Endpoints:**
+- `POST /chat` — `{"message": str}` → `graph.ainvoke()`, same as main.py's
+  loop body just surfaced per-call over HTTP instead of looped in-process.
+- `POST /resume` — `{"approved": bool}` → `Command(resume=...)`, the
+  interrupt-continuation half of the same mechanic.
+- Both return `{"type": "message", "content": ...}` or `{"type":
+  "interrupt", "payload": ...}` — the interrupt payload is the tool's own
+  dict, passed through with ZERO transformation (checked by hand against
+  `interrupts.py`'s `send_test_notification` payload shape and
+  `memory_extraction.py`'s `voice_approvable`/`fact` fields) — this is the
+  load-bearing property STEPS.md 54 called out: no re-rendering between the
+  tool constructing the payload and the client seeing it.
+- `GET /history` — `graph.aget_state(config)` (the public LangGraph API,
+  not hand-parsing the checkpointer's serialized rows, per STEPS.md 54's
+  correction of PLAN.md's original framing), messages flattened to
+  `{"role", "content"}` pairs.
+- `GET /memory/facts` / `DELETE /memory/facts/{id}` — thin wrappers over
+  `memory_store.list_facts()`/new `memory_store.delete_fact()`. Deletion
+  deliberately does NOT go through `interrupt()` — it's the user curating
+  their own already-saved data, not a new agent-authored side effect (the
+  gate in `memory_extraction.py` exists for the latter).
+
+**`assistant/memory_store.py`:** added `delete_fact(fact_id, db_path=None)`
+— same `db_path` late-resolution pattern (`db_path if db_path is not None
+else DEFAULT_DB_PATH`, resolved inside the function body) as `save_fact`,
+for the same monkeypatch-ability reason documented there.
+
+**Dependencies:** `fastapi` added as an explicit direct dependency
+(pyproject.toml + requirements.txt); `uvicorn` made explicit too (was
+already transitive via `langgraph-api`/`mcp`). `langsmith` (0.10.1) and
+`sse-starlette` confirmed already present transitively — not yet used
+directly (that's the deferred cost/token panel, STEPS.md 54).
+
+**Verified against the real graph, not mocked** (`tests/test_server.py`, 6
+new tests, all real Anthropic API calls — same no-mocking convention as
+`test_interrupts.py`/`test_supervisor.py`), fully isolated from real data via
+the env-var DB redirect (confirmed real `conversation_memory.sqlite`/
+`long_term_memory.sqlite` file sizes and mtimes unchanged before/after):
+- `/chat` round-trips a real message through the real graph.
+- `/history` reflects the exact thread `/chat` just wrote to (same shared
+  thread, proving the app-and-CLI-share-one-conversation property this
+  whole design choice was for).
+- Gated-tool interrupt → `/resume(approved=True)` completes the action;
+  → `/resume(approved=False)` cancels it — both paths verified against the
+  real `send_test_notification` interrupt, mirroring `test_interrupts.py`'s
+  existing coverage but through the HTTP layer instead of a bare graph.
+  invoke.
+- `/memory/facts` list + delete round-trips against a freshly seeded fact;
+  deleting an already-gone id returns 404.
+
+**Full project regression:** all 87 tests pass (81 prior, unchanged, plus 6
+new in `test_server.py`) — `test_tools.py` (22), `test_mcp_tools.py` (10),
+`test_memory.py`, `test_interrupts.py` (2), `test_mac_tools.py` (7),
+`test_supervisor.py` (9), `test_voice_io.py` (11), `test_compaction.py` (8),
+`test_memory_store.py` (4), `test_memory_extraction.py` (8),
+`test_server.py` (6).
+
+**Not yet done — flagged, not silently skipped:** the memory-write gate's
+specific interrupt shape (`voice_approvable: False`, `fact` field) was not
+independently fired through `/chat` in this pass — it depends on the
+extraction pipeline judging something save-worthy in a live turn, which
+wasn't forced here. The passthrough code path is generic (the same
+`_serialize_turn_result` handles any interrupt payload structurally), so
+risk is judged low, but this is called out explicitly as something to
+re-verify once the frontend's interrupt-gate UI (PLAN.md Phase 9 step 3)
+is being built, per that step's own stated verification requirement.
+
+**Commands:**
+```sh
+.venv/bin/pip install -e .   # picks up fastapi
+.venv/bin/python tests/test_server.py
+# full regression, one file at a time (see STEPS.md 53's precedent):
+.venv/bin/python tests/test_tools.py; .venv/bin/python tests/test_mcp_tools.py
+.venv/bin/python tests/test_memory.py; .venv/bin/python tests/test_interrupts.py
+.venv/bin/python tests/test_mac_tools.py; .venv/bin/python tests/test_supervisor.py
+.venv/bin/python tests/test_voice_io.py; .venv/bin/python tests/test_compaction.py
+.venv/bin/python tests/test_memory_store.py; .venv/bin/python tests/test_memory_extraction.py
+# 87/87 across all files
+```

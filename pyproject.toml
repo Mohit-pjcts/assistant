@@ -30,6 +30,11 @@ dependencies = [
     # and its sdist build execs /usr/bin/sw_vers, so an unmarked dep breaks
     # any non-Mac install (cloud sessions, future CI).
     'rumps>=0.4.0; sys_platform == "darwin"',
+    # Phase 9: assistant/server.py, the dashboard app's backend wrapper.
+    # uvicorn was already a transitive dep (via langgraph-api/mcp); made
+    # explicit now that server.py imports it directly to run the app.
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]

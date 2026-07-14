@@ -97,6 +97,20 @@ async def list_facts(db_path: Path | str | None = None) -> list[Fact]:
         return [Fact(**dict(row)) for row in rows]
 
 
+async def delete_fact(fact_id: int, db_path: Path | str | None = None) -> bool:
+    """Delete a stored fact by id. Phase 9's memory-review panel: the USER
+    curating their own already-saved data, not a new agent-authored side
+    effect — deliberately does not go through interrupt() (that gate is for
+    the agent's own autonomous writes; see memory_extraction.py's
+    docstring). Returns whether a row was actually deleted, so callers can
+    tell an already-gone id apart from a real deletion."""
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        cursor = await db.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 def _keywords(text: str) -> set[str]:
     return set(_WORD_RE.findall(text.lower()))
 

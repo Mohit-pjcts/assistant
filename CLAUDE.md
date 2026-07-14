@@ -20,8 +20,18 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 9 (Dashboard app) is next; read PLAN.md before
-  beginning it.
+- **Active: Phase 9 — Dashboard app.** Scoping checkpoint locked
+  2026-07-14 (STEPS.md 54, PLAN.md Phase 9): Tauri shell, a thin FastAPI
+  wrapper over `build_graph()` sharing the CLI's real
+  `AsyncSqliteSaver`/`conversation_memory.sqlite`/`THREAD_ID` — NOT the
+  `langgraph dev` REST API, which turned out to use a separate ephemeral
+  persistence store. Voice-in-app deferred to a later checkpoint;
+  `voice_daemon.py` keeps running unchanged. Step 1 complete (STEPS.md 55):
+  `assistant/server.py` (`/chat`, `/resume`, `/history`, `/memory/facts`
+  list+delete), verified live against the real graph, 87/87 tests pass.
+  Next: step 2, Tauri + React + shadcn/ui scaffold — needs the Rust
+  toolchain installed first (not present as of STEPS.md 54/55, flag before
+  installing). Read PLAN.md's Phase 9 before continuing this phase's work.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration

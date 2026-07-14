@@ -529,29 +529,96 @@ tests ✓; text CLI unchanged ✓; STEPS.md updated with the benchmark numbers
 
 ---
 
-## Phase 9 — Dashboard app — NOT STARTED
+## Phase 9 — Dashboard app — IN PROGRESS (scoping checkpoint locked 2026-07-14)
 
 **Objective:** a desktop app with a dashboard for the assistant — live chat,
-conversation history, and token/cost tracking — with voice I/O moved out of
-Python and into the app.
+conversation history, and token/cost tracking. Voice I/O moving into the app
+is now a LATER pass within this phase, not this pass (see Decision 3 below) —
+`voice_daemon.py` keeps running unchanged for now.
 
-**Architectural fork, decided at planning:** the app is a CLIENT of the
-existing Python graph, it does NOT replace it. The `langgraph dev` server
-(STEPS.md 27) already exposes the graph over HTTP/REST — that is the seam the
-app talks to. This also cleanly retires the Python voice daemon: the app owns
-mic/hotkey/playback and calls the graph server. (Note the Phase 6/7 caveat:
-the graph the app drives must be the fixed, compacted, memory-enabled one —
-this is why the app comes after those phases, so panels have real data to show
-and the graph behaves.)
+**Architectural fork, decided at planning, CONFIRMED at the scoping
+checkpoint:** the app is a CLIENT of the existing Python graph, it does NOT
+replace it. (Note the Phase 6/7 caveat: the graph the app drives must be the
+fixed, compacted, memory-enabled one — this is why the app comes after those
+phases, so panels have real data to show and the graph behaves.)
+
+**Scoping checkpoint decisions (STEPS.md 54 has full reasoning for each):**
+1. **Desktop shell: Tauri** (not Electron) — smaller bundle/footprint,
+   modern portfolio signal; accepted tradeoff is a small added Rust surface.
+2. **Transport: a thin custom FastAPI wrapper (`assistant/server.py`), NOT
+   the `langgraph dev` REST API.** This REVERSES the original plan below —
+   checked at the checkpoint and found `langgraph dev`'s persistence
+   (`.langgraph_api/*.pckl`) is a separate, ephemeral store from
+   `conversation_memory.sqlite`, so the app would NOT share the CLI/voice
+   daemon's actual conversation, and the History panel would have nothing
+   real to read. The wrapper instead calls `build_graph()` directly with the
+   same `AsyncSqliteSaver`/fixed `THREAD_ID` main.py already uses.
+   `langgraph.json`/`studio.py`/`langgraph dev` are unchanged and kept for
+   Studio's dev-time graph debugger — just not what the shipped app depends
+   on.
+3. **Voice sequencing: deferred** to a later pass/checkpoint within this
+   phase, not built alongside the initial panels — avoids stacking two new
+   integration surfaces (custom transport + first GUI interrupt affordance,
+   and mic/hotkey/playback-in-app) at once, on top of the gate being
+   security-critical.
+
+**Interrupt-gate UI (load-bearing, carried forward from Phase 7):** the
+wrapper passes each gated tool's raw interrupt payload through unmodified.
+For memory writes (`voice_approvable: False`), the app UI must show the
+`fact` string verbatim (no re-summary) and must not offer voice approval for
+that gate specifically — same requirement `voice_daemon.py` already enforces.
+Treat this as its own verification item, not a detail of the chat panel.
 
 **Stack:** shadcn/ui for the frontend (matches the user's React background;
-low-effort polish). Desktop shell (Tauri vs Electron) is a CHECKPOINT at scope
-time. Two of the three panels are already half-built by earlier phases:
+low-effort polish). Panel-inventory reality check (STEPS.md 54, corrects the
+original "half-built" framing below): History needs real parsing work
+(`graph.aget_state()`, not a flat table); Cost/tokens needs NEW LangSmith
+retrieval code (nothing queries it today, `langsmith` SDK is only a
+transitive dependency so far); Memory is the one actually close to
+half-built (`memory_store.py` has save/list/recall already, needs a new
+`delete_fact()` — a user-curation action, not an agent side effect, so no
+interrupt gate needed for it).
+
+**Steps (locked at the scoping checkpoint; supersedes the original list
+below):**
+1. `assistant/server.py` (backend wrapper) — `/chat`, `/resume`, `/history`,
+   `/memory/facts` (list + delete). Built and tested BEFORE any frontend
+   code, since every panel depends on it and it's where the confirmation
+   gate's correctness lives.
+2. Tauri + React + shadcn/ui scaffold. Requires installing the Rust
+   toolchain (not present in the environment as of STEPS.md 54 — flag before
+   installing).
+3. Chat panel wired to `/chat`/`/resume`, including the interrupt-gate UI
+   affordance (verified against a real gated tool, both approve/decline, and
+   specifically against a memory-write interrupt for the verbatim-fact
+   requirement).
+4. History panel wired to `/history`.
+5. Memory panel wired to `/memory/facts` (view + delete).
+6. Cost/token panel — new LangSmith retrieval code behind a new endpoint;
+   scope the query/aggregation shape at this step, not assumed up front.
+7. CHECKPOINT (separate from this phase's initial done-when): voice-in-app
+   sequencing — only after 1–6 are stable; retire `voice_daemon.py` only once
+   real parity is confirmed.
+
+**Done-when (initial pass, i.e. steps 1–6 — voice-in-app is its own later
+done-when per step 7):** the app runs as a desktop client of the local graph
+sharing the CLI/voice daemon's actual conversation thread; chat, history,
+memory, and cost panels all work against real data; the confirmation gate has
+a real, verified UI affordance including the memory-write verbatim/no-voice
+requirement; STEPS.md updated.
+
+<details>
+<summary>Original pre-checkpoint plan (superseded 2026-07-14 by the scoping
+checkpoint above — kept for the record, not current)</summary>
+
+The `langgraph dev` server (STEPS.md 27) already exposes the graph over
+HTTP/REST — that is the seam the app talks to. This also cleanly retires the
+Python voice daemon: the app owns mic/hotkey/playback and calls the graph
+server. Two of the three panels are already half-built by earlier phases:
 history reads the SQLite the graph already writes; cost/tokens come from
 LangSmith traces (Phase 3) which carry token counts. Memory (Phase 7) becomes
 a fourth natural panel — "what the assistant knows about me."
 
-**Steps (high-level; full scope at phase start):**
 1. CHECKPOINT: desktop shell choice (Tauri/Electron), and confirm the
    app→graph transport (the langgraph dev REST API, or a thin wrapper over it).
 2. Core chat panel talking to the graph server; verify parity with the CLI
@@ -563,10 +630,7 @@ a fourth natural panel — "what the assistant knows about me."
    retire `voice_daemon.py` once parity is confirmed.
 6. (If Phase 7 done) memory panel.
 
-**Done-when:** the app runs as a desktop client of the local graph with working
-chat, history, and cost panels; voice works from the app and the standalone
-Python daemon is retired; the confirmation gate has a real UI affordance;
-STEPS.md updated. (Per-panel done-when detailed at scope time.)
+</details>
 
 ---
 
