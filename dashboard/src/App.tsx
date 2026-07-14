@@ -1,14 +1,14 @@
-import { Button } from "@/components/ui/button";
+import { ChatPanel } from "@/components/chat/ChatPanel";
 
-// Placeholder scaffold (Phase 9 step 2, STEPS.md) — proves the Tauri +
-// React + shadcn/ui wiring compiles end-to-end. Real panels (chat, history,
-// memory, cost) replace this in later steps, talking to assistant/server.py.
+// PLAN.md Phase 9 step 3: chat panel wired to assistant/server.py. History,
+// memory, and cost panels are later steps — single-panel layout for now.
 function App() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-      <h1 className="text-2xl font-semibold">Personal Assistant Dashboard</h1>
-      <p className="text-muted-foreground">Scaffold check — Tauri + React + shadcn/ui wired up.</p>
-      <Button>It works</Button>
+    <main className="mx-auto flex h-screen max-w-2xl flex-col gap-4 p-4">
+      <h1 className="text-lg font-semibold">Personal Assistant</h1>
+      <div className="min-h-0 flex-1">
+        <ChatPanel />
+      </div>
     </main>
   );
 }

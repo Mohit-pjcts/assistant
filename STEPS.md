@@ -3654,3 +3654,147 @@ npm run build                                              # frontend check
 source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml   # Rust check
 git add --dry-run dashboard/                                # confirmed gitignore coverage
 ```
+
+---
+
+## 57. Phase 9 step 3 — chat panel wired to assistant/server.py, interrupt-gate UI (2026-07-14)
+
+**Backend additions (`assistant/server.py`):**
+- **CORS, explicit allowlist, NOT a wildcard.** `DASHBOARD_ORIGINS =
+  ["http://localhost:1420", "tauri://localhost", "http://tauri.localhost"]`
+  — the Vite dev origin and Tauri's production webview origins (macOS +
+  Windows, though Windows isn't this project's target platform). Reasoning
+  written into the code: this server can trigger side-effect-capable tool
+  calls (behind the interrupt gate, but even reasoning/read access isn't
+  something an arbitrary web page in the user's regular browser should be
+  able to reach on localhost). Verified live, not just configured: a real
+  preflight `OPTIONS /chat` from `http://localhost:1420` returns 200 with
+  the right `access-control-allow-origin`; the same request with `Origin:
+  https://evil.example.com` returns 400 "Disallowed CORS origin".
+- **New: the `synthetic` flag on `/history` messages — found live, not
+  designed up front.** Hit the real server with curl during contract
+  verification and saw a genuine multi-hop `/history` response include the
+  Phase 6 routing-bridge text (`"[Routing note, not from the user] ..."`)
+  as a plain `role: "user"` entry — exactly what a naive chat-bubble
+  renderer would show as if the real user had typed it. `assistant/
+  compaction.py` already exports `is_genuine_human_turn`/
+  `is_compaction_summary` for this (built for Phase 6/7's own windowing
+  needs); added `_is_synthetic()` in server.py combining both (correctly
+  scoped to HumanMessage only — `is_genuine_human_turn` returns False for
+  every non-human message type too, which is a different thing and must
+  not be conflated with "synthetic"). `/history` now returns `synthetic:
+  bool` per message rather than silently dropping the routing
+  bridge/recalled-facts/compaction-summary entries — keeps `/history`
+  complete and honest (a future full-fidelity History panel, PLAN.md step
+  4, may want to show them) while giving any consumer a real signal to
+  filter on instead of fragile text-prefix matching. Covered by a NEW
+  assertion in the existing gated-tool test (`tests/test_server.py`) that
+  checks a real routing-bridge message from a real multi-hop turn is
+  flagged `synthetic: true`, and a real genuine user message in the same
+  history is `synthetic: false` — real coverage, not a hand-built fixture.
+
+**Frontend (`dashboard/`):**
+- `src/lib/api.ts` — typed client (`sendChat`, `resumeChat`, `fetchHistory`)
+  matching server.py's response shapes exactly (verified against real curl
+  output, see below). Fixed base URL (`http://127.0.0.1:8000`) — the Python
+  backend is started BY HAND for now (`uvicorn assistant.server:app`), not
+  spawned/killed by the Tauri shell. Deliberately NOT built this step:
+  automating that process lifecycle is its own concern (spawn-on-launch,
+  health-check, kill-on-quit), kept separate so this step stayed "wire the
+  chat panel," not "own a child process."
+- `src/components/chat/InterruptGate.tsx` — renders the raw interrupt
+  payload unmodified. Memory-write payloads (`voice_approvable: false` +
+  `fact` field, matching `memory_extraction.py`'s exact shape) show the
+  `fact` string VERBATIM — no re-summarization — with explicit
+  Approve/Decline buttons and no voice affordance at all, per the Phase 7
+  red-team requirement carried forward since STEPS.md 54. Other gated tools
+  render their `spoken_prompt` if present, else a raw JSON fallback.
+- `src/components/chat/ChatPanel.tsx` — loads `/history` on mount (so the
+  panel shows the CLI/voice daemon's real shared conversation, not an empty
+  view), sends messages, and drives the SAME confirmation-gate loop
+  `main.py`'s `while "__interrupt__" in result` runs — just per button
+  click instead of a blocking `input()`. Filters `/history`'s messages down
+  to real dialogue for the chat-bubble view: `role` user/assistant only,
+  non-empty content, and (new, see above) `!synthetic`.
+- shadcn additions: `card`, `textarea`, `scroll-area`, `separator`.
+  `scroll-area.tsx`'s generated code had an unused `React` import that
+  failed the build under this project's `noUnusedLocals: true` — fixed
+  (not a hand-written file, but now part of the repo, so it must build
+  clean).
+
+**Verified — three layers, since a real GUI window still can't be checked
+from this session (same limitation as STEPS.md 56):**
+1. **Compiles clean:** `npm run build` (tsc + vite) and `cargo check`
+   (src-tauri unaffected by this step, re-checked anyway).
+2. **Component behavior, real assertions, mocked fetch**
+   (`dashboard/src/components/chat/ChatPanel.test.tsx`, new — first JS test
+   file in the repo; added `vitest`/`@testing-library/react`/`jest-dom`/
+   `user-event`/`jsdom` as devDependencies, `npm run test` = `vitest run`).
+   5 tests: loads real history on mount; hides synthetic messages (the flag
+   added this step); sends a message and renders the reply; a generic
+   gated-tool interrupt shows its `spoken_prompt` and resolves on approve;
+   **a memory-write interrupt shows the `fact` string byte-for-byte
+   (`toBe`, not `toContain`) with no "speak"/"voice" text anywhere in the
+   rendered output, and resolves on decline** — the load-bearing assertion
+   this whole gate exists for.
+3. **Real backend contract, not assumed:** started `uvicorn
+   assistant.server:app` against fresh temp DBs (never the real
+   `conversation_memory.sqlite`/`long_term_memory.sqlite` — same discipline
+   as STEPS.md 55), curled `/chat`, `/resume`, `/history` with an `Origin:
+   http://localhost:1420` header, confirmed the JSON shapes match `api.ts`'s
+   types exactly, confirmed CORS accept/reject behavior for real, and
+   — this is what surfaced the `synthetic`-flag gap above — read the real
+   `/history` output by eye instead of just trusting the contract was
+   already right.
+
+**Full regression, both languages:** Python 87/87 (`tests/test_server.py`'s
+new synthetic-flag assertions included); frontend build clean; 5/5 vitest.
+
+**Still not done, flagged, not silently deferred:**
+- A real `npm run tauri dev` window, visually confirmed — still a
+  user-hands-on item (STEPS.md 56's same caveat).
+- The Python backend's process lifecycle (spawn on app launch, kill on
+  quit) is not yet owned by the Tauri shell — started by hand today.
+- History panel (PLAN.md step 4) needs full-fidelity display decisions for
+  the `synthetic`-flagged and `tool`-role messages this step deliberately
+  hides from the live chat view.
+
+**Commands:**
+```sh
+cd dashboard
+npx shadcn@latest add card textarea scroll-area separator -y
+npm install -D vitest @testing-library/react @testing-library/jest-dom @testing-library/user-event jsdom
+npm run build
+npm run test
+source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml
+cd ..
+.venv/bin/python tests/test_server.py
+# real contract check (temp DBs, cleaned up after):
+ASSISTANT_CONVERSATION_DB_PATH=/tmp/.../conversation_memory.sqlite \
+ASSISTANT_MEMORY_DB_PATH=/tmp/.../long_term_memory.sqlite \
+  .venv/bin/uvicorn assistant.server:app --port 8321 &
+curl -i -X OPTIONS http://127.0.0.1:8321/chat -H "Origin: http://localhost:1420" \
+  -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: Content-Type"
+curl -X POST http://127.0.0.1:8321/chat -H "Origin: http://localhost:1420" \
+  -H "Content-Type: application/json" -d '{"message": "..."}'
+```
+
+**Follow-up, same day: real window confirmed by the user.** The one thing
+this session genuinely could not verify (STEPS.md 56/57's flagged gap) —
+`npm run tauri dev` opening a real window — is now confirmed working by the
+user. Two real environment snags surfaced getting there, both fixed by the
+user with guidance, neither a code bug:
+- `uvicorn assistant.server:app` initially ran under the SYSTEM Python 3.14
+  (`/Library/Frameworks/Python.framework/Versions/3.14/bin/uvicorn`, ahead
+  of `.venv` on PATH) — `ModuleNotFoundError: No module named 'assistant'`,
+  since `assistant` is only installed (editable) inside `.venv` (Python
+  3.12). Fixed by invoking `.venv/bin/uvicorn` explicitly rather than the
+  bare `uvicorn` on PATH.
+- `npm run tauri dev` was run from `$HOME` instead of `dashboard/` —
+  `Could not read package.json`. Fixed by `cd`-ing into `dashboard/` first.
+
+Both are one-time environment/directory mix-ups on a fresh setup, not
+issues with the code itself — noted here in case they recur when the Tauri
+shell eventually spawns the Python backend itself (a real argument for that
+future step to hardcode the venv's own interpreter path rather than relying
+on whatever `python`/`uvicorn` resolves to on PATH).

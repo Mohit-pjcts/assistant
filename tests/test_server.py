@@ -67,6 +67,31 @@ async def test_gated_tool_interrupt_then_approve() -> None:
         resumed = client.post("/resume", json={"approved": True})
         assert resumed.status_code == 200, resumed.text
         assert resumed.json()["type"] == "message"
+
+        # This gated-tool round trip is a real multi-hop turn (supervisor ->
+        # coding_agent -> route_after_specialist), so it genuinely produces a
+        # Phase 6 routing-bridge HumanMessage — real coverage for the
+        # `synthetic` flag /history must set on it (STEPS.md 57), not just
+        # an assumption. Confirms the flag fires on real graph output, not
+        # only on a hand-constructed message in isolation.
+        history = client.get("/history")
+        assert history.status_code == 200, history.text
+        messages = history.json()["messages"]
+        bridge_messages = [
+            m for m in messages if "Routing note, not from the user" in m["content"]
+        ]
+        assert bridge_messages, f"expected a routing-bridge message in history, got {messages}"
+        assert all(m["synthetic"] is True for m in bridge_messages), (
+            f"routing-bridge message(s) not flagged synthetic: {bridge_messages}"
+        )
+        # And a genuine user message in the same history must NOT be flagged.
+        genuine_user_messages = [
+            m
+            for m in messages
+            if m["role"] == "user" and "Routing note" not in m["content"]
+        ]
+        assert genuine_user_messages
+        assert all(m["synthetic"] is False for m in genuine_user_messages)
         assert "sent" in resumed.json()["content"].lower()
 
 

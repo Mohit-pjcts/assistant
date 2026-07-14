@@ -590,11 +590,18 @@ below):**
    compile (`npm run build`, `cargo check`) — actually launching `npm run
    tauri dev` and confirming a real window is a flagged user action, not
    done in this session (no way to visually verify a GUI from here).
-3. Chat panel wired to `/chat`/`/resume`, including the interrupt-gate UI
-   affordance (verified against a real gated tool, both approve/decline, and
-   specifically against a memory-write interrupt for the verbatim-fact
-   requirement).
-4. History panel wired to `/history`.
+3. **DONE (STEPS.md 57).** Chat panel wired to `/chat`/`/resume`, including
+   the interrupt-gate UI affordance — verified against a real gated tool
+   (approve/decline) and specifically against a memory-write interrupt
+   (byte-for-byte verbatim `fact` text, no voice affordance). Also added,
+   found live rather than planned: `/history`'s `synthetic` flag, so
+   graph-inserted routing-bridge/recalled-facts/compaction-summary messages
+   never render as if the real user typed them. Real window confirmed
+   working by the user (STEPS.md 57 follow-up). Not yet done: the Tauri
+   shell doesn't spawn/own the Python backend's process lifecycle yet
+   (started by hand).
+4. History panel wired to `/history` (note: needs a display decision for
+   the `synthetic`-flagged and `tool`-role messages step 3 hides from chat).
 5. Memory panel wired to `/memory/facts` (view + delete).
 6. Cost/token panel — new LangSmith retrieval code behind a new endpoint;
    scope the query/aggregation shape at this step, not assumed up front.

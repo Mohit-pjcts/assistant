@@ -35,12 +35,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from langchain_core.messages import BaseMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 from assistant import memory_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
+from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
@@ -93,6 +95,28 @@ def _message_role(message: BaseMessage) -> str:
     }.get(message.type, message.type)
 
 
+def _is_synthetic(message: BaseMessage) -> bool:
+    """True only for a HumanMessage the graph itself inserted rather than
+    the real user — the Phase 6 routing bridge, Phase 7 Part B's
+    recalled-facts injection (both: `not is_genuine_human_turn`), or the
+    compaction summary (`is_compaction_summary`, a separate check —
+    deliberately NOT covered by `is_genuine_human_turn`, see that
+    function's own docstring). Every non-human message type is never
+    "synthetic" in this sense — `is_genuine_human_turn` returns False for
+    those too (they're simply not a human turn at all), so this function
+    must not treat that as "synthetic" or every AI/tool message would be
+    wrongly flagged. Found live (STEPS.md 57): a real `/history` response
+    from a multi-hop turn included the routing-bridge text verbatim as a
+    `role: "user"` entry — naive role/content rendering would show it as if
+    the user typed it. Flagged here (not silently dropped) so /history
+    stays a complete, honest record; the client decides whether to hide it
+    (the chat panel does) or show it (a future debug/history view might
+    not)."""
+    if message.type != "human":
+        return False
+    return (not is_genuine_human_turn(message)) or is_compaction_summary(message)
+
+
 def _serialize_turn_result(result: dict[str, Any]) -> dict[str, Any]:
     """Shape a graph.ainvoke()/Command-resume result into the /chat and
     /resume response body. An in-flight interrupt takes priority: the
@@ -136,6 +160,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Explicit origin allowlist, NOT "*" — this server can trigger real
+# side-effect-capable tool calls (behind the interrupt gate, but even the
+# read/reasoning path isn't something an arbitrary web page should be able
+# to poke at). A wildcard would let any site the user visits in their
+# regular browser issue cross-origin POSTs to a server listening on
+# localhost. Only the dashboard's own known origins are allowed: the Vite
+# dev server (STEPS.md 56's `npm run tauri dev`) and Tauri's production
+# webview origins (macOS: tauri://localhost; Windows, listed defensively
+# even though Windows isn't this project's target platform: http://tauri.localhost).
+DASHBOARD_ORIGINS = [
+    "http://localhost:1420",
+    "tauri://localhost",
+    "http://tauri.localhost",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=DASHBOARD_ORIGINS,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
+)
+
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> dict[str, Any]:
@@ -171,7 +217,11 @@ async def history() -> dict[str, Any]:
     messages: list[BaseMessage] = snapshot.values.get("messages", [])
     return {
         "messages": [
-            {"role": _message_role(m), "content": _render_content(m.content)}
+            {
+                "role": _message_role(m),
+                "content": _render_content(m.content),
+                "synthetic": _is_synthetic(m),
+            }
             for m in messages
         ]
     }
