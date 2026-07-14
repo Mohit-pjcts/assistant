@@ -857,7 +857,7 @@ opportunistically.
 
 ---
 
-## Phase 13 — Mac-native cluster: Apple Calendar + open-URL-in-Brave — NOT STARTED
+## Phase 13 — Mac-native cluster: Apple Calendar + open-URL-in-Brave — COMPLETE (2026-07-15, with an accepted gap on the injection-navigation guard — STEPS.md 69)
 
 **Objective:** two Mac-native capabilities that share the Phase 4
 `osascript`/`open` + TCC-permission pattern, so they're one coherent phase.
@@ -890,6 +890,65 @@ full-automation `browser-use` approach after weighing the injection risk.
 Brave works for user-requested URLs and the agent-originated-navigation guard
 behaves as decided; automation confirmed out of scope; TCC grants documented;
 tests + STEPS.md updated.
+
+**Delivered:** Apple Calendar via Calendar.app's AppleScript dictionary
+through `osascript` (not literal EventKit — no Swift/ObjC dependency exists
+or was added; read as shorthand for "Calendar.app's native surface," same
+argv-only pattern as Phase 4's Music/Reminders/Notes). `calendar_list_events`
+ungated; `calendar_create_event`/`calendar_update_event` gated via
+`interrupt()` with verbatim payloads and read-back-before-gating for update
+(mirrors `write_tools.py`'s Phase 12 pattern). `open_url_in_brave` added,
+argv-only, narrow open/navigate-only scope, no automation.
+
+**Injection-navigation guard — the one done-when item resolved differently
+than originally scoped:** at the checkpoint, the user was asked directly
+(after an initial round of answers came back internally inconsistent, which
+was flagged and re-asked rather than silently resolved) and made an
+explicit, informed choice: **`open_url_in_brave` ships fully ungated — no
+domain allowlist, no confirmation gate of any kind, identical treatment to
+`open_app`.** This is a deliberate accepted risk against this section's own
+original "must be gated, allowlisted, or both" wording, not an oversight —
+recorded in `mac_tools.py`'s module docstring, STEPS.md 69, and here. The
+scenario was still tested live against a real exploitable surface (a
+malicious instruction planted in a Note's TITLE, which `notes_list` reads
+back into context — Notes/Reminders bodies are NOT readable by any
+mac_control_agent tool, confirmed during testing) rather than left
+theoretical: the model declined to act on it in that run, but this is
+observed model behavior, not a code-level guarantee, and is documented as
+such.
+
+**Routing:** extended `mac_control_agent` rather than adding a new
+sub-agent; added `NoParallelMacWrites` middleware since it now carries 3
+gated tools instead of 1 (`run_shortcut` plus the two new calendar writes),
+reopening the same only-relays-the-first-interrupt risk `NoParallelWrites`/
+`NoParallelHandoffs` already guard against elsewhere.
+`SUPERVISOR_SYSTEM_PROMPT` and `MAC_CONTROL_SYSTEM_PROMPT` both updated to
+explicitly disambiguate Apple Calendar (`mac_control_agent`) from Google
+Calendar (`life_admin_agent`), with a tie-breaking default (Google) for
+genuinely ambiguous requests.
+
+**Live-verified** through the real `supervisor.build_graph()` with real
+Anthropic API calls, real Calendar.app, and real Brave Browser — read,
+create (gate fires, approved, real event created), update (gate shows real
+read-back current + exact changes, approved, unspecified fields preserved),
+Brave open on direct request, and the injection scenario above. Caught and
+fixed one live bug in the process: AppleScript's `missing value` for an
+unset description/location was leaking into the gate as the literal text
+`"missing value"` instead of an empty string — fixed in both
+`_CALENDAR_LIST_EVENTS` and `_CALENDAR_GET_EVENT`, re-verified live.
+
+**Post-implementation deployment issue (STEPS.md 70, same day):** a report
+that "the assistant can't differentiate Apple and Google Calendar" traced
+NOT to a code bug (an isolated harness with the real MCP tools loaded
+routed all 6 test prompts correctly) but to stale long-lived processes —
+the dashboard backend (port 8000) and voice daemon were still running
+code from before this phase's edits landed, since neither hot-reloads.
+Also found and cleaned up an unrelated leftover scratch server on port
+8321 from Phase 12's live verification, never killed after that session.
+Restarted the dashboard backend and voice daemon; reconfirmed correct
+routing against the real restarted server via direct HTTP calls. Underlines
+the Phase 10 park note's "backend lifecycle" deferred-debt item — this
+project still has no code-change → running-process reload mechanism.
 
 ---
 

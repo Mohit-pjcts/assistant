@@ -275,12 +275,22 @@ MAC_CONTROL_SYSTEM_PROMPT = (
     "themselves (you cannot pre-fill a name or actions, or finish creating "
     "one — there is no scriptable way to author a Shortcut's actual logic, "
     "so always tell the user they need to name it and add actions "
-    "manually); and run a named macOS Shortcut (this always asks the user "
+    "manually); run a named macOS Shortcut (this always asks the user "
     "for confirmation first, since a Shortcut's actual behavior isn't "
-    "visible to you). You have no other system access — no AppleScript "
-    "beyond these fixed actions, no shell, no files. If asked to do "
-    "something outside this list, say so plainly and name what you can do "
-    "instead. Be direct and concise.\n\n"
+    "visible to you); read, create, and update events on Apple Calendar — "
+    "this is the local/iCloud/Exchange calendar in the Mac's own Calendar "
+    "app, a DIFFERENT calendar system from Google Calendar (a different "
+    "specialist owns Google Calendar; if the user's request is clearly "
+    "about their Google account's calendar rather than the Calendar app on "
+    "this Mac, say so rather than acting on the wrong one) — creating or "
+    "updating an event always asks for confirmation first, showing the "
+    "exact details; and open a URL in Brave Browser (open/navigate only — "
+    "you cannot click, type, fill forms, or scrape a page's content; if "
+    "asked to do any of that, say plainly that only opening a URL is "
+    "supported). You have no other system access — no AppleScript beyond "
+    "these fixed actions, no shell, no files. If asked to do something "
+    "outside this list, say so plainly and name what you can do instead. "
+    "Be direct and concise.\n\n"
     "The user has already built and saved these Shortcuts, which you can "
     "run by their exact name via run_shortcut (still gated by confirmation "
     "like any other Shortcut) — match a natural-language request to one of "
@@ -302,17 +312,40 @@ MAC_CONTROL_SYSTEM_PROMPT = (
 )
 
 
+class NoParallelMacWrites(AgentMiddleware):
+    """Forces mac_control_agent to call at most one tool per model turn.
+
+    Not needed at Phase 4 (run_shortcut was this agent's only gated tool, so
+    two gated calls in one AIMessage was structurally impossible). Phase 13
+    adds calendar_create_event and calendar_update_event, both also gated —
+    a compound request ("create this event and run my Good Morning
+    shortcut") could now make the model call two gated tools in one turn.
+    Same failure mode as write_tools.py's NoParallelWrites: server.py's
+    _serialize_turn_result only relays the FIRST pending interrupt
+    (result["__interrupt__"][0]), so a second interrupt raised in the same
+    turn would be silently stranded with no way to approve/decline it.
+    """
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001, ANN201
+        request.model_settings["parallel_tool_calls"] = False
+        return await handler(request)
+
+
 def build_mac_control_agent() -> CompiledStateGraph:
     """Build the Mac-control sub-agent (PLAN.md Phase 4 step 1 CHECKPOINT
     settled the allowlist: open_app/Music/Reminders/Notes are ungated —
     private, reversible, local-only; run_shortcut is gated behind a
     LangGraph interrupt() regardless of name, since its behavior is opaque
-    to this codebase)."""
+    to this codebase). Phase 13 CHECKPOINT (2026-07-15) extended the
+    allowlist with Apple Calendar (reads ungated, create/update gated) and
+    open_url_in_brave (ungated — see mac_tools.py's module docstring for
+    the accepted-risk decision); NoParallelMacWrites added alongside since
+    this agent now has more than one gated tool."""
     model = ChatAnthropic(model=MAC_CONTROL_MODEL_NAME, thinking={"type": "disabled"})
     return create_agent(
         model=model,
         tools=MAC_CONTROL_TOOLS,
         system_prompt=MAC_CONTROL_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware()],
+        middleware=[SubAgentWindowMiddleware(), NoParallelMacWrites()],
         name="mac_control_agent",
     )

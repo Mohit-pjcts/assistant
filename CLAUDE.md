@@ -20,8 +20,8 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 13 (Mac-native cluster: Apple Calendar +
-  open-URL-in-Brave) is next; read PLAN.md before beginning it.
+- **No active phase** — Phase 14 (UI rework) is next; read PLAN.md before
+  beginning it.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -63,6 +63,29 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   live), and the injection-shaped-request scenario not run live. Surfaced
   Phase 15 as a spinoff (shared fixed `THREAD_ID` collides across
   concurrent clients) (STEPS.md groups 63–66).
+- Complete: Phase 13 — Mac-native cluster: Apple Calendar (read ungated,
+  create/update gated) via Calendar.app's AppleScript dictionary through
+  `osascript` (argv-only, read-back-before-gating for update, mirrors
+  `write_tools.py`'s Phase 12 pattern) + `open_url_in_brave` (argv-only,
+  open/navigate only, no automation). Extended `mac_control_agent` rather
+  than a new sub-agent; added `NoParallelMacWrites` now that it carries 3
+  gated tools; both `SUPERVISOR_SYSTEM_PROMPT` and
+  `MAC_CONTROL_SYSTEM_PROMPT` disambiguate Apple Calendar from Google
+  Calendar explicitly. **Accepted gap, chosen deliberately by the user at
+  the checkpoint, not an oversight:** `open_url_in_brave` ships fully
+  ungated — no domain allowlist, no confirmation gate — against this
+  phase's own original "must be gated, allowlisted, or both" requirement;
+  the injection-to-navigation scenario was still tested live against a
+  real exploitable surface (a malicious instruction in a Note's title) and
+  the model declined to act on it, but that is observed behavior, not a
+  code-level guarantee. Live-verified end to end (real API calls, real
+  Calendar.app, real Brave), catching and fixing one real bug along the
+  way (AppleScript's `missing value` leaking into the confirmation gate as
+  literal text). A same-day follow-up traced a "can't tell Apple/Google
+  Calendar apart" report to stale long-lived server/voice-daemon processes
+  never restarted after this phase's code landed (not a code bug); fixed
+  by restarting them, plus cleanup of an unrelated stale scratch server
+  left over from Phase 12 (STEPS.md groups 69–70).
 - Complete: Phase 15 — multi-thread conversation support: replaced the
   single fixed `THREAD_ID` with an active-thread pointer + registry
   (`assistant/thread_store.py`, separate `threads.sqlite`); `/chat`/
@@ -86,7 +109,8 @@ dashboard inserted ahead of the original polish phase). On 2026-07-14 Phase
 WRITE, 13 Apple Calendar + open-URL-in-Brave, 14 UI rework. Phase 15
 (multi-thread conversation support) added the same day, discovered mid-Phase
 12 (STEPS.md 66) — the shared fixed `THREAD_ID` collides across concurrent
-clients; kept as its own phase rather than folded into 12. See PLAN.md.
+clients; kept as its own phase rather than folded into 12. Phase 13
+completed 2026-07-15 (STEPS.md groups 69–70). See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

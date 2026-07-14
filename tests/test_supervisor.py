@@ -20,6 +20,7 @@ from langgraph.types import Command
 
 from assistant.supervisor import (
     MAX_HANDOFFS_PER_TURN,
+    SUPERVISOR_SYSTEM_PROMPT,
     NoParallelHandoffs,
     _count_handoffs,
     _make_routing_bridge,
@@ -192,6 +193,17 @@ def test_build_graph_wires_specialists_through_route_after_specialist() -> None:
     )
 
 
+def test_supervisor_prompt_disambiguates_apple_and_google_calendar() -> None:
+    """Phase 13: mac_control_agent's Apple Calendar and life_admin_agent's
+    Google Calendar are two different calendar systems that both now show
+    up as "calendar" requests — the supervisor's routing prompt must
+    distinguish them explicitly, or routing silently breaks (STEPS.md's
+    standing Phase 3 lesson)."""
+    assert "APPLE" in SUPERVISOR_SYSTEM_PROMPT
+    assert "GOOGLE" in SUPERVISOR_SYSTEM_PROMPT
+    assert "Brave" in SUPERVISOR_SYSTEM_PROMPT
+
+
 if __name__ == "__main__":
     test_no_parallel_handoffs_forces_parallel_tool_calls_false()
     print("OK: test_no_parallel_handoffs_forces_parallel_tool_calls_false")
@@ -211,4 +223,6 @@ if __name__ == "__main__":
     print("OK: test_route_after_specialist_ends_at_cap")
     test_build_graph_wires_specialists_through_route_after_specialist()
     print("OK: test_build_graph_wires_specialists_through_route_after_specialist")
-    print("\n9 tests passed")
+    test_supervisor_prompt_disambiguates_apple_and_google_calendar()
+    print("OK: test_supervisor_prompt_disambiguates_apple_and_google_calendar")
+    print("\n10 tests passed")
