@@ -19,6 +19,12 @@ export interface HistoryMessage {
   // Optional so older/mocked shapes without it default to "not synthetic"
   // (see ChatPanel's filter).
   synthetic?: boolean;
+  // The message's own `.name`, meaning depends on role (checked against
+  // real graph output, not assumed — STEPS.md 58): on a "tool" message,
+  // the tool that ran; on an "assistant" message in this multi-agent
+  // graph, which node produced it ("supervisor" / "coding_agent" / etc.);
+  // null/absent otherwise.
+  name?: string | null;
 }
 
 // The raw payload a gated tool constructed via LangGraph's interrupt() —
@@ -64,4 +70,39 @@ export async function fetchHistory(): Promise<HistoryMessage[]> {
   }
   const body = (await response.json()) as { messages: HistoryMessage[] };
   return body.messages;
+}
+
+// Phase 7 Part B's durable facts, reviewed/managed here (PLAN.md Phase 9
+// step 5). `content` is the exact string the agent's extraction gate
+// (memory_extraction.py) got approved for — render it verbatim, same
+// no-re-summarization principle as the chat panel's interrupt gate, even
+// though deleting isn't itself gated (see deleteMemoryFact below).
+export interface MemoryFact {
+  id: number;
+  content: string;
+  provenance: string | null;
+  created_at: string;
+}
+
+export async function fetchMemoryFacts(): Promise<MemoryFact[]> {
+  const response = await fetch(`${API_BASE_URL}/memory/facts`);
+  if (!response.ok) {
+    throw new Error(`/memory/facts failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { facts: MemoryFact[] };
+  return body.facts;
+}
+
+// Deliberately NOT behind the interrupt/confirmation gate on the backend
+// (server.py's own docstring: the user curating their own already-saved
+// data is not a new agent-authored side effect, so memory_extraction.py's
+// gate doesn't apply). Still an irreversible action from the user's own
+// point of view, so the UI (MemoryPanel) requires an explicit confirm
+// dialog before calling this — a client-side UX safeguard, not a security
+// boundary.
+export async function deleteMemoryFact(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/memory/facts/${id}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`delete /memory/facts/${id} failed (${response.status}): ${await response.text()}`);
+  }
 }

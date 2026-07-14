@@ -221,6 +221,18 @@ async def history() -> dict[str, Any]:
                 "role": _message_role(m),
                 "content": _render_content(m.content),
                 "synthetic": _is_synthetic(m),
+                # The message's own `.name` — semantics depend on role,
+                # checked against real output rather than assumed (STEPS.md
+                # 58): on a ToolMessage it's the tool that ran (e.g.
+                # "send_test_notification"); on an AIMessage in this
+                # multi-agent graph it's which node produced the reply
+                # (e.g. "supervisor" vs "coding_agent" — supervisor.py's
+                # own node names, set by LangGraph's multi-agent
+                # machinery). None on a genuine user HumanMessage. The
+                # (full-fidelity, unlike the chat panel) History panel
+                # surfaces whatever is here rather than assuming only
+                # tools have one.
+                "name": getattr(m, "name", None),
             }
             for m in messages
         ]

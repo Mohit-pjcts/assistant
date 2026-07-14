@@ -3798,3 +3798,147 @@ issues with the code itself — noted here in case they recur when the Tauri
 shell eventually spawns the Python backend itself (a real argument for that
 future step to hardcode the venv's own interpreter path rather than relying
 on whatever `python`/`uvicorn` resolves to on PATH).
+
+---
+
+## 58. Phase 9 step 4 — History panel, full-fidelity /history view (2026-07-14)
+
+**Objective (PLAN.md's own note on step 3's completion):** the chat panel
+deliberately hides tool/system messages, empty-content turns, and synthetic
+graph-inserted messages to stay readable. This panel is the honest
+opposite: show everything `/history` has, labeled, not hidden.
+
+**Backend addition, found live rather than designed up front (same pattern
+as STEPS.md 57's `synthetic` flag):** added a `name` field to each
+`/history` message. Assumed going in it would only matter for `role ==
+"tool"` (which tool ran); a real check against the graph (dumping actual
+`/history` output for a live gated-tool turn) showed `name` is ALSO set on
+`role == "assistant"` entries in this multi-agent graph — to the
+responding node's name (`"supervisor"` vs `"coding_agent"`, LangGraph's own
+multi-agent node identity) — which is real, useful information for a
+full-fidelity view, not noise. Kept the field generic (`name`, not
+`tool_name`) once this was known, rather than the narrower name the
+original plan assumed. `tests/test_server.py`'s existing gated-tool test
+extended with real assertions: the `send_test_notification` ToolMessage
+carries `name: "send_test_notification"`; assistant messages in the same
+turn carry `name: "coding_agent"` and `name: "supervisor"`; every user
+HumanMessage (genuine or synthetic) carries `name: null`.
+
+**Frontend:** `dashboard/src/components/history/HistoryPanel.tsx` (new) —
+fetches `/history` on mount, manual Refresh button (deliberately no
+polling/real-time sync; this is an "open it to inspect" view, not a second
+live chat feed — that's the chat tab's job). Renders every message as a row
+with role/name/`internal` badges (shadcn `badge` + `tabs` added this step)
+and content (or an explicit "(empty)" placeholder for tool-call-only
+turns), rather than filtering anything out. `App.tsx` restructured with a
+Chat/History `Tabs` switcher — both panels call `fetchHistory()`
+independently on their own mount, an accepted small duplicate-fetch cost
+rather than premature cross-panel state sharing.
+
+**Verified — same three-layer approach as step 3 (still no way to see a
+real window from this session, though the user separately confirmed the
+window itself works after step 3 — STEPS.md 57's follow-up):**
+1. `npm run build` (tsc + vite) and `cargo check` both clean.
+2. `dashboard/src/components/history/HistoryPanel.test.tsx` (new, 4 tests,
+   mocked fetch): shows tool/system/empty-content rows the chat view would
+   hide, including the tool's real name and the responding agent's name as
+   labels; shows (not hides) a synthetic routing-bridge message, labeled
+   "internal"; Refresh re-fetches and replaces the list; a fetch failure
+   surfaces as a visible error instead of a blank screen.
+3. Real backend check: dumped actual `/history` JSON from a live
+   `send_test_notification` gated-tool turn via a throwaway script (temp
+   DBs only, same discipline as every prior step) — this is what caught the
+   `name`-on-assistant-messages behavior above before it became a wrong
+   assumption baked into the frontend.
+
+**Full regression:** Python 87/87 (2 new assertions in the existing
+gated-tool test, no new test functions needed — extended real coverage);
+frontend build clean; vitest 9/9 (5 ChatPanel + 4 new HistoryPanel).
+
+**Still open:** cost/token panel (PLAN.md step 6, needs new LangSmith
+retrieval code) and memory panel (step 5, `/memory/facts` endpoints already
+exist from step 1 but have no UI yet) are the remaining panels. Tauri
+process-lifecycle ownership of the Python backend (STEPS.md 57) is still
+unaddressed. A real window check for THIS step's tabs/History UI
+specifically hasn't been done by the user yet (only step 3's chat UI was
+confirmed) — worth a quick look next time the app is open.
+
+**Commands:**
+```sh
+cd dashboard
+npx shadcn@latest add tabs badge -y
+npm run build
+npm run test
+source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml
+cd ..
+.venv/bin/python tests/test_server.py
+```
+
+---
+
+## 59. Phase 9 step 5 — Memory panel, view + delete stored facts (2026-07-14)
+
+**Objective (PLAN.md, and CLAUDE.md's memory-review requirement carried
+since Phase 7 scope-time):** "what the assistant knows about me" — view
+AND delete Phase 7 Part B's durable facts.
+
+**No backend changes needed** — unlike steps 3/4, `/memory/facts`
+(GET list, DELETE by id) already existed from step 1 (STEPS.md 55) with
+its own real-graph test coverage (`test_server.py`'s list+delete round
+trip, 404-on-double-delete). This step is UI only: `dashboard/src/lib/
+api.ts` gained `fetchMemoryFacts()`/`deleteMemoryFact(id)`, thin wrappers
+matching the already-tested response shapes — no new backend contract
+check needed since nothing on that side changed.
+
+**Frontend:** `dashboard/src/components/memory/MemoryPanel.tsx` (new) —
+lists every stored fact with its `content` shown VERBATIM (same
+no-re-summarization principle as the chat panel's interrupt gate, carried
+over even though deletion itself isn't gated), `provenance` if present,
+and `created_at`. `App.tsx` gained a third "Memory" tab.
+
+**Deletion is deliberately NOT behind LangGraph's `interrupt()` gate** —
+`server.py`'s own docstring already established this at step 1: the
+confirmation gate exists for the AGENT's autonomous writes
+(`memory_extraction.py`), not the user curating their own already-saved
+data. But delete is still irreversible from the user's own point of view,
+so the panel requires an explicit confirm step before calling the API — a
+new shadcn `alert-dialog` (Cancel/Delete), a CLIENT-SIDE UX safeguard
+against a stray click, explicitly distinguished in the code comments from
+the backend's security-relevant confirmation gate so a future reader
+doesn't conflate the two. Delete button disables + shows "Deleting…"
+while in flight; a failed delete surfaces an error banner and leaves the
+fact in place (verified, not assumed — see tests below).
+
+**Verified:**
+1. `npm run build` (tsc + vite) and `cargo check` (unaffected, re-checked
+   anyway) both clean.
+2. `dashboard/src/components/memory/MemoryPanel.test.tsx` (new, 8 tests,
+   mocked fetch, all passed first run — the assumptions about shadcn's
+   base-ui-backed `AlertDialog` (`role="alertdialog"`, trigger/cancel/
+   action buttons) held without needing iteration): lists facts verbatim;
+   empty state; fetch-error banner; **clicking Delete alone does NOT call
+   the API — only opens the confirm dialog**; Cancel leaves the fact in
+   place with zero API calls; confirming calls `deleteMemoryFact(id)` and
+   removes the row; a failed delete shows an error and keeps the fact;
+   Refresh re-fetches.
+
+**Full regression:** Python 87/87 (unchanged — no backend touched this
+step, as expected); frontend build clean; vitest 17/17 (5 chat + 4
+history + 8 new memory).
+
+**Still open:** cost/token panel (PLAN.md step 6, needs new LangSmith
+retrieval code — the last panel) and Tauri process-lifecycle ownership of
+the Python backend (STEPS.md 57) remain. The Memory tab specifically
+hasn't been eyeballed in a real window yet (only chat has, per STEPS.md
+57's follow-up).
+
+**Commands:**
+```sh
+cd dashboard
+npx shadcn@latest add alert-dialog -y
+npm run build
+npm run test
+source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml
+cd ..
+.venv/bin/python tests/test_server.py   # unchanged, re-run for confirmation
+```

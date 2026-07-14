@@ -92,6 +92,25 @@ async def test_gated_tool_interrupt_then_approve() -> None:
         ]
         assert genuine_user_messages
         assert all(m["synthetic"] is False for m in genuine_user_messages)
+
+        # `name` (STEPS.md 58): the History panel needs to know WHICH tool
+        # produced a given ToolMessage, not just the generic "tool" role.
+        # Real coverage, not assumed — a live check during this step showed
+        # `name` is ALSO set on assistant (AIMessage) entries in this
+        # multi-agent graph, to the responding node's name ("supervisor" /
+        # "coding_agent"), which is real and useful info too, not noise.
+        tool_messages = [m for m in messages if m["role"] == "tool"]
+        assert tool_messages
+        assert any(m["name"] == "send_test_notification" for m in tool_messages), (
+            f"expected a send_test_notification ToolMessage, got {tool_messages}"
+        )
+        assistant_messages = [m for m in messages if m["role"] == "assistant"]
+        assert any(m["name"] == "coding_agent" for m in assistant_messages)
+        assert any(m["name"] == "supervisor" for m in assistant_messages)
+        assert all(m["name"] is None for m in messages if m["role"] == "user"), (
+            "a genuine/synthetic user HumanMessage should never carry a node/tool name"
+        )
+
         assert "sent" in resumed.json()["content"].lower()
 
 

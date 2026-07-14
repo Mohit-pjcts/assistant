@@ -600,9 +600,19 @@ below):**
    working by the user (STEPS.md 57 follow-up). Not yet done: the Tauri
    shell doesn't spawn/own the Python backend's process lifecycle yet
    (started by hand).
-4. History panel wired to `/history` (note: needs a display decision for
-   the `synthetic`-flagged and `tool`-role messages step 3 hides from chat).
-5. Memory panel wired to `/memory/facts` (view + delete).
+4. **DONE (STEPS.md 58).** History panel wired to `/history` — the
+   deliberate opposite of the chat panel: shows every message (tool/system/
+   empty-content/synthetic), labeled with role, the message's `name` (which
+   tool ran, or which agent node responded — found live, not planned:
+   `name` turned out to matter for assistant messages too, not just tool
+   ones), and an "internal" badge for synthetic entries. Manual refresh,
+   no polling.
+5. **DONE (STEPS.md 59).** Memory panel wired to `/memory/facts` (view +
+   delete). No backend changes needed — those endpoints and their real-graph
+   test coverage already existed from step 1. Deletion requires an explicit
+   confirm dialog (client-side UX safeguard against a stray click) but is
+   deliberately NOT behind the interrupt gate — that gate is for the agent's
+   own autonomous writes, not user curation of already-saved data.
 6. Cost/token panel — new LangSmith retrieval code behind a new endpoint;
    scope the query/aggregation shape at this step, not assumed up front.
 7. CHECKPOINT (separate from this phase's initial done-when): voice-in-app

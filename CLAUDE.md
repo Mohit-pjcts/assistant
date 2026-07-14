@@ -20,39 +20,31 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **Active: Phase 9 — Dashboard app.** Scoping checkpoint locked
-  2026-07-14 (STEPS.md 54, PLAN.md Phase 9): Tauri shell, a thin FastAPI
-  wrapper over `build_graph()` sharing the CLI's real
+- **Active: Phase 9 — Dashboard app.** Scoping checkpoint locked 2026-07-14
+  (STEPS.md 54, PLAN.md Phase 9): Tauri shell, a thin FastAPI wrapper
+  (`assistant/server.py`) over `build_graph()` sharing the CLI's real
   `AsyncSqliteSaver`/`conversation_memory.sqlite`/`THREAD_ID` — NOT the
   `langgraph dev` REST API, which turned out to use a separate ephemeral
-  persistence store. Voice-in-app deferred to a later checkpoint;
-  `voice_daemon.py` keeps running unchanged. Step 1 complete (STEPS.md 55):
-  `assistant/server.py` (`/chat`, `/resume`, `/history`, `/memory/facts`
-  list+delete), verified live against the real graph, 87/87 tests pass.
-  Step 2 complete (STEPS.md 56): `dashboard/` — Tauri 2 + React + TypeScript
-  + shadcn/ui scaffold, Rust toolchain installed (`cargo`/`rustc` need
-  `source "$HOME/.cargo/env"` — not yet on PATH in ordinary zsh shells,
-  deliberately not auto-added to `~/.zshrc`). Step 3 complete (STEPS.md 57):
-  chat panel (`dashboard/src/components/chat/`) wired to
-  `assistant/server.py`'s `/chat`/`/resume`/`/history`, including the
-  interrupt-gate UI (memory-write facts shown byte-for-byte verbatim, no
-  voice affordance — verified in `ChatPanel.test.tsx`, 5/5 passing) and a
-  CORS allowlist restricted to the dashboard's own origins. `/history` now
-  also flags graph-inserted synthetic messages (routing bridge/recalled
-  facts/compaction summary) so they never render as real user text — found
-  live during this step's backend contract check, not planned in advance.
-  Full regression: Python 87/87, frontend build clean, 5/5 vitest.
-  **Real window confirmed working by the user (STEPS.md 57 follow-up)** —
-  the one thing this session couldn't verify itself. Two one-time
-  environment mix-ups on the way (system Python 3.14's `uvicorn` shadowing
-  `.venv`'s; `npm run tauri dev` run from the wrong directory) — both
-  fixed, neither a code bug, noted in STEPS.md as a reason the Tauri
-  shell's eventual backend-spawning step should hardcode `.venv`'s own
-  interpreter path rather than trust PATH. The Tauri shell still does not
-  yet spawn/own the Python backend's process lifecycle (started by hand
-  today). Next: step 4, History panel — needs a display decision for the
-  `synthetic`/`tool`-role messages step 3 hides from chat. Read PLAN.md's
-  Phase 9 before continuing this phase's work.
+  store. Voice-in-app deferred to a later checkpoint; `voice_daemon.py`
+  keeps running unchanged. **Steps 1–5 complete** (STEPS.md 55–59): backend
+  wrapper (`/chat`, `/resume`, `/history`, `/memory/facts`); `dashboard/`
+  Tauri 2 + React + TypeScript + shadcn/ui scaffold (Rust toolchain
+  installed — `cargo`/`rustc` need `source "$HOME/.cargo/env"`, not on PATH
+  by default, deliberately not auto-added to `~/.zshrc`); chat panel with
+  the interrupt-gate UI (memory-write facts shown byte-for-byte verbatim,
+  no voice affordance) and a CORS allowlist restricted to the dashboard's
+  own origins; history panel showing the full, unfiltered `/history` feed
+  (tool/system/empty/synthetic messages included, labeled) as the honest
+  counterpart to the chat panel's filtered view; memory panel (view +
+  delete stored facts, delete behind a client-side confirm dialog — NOT the
+  interrupt gate, which is for the agent's own autonomous writes only, not
+  user curation). Real window confirmed working by the user after step 3
+  (Memory tab specifically not yet eyeballed). Full regression as of step
+  5: Python 87/87, frontend build clean, vitest 17/17. **Not yet done:**
+  the Tauri shell doesn't spawn/own the Python backend's process lifecycle
+  (started by hand); cost/token panel (step 6, needs new LangSmith
+  retrieval code) is the last remaining panel. Read PLAN.md's Phase 9 before
+  continuing this phase's work.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration
