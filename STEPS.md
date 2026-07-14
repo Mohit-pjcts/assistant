@@ -3942,3 +3942,169 @@ source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml
 cd ..
 .venv/bin/python tests/test_server.py   # unchanged, re-run for confirmation
 ```
+
+---
+
+## 60. Phase 9 step 6 — Cost panel, real LangSmith token/cost aggregates (2026-07-14)
+
+**Objective:** the last panel of Phase 9's initial pass — token/cost
+tracking from real LangSmith trace data (Phase 3 tracing), not a locally
+computed pricing estimate.
+
+**Verified the real API shape before designing anything** (CLAUDE.md's
+verification discipline) rather than assuming: pulled real runs from the
+`personal-assistant` LangSmith project. First check —
+`Client.list_runs(is_root=True)` — found 1358 root runs since 2026-07-11,
+each root run's `total_cost`/`total_tokens` already a full-trace rollup
+(cross-checked: manually summing all 1358 roots gave `total_cost =
+3.266444`, `total_tokens = 1547281`). Iterating and summing that many runs
+client-side took 30+ seconds and only grows with usage — not viable for a
+UI request. Found `Client.get_run_stats()` instead: a real server-side
+aggregation endpoint, same filters as `list_runs`, returns the identical
+totals in 0.7s. That's the one actually used.
+
+**Backend (`assistant/server.py`):** `GET /cost` — three windows (`today`
+= last 24h, `week` = last 7d, `all_time` = no start_time filter), each
+queried via `get_run_stats(project_names=[...], is_root=True,
+start_time=...)`, run concurrently (`asyncio.gather` over
+`asyncio.to_thread`, since `get_run_stats` is a blocking sync call —
+awaiting it directly would stall every other concurrent request on this
+single-process server for ~1s per call). `LANGSMITH_PROJECT` read from
+`LANGCHAIN_PROJECT` env var (CLAUDE.md's Tech stack section), not
+hardcoded. The `LangSmithClient` is constructed once in `lifespan`
+(process lifetime, same pattern as the graph) but defensively — wrapped in
+try/except, `None` on failure — specifically so a missing/invalid
+`LANGSMITH_API_KEY` doesn't take down chat/history/memory, which need
+nothing from LangSmith. `/cost` itself returns a clear 503 in that case
+rather than the whole server failing to start. `langsmith` added as an
+explicit dependency (was transitive via tracing since Phase 3).
+
+**Frontend:** `dashboard/src/lib/api.ts` gained `fetchCost()` and a
+dedicated `LangSmithNotConfiguredError` (thrown specifically on the 503) so
+`CostPanel.tsx` can show "LangSmith isn't configured" instead of a generic
+error banner — a real UX distinction, not just an error string.
+`dashboard/src/components/cost/CostPanel.tsx` (new) — three window cards
+(Today / Last 7 days / All time), each showing cost (`Intl.NumberFormat`
+currency formatting), total/prompt/completion token counts, and run count.
+`App.tsx` gained the fourth and final tab of Phase 9's initial set.
+
+**Verified:**
+1. `npm run build` and `cargo check` (unaffected, re-checked anyway) both
+   clean.
+2. **A real test against the LIVE LangSmith project, not mocked** —
+   consistent with this repo's no-mocking convention for Python tests, and
+   genuinely free to do for real since `get_run_stats` is a read-only
+   aggregation query, not a paid LLM call. New
+   `test_cost_returns_real_langsmith_aggregates` in `tests/test_server.py`:
+   response shape, `total_tokens == prompt_tokens + completion_tokens` for
+   every window, and the nesting property that must hold given this
+   project's real historical usage — `all_time.run_count >= week.run_count
+   >= today.run_count`, `all_time.total_cost >= week.total_cost`.
+3. `dashboard/src/components/cost/CostPanel.test.tsx` (new, 4 tests, mocked
+   fetch, all passed first run): renders all three windows with correctly
+   formatted currency and thousands-separated token counts; the
+   not-configured case shows its own distinct message, not a generic error,
+   and renders no window cards; a different failure shows the generic error
+   banner instead; Refresh re-fetches.
+
+**Full regression:** Python 88/88 (one new test function — this step, unlike
+3/4/5, needed exactly one new assertion-bearing function rather than
+extending an existing one, since `/cost` has no natural existing turn to
+piggyback verification on); frontend build clean; vitest 21/21 (5 chat + 4
+history + 8 memory + 4 new cost).
+
+**Phase 9's initial-pass done-when (PLAN.md), checked explicitly rather
+than assumed:**
+- "app runs as a desktop client of the local graph sharing the CLI/voice
+  daemon's actual conversation thread" — met, confirmed live (STEPS.md 57).
+- "chat, history, memory, and cost panels all work against real data" —
+  met at the code/test level for all four (every panel's tests hit real
+  backend data — chat/history/memory against the real graph and SQLite
+  files, cost against the real LangSmith project). **Caveat, not silently
+  glossed over: only the Chat tab has actually been eyeballed in a real
+  running window** (STEPS.md 57's follow-up) — History, Memory, and Cost
+  have real, tested backends and passing component tests, but nobody has
+  looked at them rendered in the actual Tauri app yet.
+- "confirmation gate has a real, verified UI affordance including the
+  memory-write verbatim/no-voice requirement" — met (STEPS.md 57).
+- "STEPS.md updated" — met (this entry).
+
+**Not flipping PLAN.md's Phase 9 header to complete unilaterally** — per
+CLAUDE.md's Git rules, completing a phase's done-when criteria is a
+proposed commit boundary requiring the user's approval, not something to
+self-declare. Recommending: eyeball all four tabs in a real
+`npm run tauri dev` window before calling the initial pass done; step 7
+(voice-in-app sequencing checkpoint) and the still-open Tauri
+process-lifecycle item (STEPS.md 57) remain regardless.
+
+**Commands:**
+```sh
+cd dashboard
+npm run build
+npm run test
+source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml
+cd ..
+.venv/bin/pip install -e .   # picks up langsmith as an explicit dep
+.venv/bin/python tests/test_server.py
+```
+
+---
+
+## 61. Phase 9 — real-window bug: header/tabs scrolled out of view (2026-07-14)
+
+**Found by the user's own live check** (the four-tab run-through STEPS.md
+60 recommended before treating Phase 9's initial pass as done) — not
+caught by any test, because jsdom (vitest's environment for every
+component test so far) doesn't do real CSS layout, so this whole class of
+bug is invisible to that test suite by construction. Screenshot showed the
+Chat panel's messages and input box, but no "Personal Assistant" heading
+and no Chat/History/Memory/Cost tab bar anywhere in the window — as if
+scrolled out of view above the fold. (Separately confirmed in the same
+check: the confirmation-gate card DID appear and required a real
+Approve click before `send_test_notification` completed — the
+security-critical property, intact.)
+
+**Root cause:** classic Tailwind/flexbox gap — `ScrollArea` in
+`ChatPanel.tsx`/`HistoryPanel.tsx`/`MemoryPanel.tsx` was styled
+`flex-1 rounded-md border p-4` but never `min-h-0`. Flex items default to
+`min-height: auto`, not `0`, so a `flex-1` child won't shrink below its
+own CONTENT's natural height — as the message/history/fact list grew, the
+ScrollArea kept growing taller instead of clipping at its allotted space
+and scrolling internally. That pushed the whole page taller than the Tauri
+window's actual viewport, and each panel's auto-scroll-to-bottom effect
+(`scrollIntoView`) then scrolled the document itself all the way down,
+carrying the header and tabs off the top of the visible area. `App.tsx`'s
+own `Tabs`/`TabsContent` already had `min-h-0` (added when they were
+built, STEPS.md 58) — the missing piece was one level deeper, inside each
+panel's own scrollable list.
+
+**Fix:** added `min-h-0` alongside `flex-1` on all three `ScrollArea`
+elements. No component logic changed, so no test assertions needed
+updating — `npm run build` and `npm run test` (21/21, unchanged) both
+still pass, confirming the fix didn't break anything the existing suite
+already covered, while the actual defect this fixes was never something
+that suite COULD have caught.
+
+**Lesson for future panels (e.g. any Phase 10 UI work): any new
+`flex-1`-sized scrollable region needs `min-h-0` alongside it from the
+start** — this isn't a one-off, it's the standard fix for this exact
+flexbox default, and jsdom-based component tests will never catch a
+missing instance of it. A real-window check remains necessary for this
+class of bug; STEPS.md 60's recommendation (eyeball all tabs before
+declaring the initial pass done) is exactly why this was caught now
+instead of shipping.
+
+**Confirmed fixed by the user in the real window** (same day) — header and
+tab bar now visible, Vite HMR picked up the change without a restart.
+**Still open:** the tab bar being visible confirms the layout fix; the
+History/Memory/Cost panels' own CONTENT hasn't been individually clicked
+through and eyeballed yet (only Chat has, end to end, across STEPS.md 57
+and this entry) — worth a full run-through before PLAN.md's Phase 9 header
+gets flipped to complete.
+
+**Commands:**
+```sh
+cd dashboard
+npm run build
+npm run test
+```

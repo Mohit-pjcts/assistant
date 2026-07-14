@@ -106,3 +106,41 @@ export async function deleteMemoryFact(id: number): Promise<void> {
     throw new Error(`delete /memory/facts/${id} failed (${response.status}): ${await response.text()}`);
   }
 }
+
+// Token/cost tracking (PLAN.md Phase 9 step 6) — real LangSmith aggregates
+// (server.py's `/cost`), not computed locally from a pricing table.
+export interface CostWindow {
+  run_count: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_cost: number;
+  prompt_cost: number;
+  completion_cost: number;
+}
+
+export interface CostStats {
+  project: string;
+  windows: {
+    today: CostWindow;
+    week: CostWindow;
+    all_time: CostWindow;
+  };
+}
+
+// Thrown specifically on the backend's 503 ("LANGSMITH_API_KEY missing or
+// invalid") so the panel can show a distinct, actionable message instead of
+// a generic error banner — this isn't a broken request, it's a feature
+// that isn't set up.
+export class LangSmithNotConfiguredError extends Error {}
+
+export async function fetchCost(): Promise<CostStats> {
+  const response = await fetch(`${API_BASE_URL}/cost`);
+  if (response.status === 503) {
+    throw new LangSmithNotConfiguredError(await response.text());
+  }
+  if (!response.ok) {
+    throw new Error(`/cost failed (${response.status}): ${await response.text()}`);
+  }
+  return response.json() as Promise<CostStats>;
+}

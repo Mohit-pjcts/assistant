@@ -17,6 +17,7 @@ rumps>=0.4.0; sys_platform == "darwin"
 # Phase 9: assistant/server.py, the dashboard app's backend wrapper
 fastapi>=0.115.0
 uvicorn>=0.30.0
+langsmith>=0.10.0
 
 # Dev-only: LangGraph Studio (`langgraph dev`), not needed to run `assistant`
 langgraph-cli[inmem]>=0.4.0

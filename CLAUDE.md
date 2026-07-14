@@ -26,24 +26,39 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   `AsyncSqliteSaver`/`conversation_memory.sqlite`/`THREAD_ID` — NOT the
   `langgraph dev` REST API, which turned out to use a separate ephemeral
   store. Voice-in-app deferred to a later checkpoint; `voice_daemon.py`
-  keeps running unchanged. **Steps 1–5 complete** (STEPS.md 55–59): backend
-  wrapper (`/chat`, `/resume`, `/history`, `/memory/facts`); `dashboard/`
+  keeps running unchanged. **Steps 1–6 complete** (STEPS.md 55–60) —
+  Phase 9's ENTIRE initial panel set is built and tested: backend wrapper
+  (`/chat`, `/resume`, `/history`, `/memory/facts`, `/cost`); `dashboard/`
   Tauri 2 + React + TypeScript + shadcn/ui scaffold (Rust toolchain
   installed — `cargo`/`rustc` need `source "$HOME/.cargo/env"`, not on PATH
   by default, deliberately not auto-added to `~/.zshrc`); chat panel with
   the interrupt-gate UI (memory-write facts shown byte-for-byte verbatim,
   no voice affordance) and a CORS allowlist restricted to the dashboard's
   own origins; history panel showing the full, unfiltered `/history` feed
-  (tool/system/empty/synthetic messages included, labeled) as the honest
-  counterpart to the chat panel's filtered view; memory panel (view +
-  delete stored facts, delete behind a client-side confirm dialog — NOT the
-  interrupt gate, which is for the agent's own autonomous writes only, not
-  user curation). Real window confirmed working by the user after step 3
-  (Memory tab specifically not yet eyeballed). Full regression as of step
-  5: Python 87/87, frontend build clean, vitest 17/17. **Not yet done:**
-  the Tauri shell doesn't spawn/own the Python backend's process lifecycle
-  (started by hand); cost/token panel (step 6, needs new LangSmith
-  retrieval code) is the last remaining panel. Read PLAN.md's Phase 9 before
+  (tool/system/empty/synthetic messages included, labeled); memory panel
+  (view + delete, delete behind a client-side confirm dialog — NOT the
+  interrupt gate, which is for the agent's own autonomous writes only);
+  cost panel (real LangSmith aggregates via `Client.get_run_stats()`,
+  today/week/all-time windows, degrades to a clear "not configured" state
+  rather than breaking the rest of the app if `LANGSMITH_API_KEY` is
+  missing). Full regression as of step 6: Python 88/88, frontend build
+  clean, vitest 21/21. **Real-window bug found and fixed (STEPS.md 61):**
+  the user's live check surfaced a real layout bug jsdom-based tests
+  structurally can't catch — each panel's scrollable list was missing
+  `min-h-0` alongside `flex-1` (flex items default to `min-height: auto`),
+  so a growing list pushed the whole page past the window's height and the
+  auto-scroll-to-bottom effect carried the header/tab bar off-screen.
+  Fixed in all three list-based panels; confirmed visible again by the
+  user. Same check also confirmed the security-critical property: the
+  confirmation-gate card genuinely appears and requires a real Approve
+  click. **Caveat before calling the initial pass truly done:** History,
+  Memory, and Cost panels' own CONTENT (not just the now-visible tab bar)
+  still haven't been individually clicked through. **Not yet done:** the
+  Tauri shell
+  doesn't spawn/own the Python backend's process lifecycle (started by
+  hand); step 7 (voice-in-app sequencing checkpoint) hasn't started; PLAN.md's
+  Phase 9 header isn't flipped to COMPLETE without a full 4-tab visual
+  check plus the user's explicit sign-off. Read PLAN.md's Phase 9 before
   continuing this phase's work.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)

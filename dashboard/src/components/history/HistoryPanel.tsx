@@ -41,7 +41,10 @@ export function HistoryPanel() {
         </Button>
       </div>
       {error && <p className="text-sm text-destructive">{error}</p>}
-      <ScrollArea className="flex-1 rounded-md border p-4">
+      {/* min-h-0 — see ChatPanel.tsx's comment on the same pattern: without
+          it a growing list expands the whole page instead of scrolling
+          internally (found live in the real window, STEPS.md 61). */}
+      <ScrollArea className="min-h-0 flex-1 rounded-md border p-4">
         <div className="flex flex-col gap-2">
           {messages.length === 0 && !loading && (
             <p className="text-sm text-muted-foreground">No messages yet.</p>

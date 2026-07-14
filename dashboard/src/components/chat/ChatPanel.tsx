@@ -107,7 +107,15 @@ export function ChatPanel() {
 
   return (
     <div className="flex h-full flex-col gap-3">
-      <ScrollArea className="flex-1 rounded-md border p-4">
+      {/* min-h-0: flex items default to min-height:auto, so without this a
+          growing message list expands past its allotted space instead of
+          clipping and scrolling internally — pushes the whole page taller
+          than the window and (combined with the auto-scroll-to-bottom
+          effect below) leaves the header/tabs scrolled out of view above
+          the fold. Found live in the real Tauri window, not in any test —
+          jsdom doesn't do real layout, so this class of bug is invisible
+          to vitest. */}
+      <ScrollArea className="min-h-0 flex-1 rounded-md border p-4">
         <div className="flex flex-col gap-3">
           {!historyLoaded && (
             <p className="text-sm text-muted-foreground">Loading conversation…</p>

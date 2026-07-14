@@ -35,6 +35,10 @@ dependencies = [
     # explicit now that server.py imports it directly to run the app.
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
+    # Phase 9 step 6: /cost's real LangSmith aggregates (Client.get_run_stats).
+    # Was already a transitive dep (LangSmith tracing, Phase 3); made
+    # explicit now that server.py imports it directly.
+    "langsmith>=0.10.0",
 ]
 
 [project.optional-dependencies]

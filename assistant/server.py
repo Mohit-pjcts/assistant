@@ -22,8 +22,10 @@ speak it at all.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dotenv import load_dotenv
@@ -39,6 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from langchain_core.messages import BaseMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
+from langsmith import Client as LangSmithClient  # noqa: E402
 
 from assistant import memory_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
@@ -64,6 +67,49 @@ CONVERSATION_DB_PATH = os.environ.get("ASSISTANT_CONVERSATION_DB_PATH", "convers
 # catch a later override, so it's resolved inside each function body).
 if "ASSISTANT_MEMORY_DB_PATH" in os.environ:
     memory_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_MEMORY_DB_PATH"]
+
+# Matches CLAUDE.md's Tech stack section (LANGCHAIN_PROJECT=personal-assistant),
+# read from the env rather than hardcoded so a differently-configured
+# deployment still points at the right project.
+LANGSMITH_PROJECT = os.environ.get("LANGCHAIN_PROJECT", "personal-assistant")
+
+# Verified live against the real project before choosing this shape
+# (STEPS.md 60): `Client.get_run_stats()` is a real server-side aggregation
+# endpoint — 0.7s for 1358 runs, vs. 30+s to page through and sum
+# `list_runs()` client-side, and that gap only grows as the thread's
+# history does. `is_root=True` matches how the History/chat panels already
+# think about "one turn" — LangSmith rolls a trace's full token/cost total
+# up onto its root run, confirmed by cross-checking the manually-summed
+# total against get_run_stats's own total for the same window (identical
+# to the cent).
+_COST_WINDOWS: dict[str, timedelta | None] = {
+    "today": timedelta(hours=24),
+    "week": timedelta(days=7),
+    "all_time": None,
+}
+
+
+def _get_run_stats_sync(client: LangSmithClient, start_time: str | None) -> dict[str, Any]:
+    """Blocking call (langsmith's Client is sync-only) — always run via
+    asyncio.to_thread, never awaited directly, or it stalls every other
+    concurrent request on this server for the ~1s this takes."""
+    return client.get_run_stats(
+        project_names=[LANGSMITH_PROJECT],
+        is_root=True,
+        start_time=start_time,
+    )
+
+
+def _summarize_run_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_count": stats.get("run_count", 0),
+        "total_tokens": stats.get("total_tokens", 0),
+        "prompt_tokens": stats.get("prompt_tokens", 0),
+        "completion_tokens": stats.get("completion_tokens", 0),
+        "total_cost": stats.get("total_cost", 0.0),
+        "prompt_cost": stats.get("prompt_cost", 0.0),
+        "completion_cost": stats.get("completion_cost", 0.0),
+    }
 
 
 def _render_content(content: object) -> str:
@@ -150,6 +196,19 @@ async def lifespan(app: FastAPI):
         mcp_tools = await load_mcp_tools()
     except Exception:  # e.g. GMAIL_MCP_SERVER_PATH unset, server not built
         mcp_tools = []
+
+    try:
+        # Constructed once for the process lifetime, same as the graph
+        # below — NOT per-request. Wrapped defensively (unlike the graph,
+        # which is load-bearing for every other endpoint): a missing
+        # LANGSMITH_API_KEY or misconfigured account must not take down
+        # chat/history/memory, which don't need LangSmith at all. /cost
+        # checks for None and reports a clear "not configured" error
+        # instead of the whole server failing to start.
+        langsmith_client: LangSmithClient | None = LangSmithClient()
+    except Exception:
+        langsmith_client = None
+    app.state.langsmith_client = langsmith_client
 
     async with get_checkpointer(CONVERSATION_DB_PATH) as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
@@ -265,3 +324,34 @@ async def delete_memory_fact(fact_id: int) -> dict[str, Any]:
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No fact with id {fact_id}")
     return {"deleted": True}
+
+
+@app.get("/cost")
+async def cost() -> dict[str, Any]:
+    """Token/cost tracking (PLAN.md Phase 9 step 6) — real LangSmith
+    aggregates, not computed from local pricing tables. Three windows,
+    queried concurrently (each is an independent ~1s blocking call)."""
+    client = app.state.langsmith_client
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="LangSmith not configured (LANGSMITH_API_KEY missing or invalid)",
+        )
+
+    now = datetime.now(timezone.utc)
+
+    async def _window(delta: timedelta | None) -> dict[str, Any]:
+        start_time = (now - delta).isoformat() if delta else None
+        try:
+            stats = await asyncio.to_thread(_get_run_stats_sync, client, start_time)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"{type(exc).__name__}: {exc}"
+            ) from exc
+        return _summarize_run_stats(stats)
+
+    results = await asyncio.gather(*(_window(delta) for delta in _COST_WINDOWS.values()))
+    return {
+        "project": LANGSMITH_PROJECT,
+        "windows": dict(zip(_COST_WINDOWS.keys(), results)),
+    }

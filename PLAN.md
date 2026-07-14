@@ -613,11 +613,29 @@ below):**
    confirm dialog (client-side UX safeguard against a stray click) but is
    deliberately NOT behind the interrupt gate — that gate is for the agent's
    own autonomous writes, not user curation of already-saved data.
-6. Cost/token panel — new LangSmith retrieval code behind a new endpoint;
-   scope the query/aggregation shape at this step, not assumed up front.
+6. **DONE (STEPS.md 60).** Cost/token panel — `GET /cost`, real LangSmith
+   aggregates (`Client.get_run_stats()`, found live to be the right call —
+   0.7s vs. 30+s for client-side summing of `list_runs()`) across
+   today/week/all-time windows, defensively degrading to a clear
+   "not configured" state rather than breaking the other panels if
+   `LANGSMITH_API_KEY` is missing.
 7. CHECKPOINT (separate from this phase's initial done-when): voice-in-app
    sequencing — only after 1–6 are stable; retire `voice_daemon.py` only once
    real parity is confirmed.
+
+**Initial-pass done-when status, checked explicitly (STEPS.md 60) — met at
+the code/test level, ONE caveat before calling it fully done:** all four
+panels have real, tested backends (chat/history/memory against the real
+graph/SQLite; cost against the real LangSmith project) and passing
+component tests; the confirmation gate's UI affordance is verified
+(byte-for-byte verbatim memory-write facts, no voice option); the app
+shares the CLI/voice daemon's real conversation thread, confirmed live.
+**Caveat:** only the Chat tab has actually been eyeballed in a real running
+window (STEPS.md 57) — History, Memory, and Cost haven't been visually
+confirmed yet. Recommend a full run-through of all four tabs before
+treating Phase 9's initial pass as truly complete; PLAN.md's status header
+isn't flipped to COMPLETE without that plus the user's explicit sign-off
+(CLAUDE.md's Git rules).
 
 **Done-when (initial pass, i.e. steps 1–6 — voice-in-app is its own later
 done-when per step 7):** the app runs as a desktop client of the local graph
