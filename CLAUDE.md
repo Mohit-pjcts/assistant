@@ -29,9 +29,14 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   `voice_daemon.py` keeps running unchanged. Step 1 complete (STEPS.md 55):
   `assistant/server.py` (`/chat`, `/resume`, `/history`, `/memory/facts`
   list+delete), verified live against the real graph, 87/87 tests pass.
-  Next: step 2, Tauri + React + shadcn/ui scaffold — needs the Rust
-  toolchain installed first (not present as of STEPS.md 54/55, flag before
-  installing). Read PLAN.md's Phase 9 before continuing this phase's work.
+  Step 2 complete (STEPS.md 56): `dashboard/` — Tauri 2 + React + TypeScript
+  + shadcn/ui scaffold, Rust toolchain installed (`cargo`/`rustc` need
+  `source "$HOME/.cargo/env"` — not yet on PATH in ordinary zsh shells,
+  deliberately not auto-added to `~/.zshrc`). Both halves compile clean
+  (`npm run build`, `cargo check`); a real `npm run tauri dev` window launch
+  is a flagged, not-yet-done user action. Next: step 3, wire the chat panel
+  to `assistant/server.py` including the interrupt-gate UI. Read PLAN.md's
+  Phase 9 before continuing this phase's work.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP, async graph migration

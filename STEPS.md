@@ -3572,3 +3572,85 @@ is being built, per that step's own stated verification requirement.
 .venv/bin/python tests/test_memory_store.py; .venv/bin/python tests/test_memory_extraction.py
 # 87/87 across all files
 ```
+
+---
+
+## 56. Phase 9 step 2 — Tauri + React + shadcn/ui scaffold (2026-07-14)
+
+**Environment change, done as flagged in STEPS.md 54/55 ("needs the Rust
+toolchain installed first"):** installed Rust via `rustup` (stable,
+`rustc`/`cargo` 1.97.0). Note: `rustup` only wrote its env-sourcing line to
+`~/.profile`, which zsh (the user's shell) does not read on its own — so
+`cargo`/`rustc` are NOT yet on PATH for ordinary interactive shells.
+Deliberately did NOT edit `~/.zshrc`/`~/.zprofile` to fix this myself
+(a persistent shell-config change felt like the user's call, not mine to
+make silently) — every command in this entry instead explicitly runs
+`source "$HOME/.cargo/env"` first. **Follow-up for the user:** add `. "$HOME/.cargo/env"` to `~/.zshrc` (or wherever) if you want `cargo`/`rustc` on
+PATH in normal terminal sessions — not done automatically.
+
+**Scaffolded:** `dashboard/` (new top-level directory, sibling to
+`assistant/`) via `npm create tauri-app@latest -- dashboard -m npm -t
+react-ts --identifier com.mohitvuyyuru.assistant-dashboard -y` — Tauri 2,
+React 19 + TypeScript, npm as the package manager. Bundle identifier follows
+the existing `com.mohitvuyyuru.assistant-voice` launchd naming convention
+(STEPS.md 42).
+
+**shadcn/ui wired up** (per its official Vite guide, since `create-tauri-app`
+doesn't include it): installed `tailwindcss`/`@tailwindcss/vite`; added
+`src/index.css` with `@import "tailwindcss";` (imported from `main.tsx`,
+replacing the old `App.css` import — `App.css` deleted, dead code); added
+the `@/*` → `./src/*` path alias to `tsconfig.json` and a matching
+`resolve.alias` + the `tailwindcss()` plugin in `vite.config.ts` (needed
+`@types/node` for `vite.config.ts`'s own `node:path` import); ran `npx
+shadcn@latest init -t vite -b base -p nova -y` — non-interactive flags
+required trial-and-error since `-y`/`-d` alone still prompted (`-d`
+defaults to `--template=next`, wrong framework here; the base-library and
+preset prompts needed `-b base -p nova` explicitly, and `--base-color`
+isn't a real flag — the base color is chosen via the preset instead).
+Produced `components.json`, `src/components/ui/button.tsx`,
+`src/lib/utils.ts`, and shadcn's design-token CSS variables merged into
+`index.css`.
+
+**`src/App.tsx` replaced** with a minimal placeholder that actually renders
+a `<Button>` from `@/components/ui/button` — deliberately not left as the
+generic Tauri+Vite+React demo (greet-command boilerplate), both so the repo
+doesn't ship placeholder demo content and so the build genuinely exercises
+the Tailwind/alias/shadcn wiring rather than just type-checking unused
+files. Real panels (chat/history/memory/cost) replace this in later steps.
+
+**Verified — compiles clean on both halves:**
+- `npm run build` (`tsc && vite build`) — 58 modules, zero TS errors, real
+  Tailwind CSS output present in the built bundle.
+- `cargo check --manifest-path src-tauri/Cargo.toml` — full dependency tree
+  (tauri 2.11, wry, tao, etc.) compiles clean, `Finished dev profile`.
+
+**Not verified — left for the user, by design, same convention as CLAUDE.md's
+"interactive entry points get verified by hand, not test files":** actually
+launching `npm run tauri dev` and seeing a real window. This session has no
+way to confirm a GUI window renders correctly (unlike Phase 5/8's voice
+work, which had a real interactive terminal/hotkey session to verify
+against) — `cargo check`/`npm run build` confirm the code is correct, not
+that the window looks right. **User action needed:** `cd dashboard && source
+"$HOME/.cargo/env" && npm run tauri dev` and confirm a window opens showing
+"Personal Assistant Dashboard" / "It works" button styled by shadcn's
+default (Nova/neutral) theme.
+
+**`.gitignore`:** none needed at the repo root — `dashboard/.gitignore`
+(from the scaffold) already excludes `node_modules`/`dist`, and
+`dashboard/src-tauri/.gitignore` excludes `/target/`; confirmed via `git add
+--dry-run dashboard/` — only 43 real project files staged, no
+build/dependency artifacts.
+
+**Commands:**
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default
+npm create tauri-app@latest -- dashboard -m npm -t react-ts --identifier com.mohitvuyyuru.assistant-dashboard -y
+cd dashboard
+npm install
+npm install tailwindcss @tailwindcss/vite
+npm install -D @types/node
+npx shadcn@latest init -t vite -b base -p nova -y
+npm run build                                              # frontend check
+source "$HOME/.cargo/env" && cargo check --manifest-path src-tauri/Cargo.toml   # Rust check
+git add --dry-run dashboard/                                # confirmed gitignore coverage
+```

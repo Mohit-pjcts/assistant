@@ -581,13 +581,15 @@ interrupt gate needed for it).
 
 **Steps (locked at the scoping checkpoint; supersedes the original list
 below):**
-1. `assistant/server.py` (backend wrapper) — `/chat`, `/resume`, `/history`,
-   `/memory/facts` (list + delete). Built and tested BEFORE any frontend
-   code, since every panel depends on it and it's where the confirmation
-   gate's correctness lives.
-2. Tauri + React + shadcn/ui scaffold. Requires installing the Rust
-   toolchain (not present in the environment as of STEPS.md 54 — flag before
-   installing).
+1. **DONE (STEPS.md 55).** `assistant/server.py` (backend wrapper) —
+   `/chat`, `/resume`, `/history`, `/memory/facts` (list + delete). 87/87
+   tests pass, verified against the real graph over the shared
+   `conversation_memory.sqlite` thread.
+2. **DONE (STEPS.md 56).** Tauri + React + shadcn/ui scaffold
+   (`dashboard/`), Rust toolchain installed. Both halves verified to
+   compile (`npm run build`, `cargo check`) — actually launching `npm run
+   tauri dev` and confirming a real window is a flagged user action, not
+   done in this session (no way to visually verify a GUI from here).
 3. Chat panel wired to `/chat`/`/resume`, including the interrupt-gate UI
    affordance (verified against a real gated tool, both approve/decline, and
    specifically against a memory-write interrupt for the verbatim-fact
