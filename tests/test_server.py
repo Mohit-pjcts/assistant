@@ -13,9 +13,11 @@ main.py/tools.py already document for load_dotenv().
 
 import asyncio
 import atexit
+import json
 import os
 import shutil
 import tempfile
+from typing import Any
 
 _tmpdir = tempfile.mkdtemp(prefix="assistant_test_server_")
 # Not a `with TemporaryDirectory()` block (test_interrupts.py's usual
@@ -32,13 +34,105 @@ from fastapi.testclient import TestClient  # noqa: E402
 from assistant import memory_store, server, thread_store  # noqa: E402
 
 
+def _parse_sse(text: str) -> list[dict[str, Any]]:
+    """/chat and /resume return text/event-stream (Phase 14 streaming) —
+    this decodes it back into the list of JSON frames a test can assert
+    on. Each frame is `data: {...}\\n\\n`; TestClient buffers the full
+    streamed body into `.text` for a plain (non-`.stream()`) request, so
+    this is enough for tests that only care about the end result."""
+    events = []
+    for frame in text.split("\n\n"):
+        frame = frame.strip()
+        if not frame:
+            continue
+        assert frame.startswith("data: "), f"unexpected SSE frame: {frame!r}"
+        events.append(json.loads(frame[len("data: ") :]))
+    return events
+
+
+def _final_sse_event(response: Any) -> dict[str, Any]:
+    """The terminal frame of a /chat or /resume stream — always
+    `{"type": "interrupt", ...}`, `{"type": "message", ...}`, or (on a
+    real backend error) `{"type": "error", ...}`. Mirrors what the OLD
+    non-streaming response body used to be in full, before Phase 14."""
+    events = _parse_sse(response.text)
+    assert events, f"expected at least one SSE event, got none — raw body: {response.text!r}"
+    return events[-1]
+
+
 async def test_chat_round_trips_through_the_real_graph() -> None:
     with TestClient(server.app) as client:
         response = client.post("/chat", json={"message": "Say exactly: server test ok"})
         assert response.status_code == 200, response.text
-        body = response.json()
+        body = _final_sse_event(response)
         assert body["type"] == "message"
         assert "server test ok" in body["content"].lower()
+
+
+async def test_chat_streams_token_events_that_reassemble_into_the_final_message() -> None:
+    """Phase 14: proves the stream is a REAL token-by-token stream of the
+    actual answer, not a hollow typing animation disconnected from the
+    final content — verified by reassembling every token event's text and
+    comparing it against the terminal message event's content."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/chat", json={"message": "Count from 1 to 5, one number per line, no other text."}
+        )
+        assert response.status_code == 200, response.text
+        events = _parse_sse(response.text)
+        token_events = [e for e in events if e["type"] == "token"]
+        assert token_events, f"expected at least one token event, got {events}"
+        assert events[-1]["type"] == "message"
+        streamed_text = "".join(e["text"] for e in token_events)
+        assert streamed_text.strip() == events[-1]["content"].strip()
+
+
+async def test_stop_cancels_the_registered_task_for_its_thread() -> None:
+    """Unit-level coverage of /chat/stop's own lookup+cancel logic.
+
+    The FULL live scenario (a real concurrent request actually streaming
+    while a separate request calls /chat/stop, the stream terminating
+    immediately, and a follow-up /chat call on the same thread working
+    perfectly cleanly afterward — no corrupted or half-written state) was
+    verified live against a real running backend with two genuinely
+    concurrent curl processes, not simulated here: `TestClient` drives the
+    ASGI app through a synchronous portal that does not reliably support
+    two truly concurrent in-flight requests from the same driving thread,
+    so a test built on `client.stream()` + a nested `client.post()` was
+    flaky for reasons specific to the test harness, not the implementation
+    (confirmed by the real curl-based check passing cleanly every time).
+    This test instead exercises the exact same production code path
+    (`app.state.active_tasks` lookup + `task.cancel()`) directly, without
+    depending on TestClient reproducing real request concurrency."""
+    with TestClient(server.app) as client:
+        # Reuse the already-registered legacy default thread rather than
+        # POST /threads a new one — creating a thread always activates it
+        # (this codebase's own documented behavior), which would silently
+        # move the shared active pointer and break later tests in this
+        # file that assume nothing has repointed it yet.
+        thread_id = thread_store.LEGACY_DEFAULT_THREAD_ID
+
+        async def _never_finishes() -> None:
+            await asyncio.sleep(60)
+
+        task = asyncio.ensure_future(_never_finishes())
+        server.app.state.active_tasks[thread_id] = task
+        try:
+            response = client.post("/chat/stop", json={"thread_id": thread_id})
+            assert response.status_code == 200, response.text
+            assert response.json()["stopped"] is True
+            await asyncio.sleep(0)  # let the cancellation actually land
+            assert task.cancelled()
+        finally:
+            server.app.state.active_tasks.pop(thread_id, None)
+            task.cancel()
+
+
+async def test_stop_with_nothing_in_flight_reports_not_stopped() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/chat/stop", json={})
+        assert response.status_code == 200, response.text
+        assert response.json()["stopped"] is False
 
 
 async def test_history_reflects_the_same_thread_chat_wrote_to() -> None:
@@ -60,14 +154,15 @@ async def test_gated_tool_interrupt_then_approve() -> None:
             "/chat",
             json={"message": "Use the send_test_notification tool to notify me 'approve test'"},
         )
-        body = response.json()
+        body = _final_sse_event(response)
         assert body["type"] == "interrupt", f"expected an interrupt, got {body}"
         assert body["payload"]["action"] == "send_test_notification"
         assert "approve test" in body["payload"]["message"]
 
         resumed = client.post("/resume", json={"approved": True})
         assert resumed.status_code == 200, resumed.text
-        assert resumed.json()["type"] == "message"
+        resumed_body = _final_sse_event(resumed)
+        assert resumed_body["type"] == "message"
 
         # This gated-tool round trip is a real multi-hop turn (supervisor ->
         # coding_agent -> route_after_specialist), so it genuinely produces a
@@ -112,7 +207,7 @@ async def test_gated_tool_interrupt_then_approve() -> None:
             "a genuine/synthetic user HumanMessage should never carry a node/tool name"
         )
 
-        assert "sent" in resumed.json()["content"].lower()
+        assert "sent" in resumed_body["content"].lower()
 
 
 async def test_gated_tool_interrupt_then_decline() -> None:
@@ -121,12 +216,12 @@ async def test_gated_tool_interrupt_then_decline() -> None:
             "/chat",
             json={"message": "Use the send_test_notification tool to notify me 'decline test'"},
         )
-        body = response.json()
+        body = _final_sse_event(response)
         assert body["type"] == "interrupt", f"expected an interrupt, got {body}"
 
         resumed = client.post("/resume", json={"approved": False})
         assert resumed.status_code == 200, resumed.text
-        content = resumed.json()["content"].lower()
+        content = _final_sse_event(resumed)["content"].lower()
         assert "not" in content and ("sent" in content or "cancel" in content), (
             f"expected a cancellation-flavored reply, got: {content}"
         )
@@ -247,7 +342,7 @@ async def test_explicit_thread_id_isolates_conversations_without_touching_active
             json={"message": "Say exactly: isolated thread A reply", "thread_id": thread_a["id"]},
         )
         assert response.status_code == 200, response.text
-        assert "isolated thread a reply" in response.json()["content"].lower()
+        assert "isolated thread a reply" in _final_sse_event(response)["content"].lower()
 
         # The explicit-thread_id call above must NOT have moved the pointer
         # — a second client relying on the active pointer (e.g. a live GUI
@@ -339,6 +434,12 @@ async def test_delete_unknown_thread_returns_404() -> None:
 if __name__ == "__main__":
     asyncio.run(test_chat_round_trips_through_the_real_graph())
     print("OK: /chat round-trips through the real graph")
+    asyncio.run(test_chat_streams_token_events_that_reassemble_into_the_final_message())
+    print("OK: /chat streams token events that reassemble into the final message")
+    asyncio.run(test_stop_cancels_the_registered_task_for_its_thread())
+    print("OK: /chat/stop cancels the registered task for its thread")
+    asyncio.run(test_stop_with_nothing_in_flight_reports_not_stopped())
+    print("OK: /chat/stop with nothing in flight reports stopped=False")
     asyncio.run(test_history_reflects_the_same_thread_chat_wrote_to())
     print("OK: /history reflects the same thread /chat wrote to")
     asyncio.run(test_gated_tool_interrupt_then_approve())

@@ -20,8 +20,15 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No active phase** — Phase 14 (UI rework) is next; read PLAN.md before
-  beginning it.
+- **ACTIVE: Phase 10** — Proactivity + polish (resumed 2026-07-15; parked
+  2026-07-14 to run the write-access/browser/UI arc, now that Phases
+  11–15 are complete). At the resume checkpoint (2026-07-15): the Tauri
+  backend/voice-daemon process-lifecycle item was re-confirmed live (not
+  rebuilt) — see PLAN.md. The morning briefing (the phase's original "core
+  build") was CUT from scope entirely at the user's explicit direction, not
+  deferred — Phase 10 is now polish-debt-only (voice accuracy,
+  extended-thinking recheck, Haiku eval, README/pytest/CI). Read PLAN.md's
+  Phase 10 section before doing any work.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -86,6 +93,21 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   never restarted after this phase's code landed (not a code bug); fixed
   by restarting them, plus cleanup of an unrelated stale scratch server
   left over from Phase 12 (STEPS.md groups 69–70).
+- Complete: Phase 14 — UI rework: full visual redesign (dark/light theme,
+  Operator/Signal/Alarm rail-grammar token system, Space Grotesk/IBM Plex
+  typography) across all panels + sidebar + gate; the 3 missing
+  InterruptGate renderers (`run_shortcut`, Apple Calendar
+  create/update); the gate-UX-friction fix
+  (`MAC_CONTROL_SYSTEM_PROMPT` aligned with `LIFE_ADMIN_SYSTEM_PROMPT`);
+  Phase 12's two carried-forward live-verification gaps closed
+  (`update_calendar_event` live round-trip, the injection-shaped-request
+  scenario); plus a mid-phase expansion — Tauri now owns the Python
+  backend's + voice daemon's process lifecycle, and `/chat`/`/resume`
+  stream via SSE with stop-mid-run. All live-verified in the real window
+  (STEPS.md 71–72). One accepted, non-blocking gap: Tauri's quit-time
+  process-cleanup is code-reviewed but not live-fire-verified (no way to
+  drive a native macOS window from an agent session) — left for the user
+  to confirm at their convenience.
 - Complete: Phase 15 — multi-thread conversation support: replaced the
   single fixed `THREAD_ID` with an active-thread pointer + registry
   (`assistant/thread_store.py`, separate `threads.sqlite`); `/chat`/
@@ -110,7 +132,9 @@ WRITE, 13 Apple Calendar + open-URL-in-Brave, 14 UI rework. Phase 15
 (multi-thread conversation support) added the same day, discovered mid-Phase
 12 (STEPS.md 66) — the shared fixed `THREAD_ID` collides across concurrent
 clients; kept as its own phase rather than folded into 12. Phase 13
-completed 2026-07-15 (STEPS.md groups 69–70). See PLAN.md.
+completed 2026-07-15 (STEPS.md groups 69–70). Phase 14 completed
+2026-07-15 (STEPS.md groups 71–72). Phase 10 resumed 2026-07-15 now that
+the write-access/browser/UI arc (11–15) is complete. See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -222,8 +246,14 @@ STEPS.md                    # build log
   never raised exceptions that crash the graph.
 - **`load_dotenv()` is called inside tools.py** (needs TAVILY_API_KEY at import
   time) as well as main.py. Idempotent; keep both.
-- **Non-streaming CLI output** for now; `_render_content()` in main.py guards
-  against non-string `.content` shapes. Streaming is a later UX pass.
+- **CLI output stays non-streaming** (`main.py`'s `_render_content()`
+  still guards against non-string `.content` shapes) — only the dashboard
+  streams. Phase 14 (STEPS.md 71/72) added SSE streaming to
+  `assistant/server.py`'s `/chat`/`/resume` specifically for the Tauri
+  dashboard client; `main.py`/`voice_daemon.py` still call
+  `graph.ainvoke()` directly and were deliberately left untouched — no
+  request to stream the CLI or voice output, and streaming voice output
+  would need mid-utterance TTS chunking that's out of scope here.
 
 ## Security model — never weaken without explicit discussion
 

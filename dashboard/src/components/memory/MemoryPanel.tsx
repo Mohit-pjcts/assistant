@@ -90,7 +90,7 @@ export function MemoryPanel() {
                 {fact.provenance && (
                   <p className="mt-1 text-xs text-muted-foreground">Source: {fact.provenance}</p>
                 )}
-                <p className="mt-1 text-xs text-muted-foreground">{fact.created_at}</p>
+                <p className="mt-1 font-mono text-xs text-muted-foreground">{fact.created_at}</p>
               </CardContent>
               <CardFooter>
                 <AlertDialog

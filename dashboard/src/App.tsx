@@ -5,6 +5,7 @@ import { HistoryPanel } from "@/components/history/HistoryPanel";
 import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { CostPanel } from "@/components/cost/CostPanel";
 import { ThreadSidebar } from "@/components/threads/ThreadSidebar";
+import { ThemeToggle } from "@/components/theme/ThemeToggle";
 
 // PLAN.md Phase 9's initial panel set, all four now wired: chat (step 3),
 // history (step 4), memory (step 5), cost (step 6). Phase 15 added the
@@ -20,16 +21,27 @@ function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen bg-background">
       <ThreadSidebar onActiveThreadChange={setActiveThreadId} />
       <main className="mx-auto flex h-screen min-w-0 max-w-2xl flex-1 flex-col gap-4 p-4">
-        <h1 className="text-lg font-semibold">Personal Assistant</h1>
+        <header className="flex items-center justify-between">
+          <h1 className="font-heading text-lg font-semibold tracking-tight">Personal Assistant</h1>
+          <ThemeToggle />
+        </header>
         <Tabs defaultValue="chat" className="min-h-0 flex-1">
-          <TabsList>
-            <TabsTrigger value="chat">Chat</TabsTrigger>
-            <TabsTrigger value="history">History</TabsTrigger>
-            <TabsTrigger value="memory">Memory</TabsTrigger>
-            <TabsTrigger value="cost">Cost</TabsTrigger>
+          <TabsList variant="line" className="border-b border-border">
+            <TabsTrigger value="chat" className="panel-label text-xs after:bg-operator data-active:text-operator">
+              Chat
+            </TabsTrigger>
+            <TabsTrigger value="history" className="panel-label text-xs after:bg-operator data-active:text-operator">
+              History
+            </TabsTrigger>
+            <TabsTrigger value="memory" className="panel-label text-xs after:bg-operator data-active:text-operator">
+              Memory
+            </TabsTrigger>
+            <TabsTrigger value="cost" className="panel-label text-xs after:bg-operator data-active:text-operator">
+              Cost
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="chat" className="min-h-0">
             <ChatPanel key={activeThreadId ?? "pending"} />

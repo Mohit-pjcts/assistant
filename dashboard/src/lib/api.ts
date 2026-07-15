@@ -2,12 +2,10 @@
 // Talks to the SAME shared graph/thread the CLI and voice daemon use; see
 // server.py's own module docstring for why that matters.
 //
-// Base URL is fixed for now — the Python backend is started by hand
-// (`uvicorn assistant.server:app`), not spawned/supervised by the Tauri
-// shell yet. Automating that lifecycle (spawn on app launch, kill on quit)
-// is a deliberately separate, not-yet-done step (STEPS.md), kept out of
-// this one so "wire the chat panel" doesn't grow into "own a child
-// process's lifecycle" in the same change.
+// Base URL is fixed — the Tauri shell now spawns/manages the backend's
+// process lifecycle itself (Phase 14 packaging step, STEPS.md 71/72:
+// src-tauri/src/lib.rs), always on 127.0.0.1:8000, so this doesn't need to
+// be configurable.
 const API_BASE_URL = "http://127.0.0.1:8000";
 
 export interface HistoryMessage {
@@ -55,12 +53,91 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function sendChat(message: string): Promise<ChatTurnResult> {
-  return postJSON<ChatTurnResult>("/chat", { message });
+// Phase 14 streaming (STEPS.md 71/72): /chat and /resume now respond with
+// text/event-stream instead of one JSON object — see server.py's
+// `_stream_turn` docstring for the full design (verified live against the
+// real graph before being written). `onToken` fires for every incremental
+// text delta as it arrives; the returned promise resolves to exactly the
+// same ChatTurnResult shape the old single-shot response used to be,
+// taken from the stream's terminal frame — callers that don't care about
+// live tokens can ignore `onToken` entirely and nothing else changes.
+//
+// Manual SSE parsing over `fetch()`'s streaming body, not the browser's
+// built-in `EventSource` — EventSource only supports GET, and both
+// endpoints need a POST body (the message, or the approval decision).
+async function streamSSE(
+  path: string,
+  body: unknown,
+  onToken: (text: string) => void,
+): Promise<ChatTurnResult> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    const detail = await response.text();
+    throw new Error(`${path} failed (${response.status}): ${detail}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let terminal: ChatTurnResult | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? ""; // a trailing partial frame stays buffered
+    for (const frame of frames) {
+      const line = frame.trim();
+      if (!line.startsWith("data: ")) continue;
+      const event = JSON.parse(line.slice("data: ".length)) as
+        | { type: "token"; text: string }
+        | { type: "message"; content: string }
+        | { type: "interrupt"; payload: InterruptPayload }
+        | { type: "error"; detail: string };
+      if (event.type === "token") {
+        onToken(event.text);
+      } else if (event.type === "error") {
+        throw new Error(`${path} stream error: ${event.detail}`);
+      } else {
+        terminal = event;
+      }
+    }
+  }
+
+  if (!terminal) {
+    // A stop-mid-run cancellation ends the connection without a terminal
+    // frame — this is the normal, expected shape of that case, not a bug;
+    // ChatPanel's stop handling checks for it via its own "did I just
+    // request a stop" flag rather than this function guessing intent.
+    throw new Error(`${path}: stream ended without a terminal event`);
+  }
+  return terminal;
 }
 
-export async function resumeChat(approved: boolean): Promise<ChatTurnResult> {
-  return postJSON<ChatTurnResult>("/resume", { approved });
+export async function sendChat(
+  message: string,
+  onToken: (text: string) => void = () => {},
+): Promise<ChatTurnResult> {
+  return streamSSE("/chat", { message }, onToken);
+}
+
+export async function resumeChat(
+  approved: boolean,
+  onToken: (text: string) => void = () => {},
+): Promise<ChatTurnResult> {
+  return streamSSE("/resume", { approved }, onToken);
+}
+
+// Cancels whatever turn is currently streaming for the active thread, if
+// any (server.py's POST /chat/stop). `stopped: false` just means nothing
+// was in flight — not an error.
+export async function stopChat(): Promise<{ stopped: boolean }> {
+  return postJSON<{ stopped: boolean }>("/chat/stop", {});
 }
 
 export async function fetchHistory(): Promise<HistoryMessage[]> {

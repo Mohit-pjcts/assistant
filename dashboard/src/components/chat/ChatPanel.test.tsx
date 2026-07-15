@@ -20,12 +20,14 @@ vi.mock("@/lib/api", async () => {
     fetchHistory: vi.fn(),
     sendChat: vi.fn(),
     resumeChat: vi.fn(),
+    stopChat: vi.fn(),
   };
 });
 
 const mockedFetchHistory = vi.mocked(api.fetchHistory);
 const mockedSendChat = vi.mocked(api.sendChat);
 const mockedResumeChat = vi.mocked(api.resumeChat);
+const mockedStopChat = vi.mocked(api.stopChat);
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -78,7 +80,78 @@ describe("ChatPanel", () => {
 
     expect(await screen.findByText("pong")).toBeInTheDocument();
     expect(screen.getByText("ping")).toBeInTheDocument();
-    expect(mockedSendChat).toHaveBeenCalledWith("ping");
+    expect(mockedSendChat).toHaveBeenCalledWith("ping", expect.any(Function));
+  });
+
+  it("shows a live streaming bubble that updates as tokens arrive, then finalizes into a real message", async () => {
+    // Phase 14 streaming (STEPS.md 71/72): proves tokens render BEFORE the
+    // turn resolves, not just that the eventual final text shows up —
+    // deferring resolution with a manually-controlled promise so the
+    // intermediate streaming state is actually observable.
+    const user = userEvent.setup();
+    let capturedOnToken: ((text: string) => void) | undefined;
+    let resolveTurn!: (result: { type: "message"; content: string }) => void;
+    const pending = new Promise<{ type: "message"; content: string }>((resolve) => {
+      resolveTurn = resolve;
+    });
+    mockedSendChat.mockImplementation(async (_message, onToken) => {
+      capturedOnToken = onToken;
+      return pending;
+    });
+
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "hi");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    capturedOnToken?.("Hel");
+    capturedOnToken?.("lo!");
+
+    const bubble = await screen.findByTestId("streaming-bubble");
+    expect(bubble.textContent).toBe("Hello!");
+
+    resolveTurn({ type: "message", content: "Hello!" });
+
+    await waitFor(() => expect(screen.queryByTestId("streaming-bubble")).not.toBeInTheDocument());
+    expect(screen.getByText("Hello!")).toBeInTheDocument();
+  });
+
+  it("shows a Stop button while busy; stopping shows partial streamed text marked Stopped, not a generic error", async () => {
+    const user = userEvent.setup();
+    let capturedOnToken: ((text: string) => void) | undefined;
+    let rejectTurn!: (err: Error) => void;
+    const pending = new Promise<never>((_resolve, reject) => {
+      rejectTurn = reject;
+    });
+    mockedSendChat.mockImplementation(async (_message, onToken) => {
+      capturedOnToken = onToken;
+      return pending;
+    });
+    mockedStopChat.mockResolvedValue({ stopped: true });
+
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "count please");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    capturedOnToken?.("1\n2\n3");
+    await screen.findByTestId("streaming-bubble");
+
+    await user.click(screen.getByRole("button", { name: /stop/i }));
+    expect(mockedStopChat).toHaveBeenCalled();
+
+    // api.ts's streamSSE throws when a stop cuts the connection with no
+    // terminal frame — simulate that exact failure mode.
+    rejectTurn(new Error("/chat: stream ended without a terminal event"));
+
+    await waitFor(() => expect(document.body.textContent).toContain("Stopped"));
+    expect(document.body.textContent).toContain("1");
+    expect(document.body.textContent).toContain("3");
+    // The raw error text must NOT leak as a generic error banner — a
+    // user-requested stop is not a failure.
+    expect(screen.queryByText(/stream ended without a terminal event/)).not.toBeInTheDocument();
+    // Busy state cleared — back to a normal Send button, not stuck.
+    expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
   });
 
   it("shows the interrupt gate for a generic gated tool and resolves on approve", async () => {
@@ -105,7 +178,7 @@ describe("ChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /approve/i }));
 
-    expect(mockedResumeChat).toHaveBeenCalledWith(true);
+    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function));
     expect(await screen.findByText("Notification sent.")).toBeInTheDocument();
     expect(screen.queryByTestId("interrupt-gate")).not.toBeInTheDocument();
   });
@@ -143,7 +216,7 @@ describe("ChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /decline/i }));
 
-    expect(mockedResumeChat).toHaveBeenCalledWith(false);
+    expect(mockedResumeChat).toHaveBeenCalledWith(false, expect.any(Function));
     expect(await screen.findByText("Not saved.")).toBeInTheDocument();
   });
 
@@ -185,7 +258,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText(/Bcc:/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /approve/i }));
-    expect(mockedResumeChat).toHaveBeenCalledWith(true);
+    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function));
   });
 
   it("renders a create_gmail_filter interrupt's forward target as a loud, distinct warning", async () => {
@@ -210,7 +283,7 @@ describe("ChatPanel", () => {
     expect(forwardWarning.textContent).toContain("attacker@evil.com");
 
     await user.click(screen.getByRole("button", { name: /decline/i }));
-    expect(mockedResumeChat).toHaveBeenCalledWith(false);
+    expect(mockedResumeChat).toHaveBeenCalledWith(false, expect.any(Function));
   });
 
   it("does not render the forward warning when create_gmail_filter has no forward action", async () => {
@@ -267,5 +340,96 @@ describe("ChatPanel", () => {
     expect(
       screen.getByText("The assistant wants to delete this calendar event:"),
     ).toBeInTheDocument();
+  });
+
+  // Phase 14 (STEPS.md 69's gate-UX finding + the InterruptGate renderer
+  // audit): run_shortcut, calendar_create_event, and calendar_update_event
+  // (mac_tools.py) previously fell through to InterruptGate's raw-JSON
+  // fallback — they had no dedicated renderer at all. These three tests
+  // cover that gap the same way the Google Calendar/Gmail renderers above
+  // are covered.
+  it("shows a run_shortcut interrupt with the shortcut name and a Mac Control badge", async () => {
+    mockedSendChat.mockResolvedValue({
+      type: "interrupt",
+      payload: {
+        action: "run_shortcut",
+        name: "Battery status",
+        spoken_prompt: "Permission to run the 'Battery status' shortcut?",
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "check my battery");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await screen.findByTestId("interrupt-gate");
+    expect(screen.getByText("Battery status")).toBeInTheDocument();
+    expect(screen.getByText("Mac Control")).toBeInTheDocument();
+    // No voice_approvable key present — defaults to voice-approvable, same
+    // rule voice_daemon.py applies (payload.get("voice_approvable") is False).
+    expect(screen.getByText("Voice OK")).toBeInTheDocument();
+  });
+
+  it("shows a calendar_create_event (Apple Calendar) interrupt with its own field shape, distinct from Google's", async () => {
+    mockedSendChat.mockResolvedValue({
+      type: "interrupt",
+      payload: {
+        action: "calendar_create_event",
+        calendar_name: "Home",
+        title: "Trip planning",
+        start: "2026-07-20T15:00:00",
+        end: "2026-07-20T15:30:00",
+        timezone: "America/Los_Angeles",
+        location: "",
+        description: "",
+        voice_approvable: false,
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "add to apple calendar");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    const fields = await screen.findByTestId("interrupt-apple-event-fields");
+    expect(fields.textContent).toContain("Home");
+    expect(fields.textContent).toContain("Trip planning");
+    expect(screen.getByText("Apple Calendar")).toBeInTheDocument();
+    expect(screen.getByText("Text only")).toBeInTheDocument();
+  });
+
+  it("shows a calendar_update_event (Apple Calendar) interrupt's current fields AND requested changes", async () => {
+    mockedSendChat.mockResolvedValue({
+      type: "interrupt",
+      payload: {
+        action: "calendar_update_event",
+        event_id: "e1",
+        current: {
+          title: "Trip planning",
+          start: "2026-07-20T15:00:00",
+          end: "2026-07-20T15:30:00",
+          calendar: "Home",
+          location: "",
+          description: "",
+        },
+        changes: { title: "Trip planning (v2)" },
+        voice_approvable: false,
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "rename the trip event");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    const current = await screen.findByTestId("interrupt-apple-event-current");
+    expect(current.textContent).toContain("Trip planning");
+    expect(current.textContent).toContain("Home");
+    const changes = await screen.findByTestId("interrupt-apple-event-changes");
+    expect(changes.textContent).toContain("Trip planning (v2)");
   });
 });

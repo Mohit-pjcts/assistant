@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -8,6 +9,7 @@ import {
   fetchHistory,
   resumeChat,
   sendChat,
+  stopChat,
   type ChatTurnResult,
   type HistoryMessage,
   type InterruptPayload,
@@ -18,14 +20,29 @@ import {
 // (STEPS.md 54/55). This is deliberately the SAME confirmation-gate loop
 // main.py's `while "__interrupt__" in result` runs, just driven by button
 // clicks instead of a blocking input() call (PLAN.md's Phase 9 step 3).
+//
+// Phase 14 streaming (STEPS.md 71/72): sendChat/resumeChat now stream
+// tokens as they arrive instead of resolving once with the whole answer.
+// `streamingTextRef` mirrors `streamingText` state — kept as a ref too so
+// `handleStreamError` can read the CURRENT accumulated text synchronously
+// without going through a setState-updater callback (which React Strict
+// Mode double-invokes; calling other setters from inside one is unsafe).
 export function ChatPanel() {
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [input, setInput] = useState("");
   const [pendingInterrupt, setPendingInterrupt] = useState<InterruptPayload | null>(null);
   const [busy, setBusy] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const streamingTextRef = useRef("");
+  // Set right before calling stopChat(); checked once the in-flight
+  // sendChat/resumeChat promise settles so a user-requested stop renders
+  // as "Stopped", not a generic connection error — the stream ending
+  // abruptly IS what a stop looks like from here (api.ts's streamSSE
+  // docstring), so this flag is what distinguishes intent from failure.
+  const stopRequestedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,14 +64,42 @@ export function ChatPanel() {
   useEffect(() => {
     // jsdom (component tests) has no scrollIntoView implementation.
     bottomRef.current?.scrollIntoView?.({ behavior: "smooth" });
-  }, [messages, pendingInterrupt]);
+  }, [messages, pendingInterrupt, streamingText]);
+
+  function appendToken(chunk: string) {
+    streamingTextRef.current += chunk;
+    setStreamingText(streamingTextRef.current);
+  }
+
+  function resetStreamingText() {
+    streamingTextRef.current = "";
+    setStreamingText("");
+  }
 
   function applyResult(result: ChatTurnResult) {
+    resetStreamingText();
     if (result.type === "interrupt") {
       setPendingInterrupt(result.payload);
     } else {
       setMessages((prev) => [...prev, { role: "assistant", content: result.content }]);
     }
+    setBusy(false);
+  }
+
+  function handleStreamError(err: unknown) {
+    if (stopRequestedRef.current) {
+      const partial = streamingTextRef.current;
+      if (partial.trim()) {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `${partial}\n\n_Stopped._` },
+        ]);
+      }
+    } else {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+    stopRequestedRef.current = false;
+    resetStreamingText();
     setBusy(false);
   }
 
@@ -66,10 +111,9 @@ export function ChatPanel() {
     setInput("");
     setBusy(true);
     try {
-      applyResult(await sendChat(text));
+      applyResult(await sendChat(text, appendToken));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setBusy(false);
+      handleStreamError(err);
     }
   }
 
@@ -78,10 +122,20 @@ export function ChatPanel() {
     setPendingInterrupt(null);
     setError(null);
     try {
-      applyResult(await resumeChat(approved));
+      applyResult(await resumeChat(approved, appendToken));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setBusy(false);
+      handleStreamError(err);
+    }
+  }
+
+  async function handleStop() {
+    stopRequestedRef.current = true;
+    try {
+      await stopChat();
+    } catch {
+      // Best-effort — whether the stream actually ends is the real
+      // signal, handled by handleStreamError once sendChat/resumeChat's
+      // promise settles either way.
     }
   }
 
@@ -133,6 +187,14 @@ export function ChatPanel() {
               {message.content}
             </div>
           ))}
+          {streamingText && (
+            <div
+              data-testid="streaming-bubble"
+              className="max-w-[80%] self-start rounded-lg bg-muted px-3 py-2 text-sm whitespace-pre-wrap"
+            >
+              {streamingText}
+            </div>
+          )}
           {pendingInterrupt && (
             <InterruptGate
               payload={pendingInterrupt}
@@ -154,12 +216,19 @@ export function ChatPanel() {
           disabled={busy || pendingInterrupt !== null}
           className="min-h-[44px] flex-1 resize-none"
         />
-        <Button
-          onClick={() => void handleSend()}
-          disabled={busy || pendingInterrupt !== null || !input.trim()}
-        >
-          Send
-        </Button>
+        {busy ? (
+          <Button variant="outline" onClick={() => void handleStop()} className="gap-1.5">
+            <Square className="size-3.5 fill-current" />
+            Stop
+          </Button>
+        ) : (
+          <Button
+            onClick={() => void handleSend()}
+            disabled={busy || pendingInterrupt !== null || !input.trim()}
+          >
+            Send
+          </Button>
+        )}
       </div>
     </div>
   );

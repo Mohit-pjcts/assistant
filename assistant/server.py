@@ -31,12 +31,26 @@ manage the registry itself; switching or creating a thread changes the
 pointer, which is a deliberately GLOBAL, shared effect — same as it always
 implicitly was when there was only one thread, just now an explicit action
 instead of a hardcoded constant.
+
+Phase 14 streaming: `/chat` and `/resume` now return `text/event-stream`
+(Server-Sent Events) instead of a single JSON body, via
+`graph.astream_events()` instead of `graph.ainvoke()` — see `_stream_turn`'s
+own docstring for the full design, verified live against the real graph
+before being written (not assumed): interrupts do NOT appear as a stream
+event, so detection moved to a post-stream `graph.aget_state()` check;
+cancelling the underlying asyncio.Task (`POST /chat/stop`) leaves the
+checkpointer clean (an in-flight, uncompleted graph step is simply never
+persisted). The interrupt-payload-relayed-verbatim guarantee above is
+unchanged — only its transport changed, from one JSON object to the
+terminal SSE frame of a stream.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -51,6 +65,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 from langchain_core.messages import BaseMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
@@ -176,20 +191,97 @@ def _is_synthetic(message: BaseMessage) -> bool:
     return (not is_genuine_human_turn(message)) or is_compaction_summary(message)
 
 
-def _serialize_turn_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Shape a graph.ainvoke()/Command-resume result into the /chat and
-    /resume response body. An in-flight interrupt takes priority: the
-    client must resolve it via /resume before any further /chat calls are
-    meaningful (mirrors main.py's `while "__interrupt__" in result` loop,
-    just surfaced to an HTTP caller turn-by-turn instead of looped
-    in-process)."""
-    if "__interrupt__" in result:
-        # Passed through exactly as the tool constructed it (interrupts.py,
-        # memory_extraction.py) — no re-rendering, per this module's
-        # docstring.
-        return {"type": "interrupt", "payload": result["__interrupt__"][0].value}
-    final_message = result["messages"][-1]
-    return {"type": "message", "content": _render_content(final_message.content)}
+def _sse_event(payload: dict[str, Any]) -> bytes:
+    """One Server-Sent-Events frame. `\n\n` is the SSE frame terminator —
+    both newlines are required, not stylistic."""
+    return f"data: {json.dumps(payload)}\n\n".encode()
+
+
+def _extract_token_text(content: object) -> str:
+    """Pull the text delta out of one `on_chat_model_stream` chunk's
+    `.content` — verified against the REAL installed Anthropic integration
+    (langgraph 1.2.8) before writing this, not assumed: a content delta is
+    a list of blocks shaped like `{"type": "text", "text": "..."}` for
+    actual prose, but ALSO `{"type": "tool_use", ...}` /
+    `{"type": "input_json_delta", ...}` while a tool call is being
+    constructed — those must never reach the client as visible "typing"
+    text. Deliberately NOT `_render_content` here: that helper joins
+    multiple blocks with `\\n`, correct for rendering one COMPLETE final
+    message, wrong for concatenating a stream of small deltas of the same
+    running text (would inject spurious newlines between fragments)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts)
+
+
+async def _stream_turn(
+    graph: Any, thread_id: str, input_or_command: Any
+) -> AsyncIterator[bytes]:
+    """Stream one turn (a fresh message OR a Command(resume=...)) as SSE
+    frames: zero or more `{"type": "token", "text": ...}` deltas, followed
+    by exactly one terminal frame — `{"type": "interrupt", "payload": ...}`
+    or `{"type": "message", "content": ...}`.
+
+    Interrupt detection is the load-bearing part (CLAUDE.md's standing
+    confirmation-gate rule) and does NOT work the way the old
+    `ainvoke()`-based code did: verified live before writing this
+    (astream_events over a real gated-tool call) that a pending
+    `interrupt()` does NOT appear as an event in the stream at all — the
+    event stream simply ends once the graph suspends. The only reliable
+    way to detect it is `graph.aget_state()` AFTER the stream is
+    exhausted, checking `state.tasks[*].interrupts` — exactly what this
+    function does below. `pending[0]` mirrors the old
+    `result["__interrupt__"][0]` — taking the first is safe, never lossy,
+    because `NoParallelWrites`/`NoParallelHandoffs`/`NoParallelMacWrites`
+    already guarantee at most one gated call is ever pending at once.
+
+    Registers itself in `app.state.active_tasks[thread_id]` so `/chat/stop`
+    can cancel it — verified live that an external `task.cancel()` here
+    leaves the checkpointer in a clean state (the in-flight graph step
+    simply never completes and is never persisted; `state.next` reverts to
+    empty, same as if the turn had never been started at all), so stopping
+    mid-run cannot leave a corrupted or half-written checkpoint. The one
+    narrower, accepted risk — cancelling while a gated tool's OWN
+    side-effecting code is actually mid-flight, after its confirmation
+    check but before the real API call returns — is the same class of
+    tradeoff any agentic tool's "stop mid-tool-call" already accepts; nothing
+    about this design makes it worse than that baseline.
+    """
+    task = asyncio.current_task()
+    if task is not None:
+        app.state.active_tasks[thread_id] = task
+    try:
+        config = make_thread_config(thread_id)
+        async for event in graph.astream_events(input_or_command, config=config, version="v2"):
+            if event.get("event") != "on_chat_model_stream":
+                continue
+            text = _extract_token_text(event["data"]["chunk"].content)
+            if text:
+                yield _sse_event({"type": "token", "text": text})
+
+        state = await graph.aget_state(config)
+        pending = [i for t in state.tasks for i in t.interrupts]
+        if pending:
+            yield _sse_event({"type": "interrupt", "payload": pending[0].value})
+        else:
+            final_message = state.values["messages"][-1]
+            yield _sse_event({"type": "message", "content": _render_content(final_message.content)})
+        await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
+    except asyncio.CancelledError:
+        # /chat/stop already told its caller "stopped: true" — nothing left
+        # to signal here; letting this propagate closes the SSE connection,
+        # which is exactly what the client sees as "the stream stopped."
+        raise
+    except Exception as exc:  # network errors, rate limits, etc. — data, not a crash
+        yield _sse_event({"type": "error", "detail": f"{type(exc).__name__}: {exc}"})
+    finally:
+        app.state.active_tasks.pop(thread_id, None)
 
 
 class ChatRequest(BaseModel):
@@ -206,6 +298,10 @@ class ResumeRequest(BaseModel):
     approved: bool
     # Must match whichever thread_id the /chat call that produced the
     # pending interrupt used — same fallback-to-active-pointer default.
+    thread_id: str | None = None
+
+
+class StopRequest(BaseModel):
     thread_id: str | None = None
 
 
@@ -274,6 +370,10 @@ async def lifespan(app: FastAPI):
         # resolves its own thread_id per-request instead, since which
         # thread is "active" can now change between requests (a switch, a
         # new thread) within the same server process lifetime.
+        # Phase 14 streaming: one in-flight asyncio.Task per thread_id, so
+        # /chat/stop can find and cancel it. A plain dict is safe here —
+        # this server is single-process (uvicorn, no worker pool).
+        app.state.active_tasks = {}
         yield
 
 
@@ -303,31 +403,38 @@ app.add_middleware(
 
 
 @app.post("/chat")
-async def chat(request: ChatRequest) -> dict[str, Any]:
+async def chat(request: ChatRequest) -> StreamingResponse:
+    # Thread resolution happens BEFORE the stream starts, not inside the
+    # generator — an unknown explicit thread_id must still be a normal 404
+    # response (SSE only starts once we've already committed to a 200,
+    # since HTTP headers/status can't change after the body starts).
     thread_id = await _resolve_thread_id(request.thread_id)
-    try:
-        result = await app.state.graph.ainvoke(
-            {"messages": [("user", request.message)]},
-            config=make_thread_config(thread_id),
-        )
-    except Exception as exc:  # network errors, rate limits, etc. — data, not a crash
-        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
-    await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
-    return _serialize_turn_result(result)
+    input_ = {"messages": [("user", request.message)]}
+    return StreamingResponse(
+        _stream_turn(app.state.graph, thread_id, input_), media_type="text/event-stream"
+    )
 
 
 @app.post("/resume")
-async def resume(request: ResumeRequest) -> dict[str, Any]:
+async def resume(request: ResumeRequest) -> StreamingResponse:
     thread_id = await _resolve_thread_id(request.thread_id)
-    try:
-        result = await app.state.graph.ainvoke(
-            Command(resume=request.approved),
-            config=make_thread_config(thread_id),
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}") from exc
-    await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
-    return _serialize_turn_result(result)
+    return StreamingResponse(
+        _stream_turn(app.state.graph, thread_id, Command(resume=request.approved)),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/chat/stop")
+async def stop_chat(request: StopRequest) -> dict[str, Any]:
+    """Cancel whatever turn is currently streaming for a thread, if any.
+    See `_stream_turn`'s docstring for what cancellation actually leaves
+    behind in the checkpointer."""
+    thread_id = await _resolve_thread_id(request.thread_id)
+    task = app.state.active_tasks.get(thread_id)
+    if task is None or task.done():
+        return {"stopped": False}
+    task.cancel()
+    return {"stopped": True}
 
 
 @app.get("/threads")

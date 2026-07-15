@@ -58,14 +58,22 @@ export function HistoryPanel() {
             <p className="text-sm text-muted-foreground">No messages yet.</p>
           )}
           {messages.map((message, index) => (
-            <div key={index} className="rounded-md border p-2 text-sm" data-testid="history-row">
+            <div
+              key={index}
+              className="rounded-md border border-transparent bg-muted/40 p-2 text-sm"
+              data-testid="history-row"
+            >
               <div className="mb-1 flex flex-wrap items-center gap-1.5">
                 <Badge variant={message.role === "user" ? "default" : "secondary"}>
                   {message.role}
                 </Badge>
-                {message.name && <Badge variant="outline">{message.name}</Badge>}
+                {message.name && (
+                  <Badge variant="outline" className="font-mono text-[0.65rem]">
+                    {message.name}
+                  </Badge>
+                )}
                 {message.synthetic && (
-                  <Badge variant="outline" className="text-muted-foreground">
+                  <Badge variant="outline" className="font-mono text-[0.65rem] text-muted-foreground">
                     internal
                   </Badge>
                 )}

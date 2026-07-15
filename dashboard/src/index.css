@@ -1,13 +1,32 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
 
 @custom-variant dark (&:is(.dark *));
 
+/* Instrument-rail grammar (design pass, Phase 14): a left-edge rail is the
+   one recurring structural device across the app — blue (operator) means
+   "selected/active," copper (signal) means "pending approval," red (alarm)
+   means "irreversible delete." Kept as their own tokens rather than reusing
+   --primary/--destructive so the gate's copper never gets pulled toward
+   whatever --primary happens to be tuned to. */
 @theme inline {
-    --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
+    --font-heading: var(--font-display);
+    --font-display: 'Space Grotesk Variable', sans-serif;
+    --font-sans: 'IBM Plex Sans', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+    --color-operator: var(--operator);
+    --color-operator-foreground: var(--operator-foreground);
+    --color-signal: var(--signal);
+    --color-signal-foreground: var(--signal-foreground);
+    --color-alarm: var(--alarm);
+    --color-alarm-foreground: var(--alarm-foreground);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -49,72 +68,86 @@
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --background: #F6F7F9;
+    --foreground: #14171C;
+    --card: #FFFFFF;
+    --card-foreground: #14171C;
+    --popover: #FFFFFF;
+    --popover-foreground: #14171C;
+    --primary: #2F5FD1;
+    --primary-foreground: #FFFFFF;
+    --secondary: #EDEFF3;
+    --secondary-foreground: #14171C;
+    --muted: #EDEFF3;
+    --muted-foreground: #5B6270;
+    --accent: #E7EBF4;
+    --accent-foreground: #1B2A55;
+    --destructive: #C6323B;
+    --border: #E1E4E9;
+    --input: #E1E4E9;
+    --ring: #2F5FD1;
+    --chart-1: #2F5FD1;
+    --chart-2: #B45309;
+    --chart-3: #5B6270;
+    --chart-4: #1B2A55;
+    --chart-5: #9AA1AD;
+    --radius: 0.375rem;
+    --sidebar: #EEF0F4;
+    --sidebar-foreground: #14171C;
+    --sidebar-primary: #2F5FD1;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #E3E7EF;
+    --sidebar-accent-foreground: #14171C;
+    --sidebar-border: #E1E4E9;
+    --sidebar-ring: #2F5FD1;
+    /* Instrument-rail accents — see the block comment above @theme. */
+    --operator: #2F5FD1;
+    --operator-foreground: #FFFFFF;
+    --signal: #B45309;
+    --signal-foreground: #FFFFFF;
+    --alarm: #C6323B;
+    --alarm-foreground: #FFFFFF;
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --background: #0E1013;
+    --foreground: #E7E9EC;
+    --card: #16191F;
+    --card-foreground: #E7E9EC;
+    --popover: #16191F;
+    --popover-foreground: #E7E9EC;
+    --primary: #4C86FF;
+    --primary-foreground: #06122E;
+    --secondary: #1D2128;
+    --secondary-foreground: #E7E9EC;
+    --muted: #1D2128;
+    --muted-foreground: #9AA1AD;
+    --accent: #1B2740;
+    --accent-foreground: #C6D6FF;
+    --destructive: #E5484D;
+    --border: #262B33;
+    --input: #262B33;
+    --ring: #4C86FF;
+    --chart-1: #4C86FF;
+    --chart-2: #E8963C;
+    --chart-3: #9AA1AD;
+    --chart-4: #C6D6FF;
+    --chart-5: #5B6270;
+    --sidebar: #121419;
+    --sidebar-foreground: #E7E9EC;
+    --sidebar-primary: #4C86FF;
+    --sidebar-primary-foreground: #06122E;
+    --sidebar-accent: #1B2028;
+    --sidebar-accent-foreground: #E7E9EC;
+    --sidebar-border: #21252C;
+    --sidebar-ring: #4C86FF;
+    /* Instrument-rail accents — see the block comment above @theme. */
+    --operator: #4C86FF;
+    --operator-foreground: #06122E;
+    --signal: #E8963C;
+    --signal-foreground: #1A1000;
+    --alarm: #E5484D;
+    --alarm-foreground: #170406;
 }
 
 @layer base {
@@ -127,4 +160,18 @@
   html {
     @apply font-sans;
     }
+  h1, h2, h3 {
+    @apply font-heading;
+    }
+}
+
+/* Panel-label vernacular: uppercase, letter-spaced, Space Grotesk — used for
+   tab triggers, sidebar section headers, and gate eyebrow labels. A silkscreen
+   label reads as an instruction, not prose, so it earns its own utility class
+   rather than being redefined per component. */
+.panel-label {
+  font-family: var(--font-heading);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
 }

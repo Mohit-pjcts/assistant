@@ -12,15 +12,35 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+import os
+
 import assistant.tools as tools
 from assistant.mcp_tools import (
     _CALENDAR_BLOCKED_TOOLS,
     _MAX_RESULTS_CEILING,
+    _NODE_FALLBACK_PATHS,
     _block_calendar_writes,
     _cap_result_size,
     _confine_downloads_to_workspace,
+    _node_path,
 )
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest
+
+
+@contextmanager
+def _stripped_path_env() -> Iterator[None]:
+    """Simulate a GUI-launched process's minimal PATH (no /opt/homebrew/bin,
+    no ~/.zprofile additions) — the exact condition that broke Gmail/
+    Calendar tool loading once the app was packaged (STEPS.md 71/72
+    follow-up: FileNotFoundError: 'node', found live via the voice
+    daemon's own log after launching through the Tauri-built app)."""
+    original = os.environ.get("PATH")
+    os.environ["PATH"] = "/usr/bin:/bin"
+    try:
+        yield
+    finally:
+        if original is not None:
+            os.environ["PATH"] = original
 
 
 @contextmanager
@@ -164,6 +184,31 @@ def test_calendar_gated_write_tools_pass_through_this_interceptor() -> None:
         assert result == {"foo": "bar"}
 
 
+def test_node_path_falls_back_to_known_locations_when_path_is_stripped() -> None:
+    """Reproduces the exact failure mode found live (STEPS.md 71/72
+    follow-up): a GUI-launched process's PATH doesn't include
+    /opt/homebrew/bin, so a bare 'node' command lookup fails even though
+    node is genuinely installed. _node_path() must still find it via the
+    fallback list."""
+    with _stripped_path_env():
+        # shutil.which("node") must genuinely fail under this PATH for the
+        # test to mean anything — otherwise it isn't exercising the
+        # fallback branch at all.
+        import shutil
+
+        assert shutil.which("node") is None, "test setup invalid: node still on PATH"
+        found = _node_path()
+        assert found in _NODE_FALLBACK_PATHS
+        assert os.path.exists(found)
+
+
+def test_node_path_prefers_which_when_path_is_correct() -> None:
+    """The normal (Terminal-launched) case must keep working exactly as
+    before — no regression from adding the fallback."""
+    found = _node_path()
+    assert os.path.exists(found)
+
+
 if __name__ == "__main__":
     test_download_attachment_savepath_forced_into_workspace()
     print("OK: test_download_attachment_savepath_forced_into_workspace")
@@ -187,4 +232,8 @@ if __name__ == "__main__":
     print("OK: test_calendar_read_tools_pass_through")
     test_calendar_gated_write_tools_pass_through_this_interceptor()
     print("OK: test_calendar_gated_write_tools_pass_through_this_interceptor")
-    print("\n11 tests passed")
+    test_node_path_falls_back_to_known_locations_when_path_is_stripped()
+    print("OK: test_node_path_falls_back_to_known_locations_when_path_is_stripped")
+    test_node_path_prefers_which_when_path_is_correct()
+    print("OK: test_node_path_prefers_which_when_path_is_correct")
+    print("\n13 tests passed")

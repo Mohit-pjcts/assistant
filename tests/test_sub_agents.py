@@ -66,6 +66,19 @@ def test_mac_control_system_prompt_mentions_new_capabilities() -> None:
     assert "Brave" in prompt
 
 
+def test_mac_control_system_prompt_tells_model_to_call_gated_tools_directly() -> None:
+    """Phase 14 fix (STEPS.md 69 section 2's gate-UX-friction finding): the
+    model sometimes asked the user for confirmation in chat BEFORE calling
+    run_shortcut/calendar_create_event/calendar_update_event, instead of
+    just calling the tool and letting its own interrupt() fire — not a
+    security gap (the structural gate still held) but real friction.
+    LIFE_ADMIN_SYSTEM_PROMPT already had this exact instruction since Phase
+    12 (STEPS.md 63); MAC_CONTROL_SYSTEM_PROMPT never did until now."""
+    prompt = MAC_CONTROL_SYSTEM_PROMPT
+    assert "just call the tool directly" in prompt
+    assert "never ask the user to confirm in chat before calling it" in prompt
+
+
 if __name__ == "__main__":
     test_no_parallel_mac_writes_forces_parallel_tool_calls_false()
     print("OK: test_no_parallel_mac_writes_forces_parallel_tool_calls_false")
@@ -75,4 +88,6 @@ if __name__ == "__main__":
     print("OK: test_mac_control_tools_include_calendar_and_brave")
     test_mac_control_system_prompt_mentions_new_capabilities()
     print("OK: test_mac_control_system_prompt_mentions_new_capabilities")
-    print("\n4 tests passed")
+    test_mac_control_system_prompt_tells_model_to_call_gated_tools_directly()
+    print("OK: test_mac_control_system_prompt_tells_model_to_call_gated_tools_directly")
+    print("\n5 tests passed")

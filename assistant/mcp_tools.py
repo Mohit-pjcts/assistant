@@ -11,6 +11,7 @@ knows about the other.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -171,6 +172,34 @@ def _calendar_credentials_path() -> str:
     return path
 
 
+# Phase 14 packaging follow-up: a GUI-launched process (Tauri's app bundle,
+# or its spawned backend/voice-daemon children — STEPS.md 71/72) does NOT
+# inherit the user's interactive shell PATH (~/.zprofile etc.), only a
+# minimal default one — bare "node" resolves fine when this code runs from
+# a Terminal-launched process (main.py, or `uvicorn` started by hand) but
+# fails with FileNotFoundError once launched via the packaged app. Found
+# live: Gmail/Calendar tools silently unavailable, logged as a warning
+# rather than crashing (STEPS.md's "tool errors are data, not exceptions"
+# posture holds even for this setup-time failure). Resolved once via
+# `shutil.which` first (correct in every context where PATH IS right,
+# so this doesn't regress the normal Terminal-launched case) with a
+# Homebrew/system fallback list for the case where it isn't.
+_NODE_FALLBACK_PATHS = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
+
+
+def _node_path() -> str:
+    found = shutil.which("node")
+    if found:
+        return found
+    for candidate in _NODE_FALLBACK_PATHS:
+        if os.path.exists(candidate):
+            return candidate
+    raise RuntimeError(
+        "Could not find a 'node' executable (checked PATH and "
+        f"{_NODE_FALLBACK_PATHS}) — Gmail/Calendar MCP servers need it."
+    )
+
+
 async def load_mcp_tools() -> list[BaseTool]:
     """Load all tools from configured MCP servers.
 
@@ -181,16 +210,17 @@ async def load_mcp_tools() -> list[BaseTool]:
     Returns:
         Tools from every configured MCP server, ready to merge into TOOLS.
     """
+    node = _node_path()
     client = MultiServerMCPClient(
         {
             "gmail": {
                 "transport": "stdio",
-                "command": "node",
+                "command": node,
                 "args": [_gmail_server_path()],
             },
             "calendar": {
                 "transport": "stdio",
-                "command": "node",
+                "command": node,
                 "args": [_calendar_server_path()],
                 "env": {
                     "GOOGLE_OAUTH_CREDENTIALS": _calendar_credentials_path(),

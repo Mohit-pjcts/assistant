@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Phase 14 packaging fix (STEPS.md 71/72 follow-up): without this key,
+         macOS silently denies microphone access to the voice daemon (a
+         subprocess spawned by this app) instead of even showing a prompt,
+         once the daemon's "responsible process" became this app bundle
+         rather than Terminal.app. Symptom observed live: every utterance
+         transcribed as "Thank you." — mlx-whisper's classic hallucination
+         on silent/empty audio, not a transcription accuracy issue.
+         Tauri v2 merges this file's keys into the bundled Info.plist
+         automatically (same directory as tauri.conf.json). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>The voice daemon needs microphone access to hear your spoken requests.</string>
+</dict>
+</plist>

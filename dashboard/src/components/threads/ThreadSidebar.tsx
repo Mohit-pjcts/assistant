@@ -146,7 +146,7 @@ export function ThreadSidebar({ onActiveThreadChange }: ThreadSidebarProps) {
   }
 
   return (
-    <aside className="flex h-screen w-64 shrink-0 flex-col gap-2 border-r bg-muted/30 p-3">
+    <aside className="flex h-screen w-64 shrink-0 flex-col gap-3 border-r border-sidebar-border bg-sidebar p-3 text-sidebar-foreground">
       <Button
         size="sm"
         className="w-full justify-start gap-1.5"
@@ -156,9 +156,10 @@ export function ThreadSidebar({ onActiveThreadChange }: ThreadSidebarProps) {
         <MessageSquarePlus className="size-4" />
         New chat
       </Button>
+      <p className="panel-label px-1 text-[0.65rem] text-muted-foreground">Threads</p>
       {error && <p className="text-xs text-destructive">{error}</p>}
       <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-1" data-testid="thread-list">
+        <div className="flex flex-col gap-0.5" data-testid="thread-list">
           {threads.length === 0 && (
             <p className="px-2 py-1 text-xs text-muted-foreground">No conversations yet.</p>
           )}
@@ -185,13 +186,23 @@ export function ThreadSidebar({ onActiveThreadChange }: ThreadSidebarProps) {
             }
 
             return (
-              <div key={thread.id} className="group flex items-center gap-0.5">
+              // The Operator-blue rail on the left edge is this app's
+              // recurring "selected/active" signal (see index.css's block
+              // comment) — reused here instead of a plain background tint
+              // so the same visual grammar means the same thing everywhere.
+              <div key={thread.id} className="group relative flex items-center gap-0.5 rounded-md">
+                {isActive && (
+                  <span
+                    aria-hidden
+                    className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-operator"
+                  />
+                )}
                 <Button
                   variant={isActive ? "secondary" : "ghost"}
                   size="sm"
                   disabled={actionPending}
                   onClick={() => void handleSwitch(thread.id)}
-                  className={cn("min-w-0 flex-1 justify-start", isActive && "font-medium")}
+                  className={cn("min-w-0 flex-1 justify-start pl-3", isActive && "font-medium")}
                   data-testid="thread-item"
                   data-active={isActive}
                 >

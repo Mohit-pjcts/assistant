@@ -682,29 +682,62 @@ a fourth natural panel — "what the assistant knows about me."
 
 ---
 
-## Phase 10 — Proactivity + polish — PARKED (2026-07-14)
+## Phase 10 — Proactivity + polish — ACTIVE (resumed 2026-07-15)
 
-Deliberately parked mid-flight to start the write-access/browser/UI arc
-(Phases 11–14) while that work was top-of-mind. Nothing in Phase 10 was
-left half-implemented — it was still mostly at the checklist stage. Resumable
-at any time.
+Parked 2026-07-14 to run the write-access/browser/UI arc (Phases 11–14,
+plus the Phase 15 spinoff) while that work was top-of-mind. That arc is now
+complete. Resuming per the original park note. Nothing in Phase 10 was ever
+left half-implemented — it was still mostly at the checklist stage.
 
-**Explicitly deferred with it (do NOT lose this debt — it's the reason this
-park note is verbose):**
+**Re-check at resume time before treating any item as still open — one is
+already resolved:**
+- ~~Tauri shell doesn't spawn/kill the Python backend~~ — **DELIVERED as
+  part of Phase 14's mid-phase expansion** (STEPS.md 72): Tauri now owns
+  both the Python backend's and the voice daemon's process lifecycle.
+  Re-confirmed live at this resume checkpoint (2026-07-15): `ps` shows
+  `dashboard.app` as the direct `PPID` of both the running uvicorn backend
+  and `assistant-voice`; the old `com.mohitvuyyuru.assistant-voice` launchd
+  service is no longer registered at all. Genuinely closed, not rebuilt.
+
+**Scope cut at this resume checkpoint (2026-07-15, user's explicit call):**
+the morning briefing (calendar + unread email via launchd) — Phase 10's
+originally-planned "core build" — is DROPPED, not deferred. User doesn't
+want it. This changes Phase 10 from "polish debt + a new proactive feature"
+to "polish debt only" — there is no longer an unattended-cost/launchd-
+scheduling component to this phase at all.
+
+**Debt carried forward, still open:**
 - Voice ACCURACY still unresolved — Phase 8 fixed latency only; "mishears me"
   never proven fixed (n=3 benchmark). Larger benchmark + initial_prompt/VAD
   tuning, or a documented decision to accept as-is.
 - Extended thinking still globally DISABLED (STEPS.md 28) for a Studio-only
-  bug the CLI never hits — check for a langchain-anthropic fix past 1.4.8 and
-  re-enable, or decide explicitly to leave off.
+  bug the CLI never hits. Re-checked at this resume checkpoint: installed
+  `langchain-anthropic` is 1.4.8, which is also the current latest release on
+  PyPI — there is no newer version to check yet. Decision is binary: test
+  re-enabling now and see if the Studio-only bug still reproduces, or
+  explicitly document leave-off and revisit when a new release ships.
 - Haiku evaluation for research_agent, deferred since Phase 3 — decide on real
   LangSmith trace data (the Phase 9 Cost panel helps).
-- Tauri shell doesn't spawn/kill the Python backend yet (Phase 9) — uvicorn
-  started by hand; automate or document.
-- README refresh (portfolio-critical), pytest adoption, optional CI.
-- Core Phase 10 build itself: morning briefing (calendar + unread email) via
-  launchd, behind the hard unattended-cost gate (Console spend cap + per-run/
-  per-month estimate before anything is scheduled).
+- README refresh (portfolio-critical) — needs to also cover everything shipped
+  since the last refresh (Phases 11–15, plus Phase 14's Tauri packaging/
+  streaming work); pytest adoption; optional CI.
+
+**Steps:**
+0. **DONE (this resume checkpoint, 2026-07-15).** Re-scoped: confirmed the
+   Tauri process-lifecycle item live (see above), confirmed the extended-
+   thinking version state (1.4.8 is latest), and the user cut the morning
+   briefing from scope entirely. Agreed order for the rest: extended-thinking
+   recheck → Haiku eval decision → README refresh → pytest/CI → voice
+   accuracy.
+1. Close the remaining debt in that order (extended-thinking recheck, Haiku
+   eval decision, README refresh, pytest/CI, voice accuracy). None of it
+   carries unattended-cost risk — that risk left the phase with the briefing.
+2. Verify each piece live; update STEPS.md throughout.
+
+**Done-when:** every debt item above is either closed or has an explicit,
+documented accept-as-is decision; README reflects the project as it actually
+stands through Phase 15; STEPS.md updated. (No launchd/spend-cap criterion —
+removed with the briefing.)
 
 ---
 
@@ -952,12 +985,53 @@ project still has no code-change → running-process reload mechanism.
 
 ---
 
-## Phase 14 — UI rework — NOT STARTED
+## Phase 14 — UI rework — COMPLETE (2026-07-15)
 
 **Objective:** improve the Phase 9 dashboard — visual polish AND surfacing the
 new gated actions (email sends, calendar writes, browser opens) in one
 coherent approval experience. Uses the `frontend-design` skill (Anthropic
-first-party, the one skill kept from the 2026-07-14 cleanup).
+first-party, reinstalled this session after discovering it wasn't actually
+present despite CLAUDE.md's Phase 11 record claiming otherwise — STEPS.md 71).
+
+**Delivered so far (STEPS.md 71):** full visual redesign (dark-primary +
+light companion theme with a three-state toggle, Operator/Signal/Alarm
+rail-grammar token system, Space Grotesk/IBM Plex Sans/IBM Plex Mono
+typography) across all 4 panels + the sidebar + the gate; the 3 missing
+InterruptGate renderers (`run_shortcut`, Apple Calendar's
+`calendar_create_event`/`calendar_update_event`) that previously fell
+through to a raw-JSON fallback; step 4's gate-UX-friction fix
+(`MAC_CONTROL_SYSTEM_PROMPT` brought in line with
+`LIFE_ADMIN_SYSTEM_PROMPT`'s already-correct "just call the tool" wording);
+both of step 4's carried-forward Phase 12 gaps closed live
+(`update_calendar_event` round-trip, the injection-shaped-request
+scenario) with the security property re-verified end to end in the real
+window.
+
+**Mid-phase expansion, delivered (STEPS.md 72):** the user raised a larger
+ask mid-phase — standalone app packaging (Tauri owns the Python backend's
++ voice daemon's process lifecycle instead of either being started by
+hand), and streaming chat output with the ability to stop a turn mid-run.
+This maps onto Phase 9 step 7's deferred voice-in-app checkpoint, the
+Phase 10 park note's backend-lifecycle line, and CLAUDE.md's
+"Non-streaming CLI output for now... Streaming is a later UX pass"
+decision. Scoped at its own checkpoint (packaging: manage existing `.venv`
+processes, not a portable bundle; voice: process-lifecycle only, no Rust
+reimplementation of hotkey/mic/TTS; streaming: both `/chat` and `/resume`
+via SSE) and delivered sequenced — packaging, then voice, then streaming
+last since it's the piece touching the interrupt-detection path the
+gated-action security model depends on. All three live-verified,
+including a genuine test-harness limitation found and root-caused along
+the way (TestClient's synchronous portal can't reproduce true concurrent
+requests — the real stop-mid-run mechanism was instead verified with two
+genuinely concurrent curl processes against a live backend, and separately
+in the real Tauri dev window). One honest gap: the Tauri quit-time
+process-cleanup path is code-reviewed but not live-fire-verified (no way
+to drive a native macOS window from an agent session) — left for the user
+to confirm at their own convenience.
+
+Every item from both the original scope and this expansion is now done
+and live-verified. Status flipped to COMPLETE with the user's sign-off
+2026-07-15.
 
 **Why last in this arc:** by now email/calendar-write and browser-open all
 produce gated actions; the UI can present a unified "approval inbox" for every
