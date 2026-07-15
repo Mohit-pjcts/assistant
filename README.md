@@ -2,8 +2,6 @@
 
 A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI, an always-on voice daemon in the macOS menu bar, and a Tauri desktop dashboard — all three talking to the same conversation, the same memory, and the same graph. A supervisor routes each request to the right specialist sub-agent (coding, research, email/calendar, Mac control) and can chain several in one turn. Side-effectful actions — sending an email, creating a calendar event, running a Shortcut, writing a durable memory — always pause for an explicit confirmation first. The whole thing is built around the assumption that anything a tool returns (a search result, an email, a calendar event, a Note) could be adversarial.
 
-Not "Jarvis." Deliberately.
-
 ## What it can do today
 
 - Hold a conversation that persists across separate launches (SQLite-backed), routed by a supervisor to the right specialist sub-agent, with **multiple named conversation threads** you can create/switch/rename/delete from the CLI, voice, or the dashboard — not just one endless thread.
