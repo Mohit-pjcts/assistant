@@ -37,11 +37,11 @@ monkeypatch in tests.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator
 
 import aiosqlite
 
@@ -79,7 +79,7 @@ class Thread:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _resolve(db_path: Path | str | None) -> Path | str:

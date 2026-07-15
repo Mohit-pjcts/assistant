@@ -53,11 +53,23 @@ dev = [
     # __main__ runner blocks wrap each in asyncio.run()) — pytest can't
     # call an async test function without this plugin.
     "pytest-asyncio>=0.24.0",
+    # GitHub cleanup pass: lint/format, no prior tool configured.
+    "ruff>=0.8.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+# Long, information-dense comments/docstrings are this project's deliberate
+# style (see CLAUDE.md's Conventions) — not enforcing a wrap width on them.
+ignore = ["E501"]
 
 [project.scripts]
 assistant = "assistant.main:main"

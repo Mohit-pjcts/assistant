@@ -30,16 +30,28 @@ function App() {
         </header>
         <Tabs defaultValue="chat" className="min-h-0 flex-1">
           <TabsList variant="line" className="border-b border-border">
-            <TabsTrigger value="chat" className="panel-label text-xs after:bg-operator data-active:text-operator">
+            <TabsTrigger
+              value="chat"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
               Chat
             </TabsTrigger>
-            <TabsTrigger value="history" className="panel-label text-xs after:bg-operator data-active:text-operator">
+            <TabsTrigger
+              value="history"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
               History
             </TabsTrigger>
-            <TabsTrigger value="memory" className="panel-label text-xs after:bg-operator data-active:text-operator">
+            <TabsTrigger
+              value="memory"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
               Memory
             </TabsTrigger>
-            <TabsTrigger value="cost" className="panel-label text-xs after:bg-operator data-active:text-operator">
+            <TabsTrigger
+              value="cost"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
               Cost
             </TabsTrigger>
           </TabsList>

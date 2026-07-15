@@ -8,9 +8,10 @@ real project workspace or each other.
 import asyncio
 import tempfile
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, TypedDict
+from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
@@ -96,7 +97,7 @@ def test_shell_runs_safe_command_and_captures_output() -> None:
 
 
 def test_shell_runs_in_workspace_cwd() -> None:
-    with _temp_workspace() as workspace:
+    with _temp_workspace():
         tools.write_file.invoke({"path": "marker.txt", "content": "x"})
         result = tools.execute_shell_command.invoke({"command": "ls"})
         assert "marker.txt" in result

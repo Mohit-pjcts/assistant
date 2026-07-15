@@ -77,6 +77,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import rumps  # noqa: E402
+from langgraph.types import Command  # noqa: E402
 from pynput.keyboard import GlobalHotKeys  # noqa: E402
 from PyObjCTools import AppHelper  # noqa: E402
 
@@ -94,8 +95,6 @@ from assistant.voice_io import (  # noqa: E402
     speak,
     transcribe,
 )
-
-from langgraph.types import Command  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +318,7 @@ class VoiceDaemon:
         try:
             await asyncio.wait_for(self._answer_submitted.wait(), timeout=ANSWER_TIMEOUT_SECONDS)
             timed_out = False
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timed_out = True
 
         with self._lock:

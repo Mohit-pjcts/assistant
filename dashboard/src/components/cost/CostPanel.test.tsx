@@ -24,9 +24,30 @@ const emptyWindow = {
 const sampleStats = {
   project: "personal-assistant",
   windows: {
-    today: { ...emptyWindow, run_count: 5, total_tokens: 12345, prompt_tokens: 10000, completion_tokens: 2345, total_cost: 1.2345 },
-    week: { ...emptyWindow, run_count: 50, total_tokens: 123450, prompt_tokens: 100000, completion_tokens: 23450, total_cost: 12.345 },
-    all_time: { ...emptyWindow, run_count: 500, total_tokens: 1234500, prompt_tokens: 1000000, completion_tokens: 234500, total_cost: 123.45 },
+    today: {
+      ...emptyWindow,
+      run_count: 5,
+      total_tokens: 12345,
+      prompt_tokens: 10000,
+      completion_tokens: 2345,
+      total_cost: 1.2345,
+    },
+    week: {
+      ...emptyWindow,
+      run_count: 50,
+      total_tokens: 123450,
+      prompt_tokens: 100000,
+      completion_tokens: 23450,
+      total_cost: 12.345,
+    },
+    all_time: {
+      ...emptyWindow,
+      run_count: 500,
+      total_tokens: 1234500,
+      prompt_tokens: 1000000,
+      completion_tokens: 234500,
+      total_cost: 123.45,
+    },
   },
 };
 

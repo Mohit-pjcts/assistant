@@ -13,14 +13,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from langgraph.types import Command  # noqa: E402
+
 from assistant import thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
-
-from langgraph.types import Command  # noqa: E402
 
 EXIT_COMMANDS = {"exit", "quit"}
 

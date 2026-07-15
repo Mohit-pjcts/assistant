@@ -29,7 +29,12 @@ describe("HistoryPanel", () => {
     mockedFetchHistory.mockResolvedValue([
       { role: "user", content: "hello", synthetic: false, name: null },
       { role: "assistant", content: "", synthetic: false, name: "supervisor" },
-      { role: "tool", content: "Transferred to coding_agent.", synthetic: false, name: "transfer_to_coding_agent" },
+      {
+        role: "tool",
+        content: "Transferred to coding_agent.",
+        synthetic: false,
+        name: "transfer_to_coding_agent",
+      },
       { role: "assistant", content: "done", synthetic: false, name: "coding_agent" },
     ]);
 
@@ -61,21 +66,23 @@ describe("HistoryPanel", () => {
 
     expect(await screen.findByText("real question")).toBeInTheDocument();
     // Shown, not hidden — this is the key difference from ChatPanel.
-    expect(
-      await screen.findByText(/Routing note, not from the user/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Routing note, not from the user/)).toBeInTheDocument();
     expect(screen.getByText("internal")).toBeInTheDocument();
   });
 
   it("refetches when the Refresh button is clicked", async () => {
     const user = userEvent.setup();
-    mockedFetchHistory.mockResolvedValue([{ role: "user", content: "first", synthetic: false, name: null }]);
+    mockedFetchHistory.mockResolvedValue([
+      { role: "user", content: "first", synthetic: false, name: null },
+    ]);
 
     render(<HistoryPanel />);
     expect(await screen.findByText("first")).toBeInTheDocument();
     expect(mockedFetchHistory).toHaveBeenCalledTimes(1);
 
-    mockedFetchHistory.mockResolvedValue([{ role: "user", content: "second", synthetic: false, name: null }]);
+    mockedFetchHistory.mockResolvedValue([
+      { role: "user", content: "second", synthetic: false, name: null },
+    ]);
     await user.click(screen.getByRole("button", { name: /refresh/i }));
 
     await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalledTimes(2));

@@ -7,12 +7,13 @@ received is enough to verify what would actually be sent to the server.
 """
 
 import asyncio
+import os
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
-import os
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
 import assistant.tools as tools
 from assistant.mcp_tools import (
@@ -24,7 +25,6 @@ from assistant.mcp_tools import (
     _confine_downloads_to_workspace,
     _node_path,
 )
-from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
 
 @contextmanager

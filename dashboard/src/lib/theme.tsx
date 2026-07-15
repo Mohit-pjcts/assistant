@@ -38,7 +38,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     function resolve() {
-      const resolved: ResolvedTheme = theme === "system" ? (systemPrefersDark() ? "dark" : "light") : theme;
+      const resolved: ResolvedTheme =
+        theme === "system" ? (systemPrefersDark() ? "dark" : "light") : theme;
       setResolvedTheme(resolved);
       applyResolvedTheme(resolved);
     }
@@ -56,7 +57,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <ThemeContext.Provider value={{ theme, resolvedTheme, setTheme }}>{children}</ThemeContext.Provider>
+    <ThemeContext.Provider value={{ theme, resolvedTheme, setTheme }}>
+      {children}
+    </ThemeContext.Provider>
   );
 }
 

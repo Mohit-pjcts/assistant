@@ -25,8 +25,8 @@ from assistant.compaction import (
     is_compaction_summary,
     is_genuine_human_turn,
 )
-from assistant.supervisor import _make_routing_bridge
 from assistant.sub_agents import SubAgentWindowMiddleware
+from assistant.supervisor import _make_routing_bridge
 
 
 def _transfer_tool_message(agent_name: str) -> ToolMessage:

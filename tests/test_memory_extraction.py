@@ -21,6 +21,7 @@ from langgraph.types import Command
 
 import assistant.memory_extraction as memory_extraction
 import assistant.memory_store as memory_store
+from assistant.memory import get_checkpointer
 from assistant.memory_extraction import (
     ProposedFact,
     _cap_proposed_facts,
@@ -28,7 +29,6 @@ from assistant.memory_extraction import (
     _most_recent_tool_result_this_turn,
     extract_and_propose_memory_node,
 )
-from assistant.memory import get_checkpointer
 
 
 def _transfer_tool_message(agent_name: str) -> ToolMessage:

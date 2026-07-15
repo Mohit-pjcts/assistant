@@ -37,8 +37,7 @@ export type InterruptPayload = Record<string, unknown> & {
 };
 
 export type ChatTurnResult =
-  | { type: "message"; content: string }
-  | { type: "interrupt"; payload: InterruptPayload };
+  { type: "message"; content: string } | { type: "interrupt"; payload: InterruptPayload };
 
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -164,7 +163,10 @@ export interface ThreadSummary {
   last_active_at: string;
 }
 
-export async function fetchThreads(): Promise<{ threads: ThreadSummary[]; activeThreadId: string }> {
+export async function fetchThreads(): Promise<{
+  threads: ThreadSummary[];
+  activeThreadId: string;
+}> {
   const response = await fetch(`${API_BASE_URL}/threads`);
   if (!response.ok) {
     throw new Error(`/threads failed (${response.status}): ${await response.text()}`);
@@ -188,7 +190,9 @@ export async function renameThread(threadId: string, title: string): Promise<Thr
     body: JSON.stringify({ title }),
   });
   if (!response.ok) {
-    throw new Error(`rename /threads/${threadId} failed (${response.status}): ${await response.text()}`);
+    throw new Error(
+      `rename /threads/${threadId} failed (${response.status}): ${await response.text()}`,
+    );
   }
   return response.json() as Promise<ThreadSummary>;
 }
@@ -202,7 +206,9 @@ export async function renameThread(threadId: string, title: string): Promise<Thr
 export async function deleteThread(threadId: string): Promise<{ activeThreadId: string }> {
   const response = await fetch(`${API_BASE_URL}/threads/${threadId}`, { method: "DELETE" });
   if (!response.ok) {
-    throw new Error(`delete /threads/${threadId} failed (${response.status}): ${await response.text()}`);
+    throw new Error(
+      `delete /threads/${threadId} failed (${response.status}): ${await response.text()}`,
+    );
   }
   const body = (await response.json()) as { deleted: boolean; active_thread_id: string };
   return { activeThreadId: body.active_thread_id };
@@ -239,7 +245,9 @@ export async function fetchMemoryFacts(): Promise<MemoryFact[]> {
 export async function deleteMemoryFact(id: number): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/memory/facts/${id}`, { method: "DELETE" });
   if (!response.ok) {
-    throw new Error(`delete /memory/facts/${id} failed (${response.status}): ${await response.text()}`);
+    throw new Error(
+      `delete /memory/facts/${id} failed (${response.status}): ${await response.text()}`,
+    );
   }
 }
 

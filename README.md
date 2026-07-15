@@ -38,6 +38,9 @@ assistant/
 │                            local wrappers that call interrupt() themselves and show the
 │                            verbatim payload (the raw MCP write tools never reach a model)
 ├── mcp_tools.py           # MCP integration: Gmail + Calendar, async, with interceptors
+├── server.py              # FastAPI wrapper over the graph — /chat, /resume (SSE streaming +
+│                            stop-mid-run), /history, /memory/facts, /cost, /threads; shares the
+│                            CLI/voice daemon's real checkpointer + active-thread pointer
 ├── interrupts.py          # Dummy confirmation-gated tool — the interrupt mechanic's test fixture
 ├── compaction.py          # Short-term context compaction + per-sub-agent history windowing
 ├── memory_store.py        # Long-term durable-facts storage (separate SQLite file)
@@ -228,7 +231,7 @@ See [PLAN.md](PLAN.md) for the full phase-by-phase plan.
 7. ✅ Memory — short-term compaction + long-term automatic-write facts, behind a layered, red-teamed security design
 8. ✅ Voice upgrade — STT swapped to `mlx-whisper large-v3` (6-8x latency win)
 9. ✅ Tauri desktop dashboard — chat/history/memory/cost panels as a peer client of the graph
-10. 🔄 **Active** — polish-debt cleanup: extended thinking re-enabled behind a verified repair middleware, Haiku-for-research_agent evaluated (stays on Sonnet 5), pytest adopted; remaining: README (this refresh), voice-accuracy re-benchmark
+10. 🔄 **Active** (pending sign-off) — proactivity + polish: extended thinking re-enabled behind a verified repair middleware, Haiku-for-research_agent evaluated (stays on Sonnet 5), pytest adopted (CI declined by choice), README refreshed, voice accuracy accepted as-is — every debt item is closed or explicitly accepted; the originally-planned morning-briefing feature was cut from scope entirely
 11. ✅ Skills cleanup + a standing skill-vetting policy
 12. ✅ Email + Google Calendar WRITE access — gated send/modify/create/update/delete, verbatim confirmation
 13. ✅ Apple Calendar (read + gated write) + open-URL-in-Brave

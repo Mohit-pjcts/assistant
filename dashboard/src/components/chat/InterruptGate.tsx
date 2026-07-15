@@ -40,7 +40,8 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   create_calendar_event: "The assistant wants to create this calendar event:",
   update_calendar_event: "The assistant wants to update this calendar event:",
   delete_calendar_event: "The assistant wants to delete this calendar event:",
-  create_gmail_filter: "The assistant wants to create this Gmail filter — a STANDING rule that will keep acting on every future matching email:",
+  create_gmail_filter:
+    "The assistant wants to create this Gmail filter — a STANDING rule that will keep acting on every future matching email:",
   delete_gmail_filter: "The assistant wants to delete this Gmail filter:",
   run_shortcut: "The assistant wants to run this Shortcut:",
   calendar_create_event: "The assistant wants to create this Apple Calendar event:",
@@ -154,7 +155,11 @@ function EventFields({ event, testId }: { event: Record<string, unknown>; testId
         value={
           f.attendees.length > 0
             ? f.attendees
-                .map((a) => (a && typeof a === "object" ? String((a as Record<string, unknown>).email ?? a) : String(a)))
+                .map((a) =>
+                  a && typeof a === "object"
+                    ? String((a as Record<string, unknown>).email ?? a)
+                    : String(a),
+                )
                 .join(", ")
             : "(none)"
         }
@@ -226,9 +231,7 @@ function CreateFilterGateBody({ payload }: { payload: InterruptPayload }) {
 }
 
 function DeleteFilterGateBody({ payload }: { payload: InterruptPayload }) {
-  return (
-    <VerbatimBlock testId="interrupt-filter-verbatim">{str(payload.filter)}</VerbatimBlock>
-  );
+  return <VerbatimBlock testId="interrupt-filter-verbatim">{str(payload.filter)}</VerbatimBlock>;
 }
 
 // Apple Calendar (mac_tools.py, Phase 13) event fields — a DIFFERENT shape
@@ -299,18 +302,19 @@ function RunShortcutGateBody({ payload }: { payload: InterruptPayload }) {
   return <Field label="Shortcut" value={str(payload.name, "(unnamed)")} />;
 }
 
-const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => React.ReactElement> = {
-  send_email: EmailGateBody,
-  modify_gmail_labels: LabelModifyGateBody,
-  create_calendar_event: CreateEventGateBody,
-  update_calendar_event: UpdateEventGateBody,
-  delete_calendar_event: DeleteEventGateBody,
-  create_gmail_filter: CreateFilterGateBody,
-  delete_gmail_filter: DeleteFilterGateBody,
-  run_shortcut: RunShortcutGateBody,
-  calendar_create_event: AppleCalendarCreateEventGateBody,
-  calendar_update_event: AppleCalendarUpdateEventGateBody,
-};
+const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => React.ReactElement> =
+  {
+    send_email: EmailGateBody,
+    modify_gmail_labels: LabelModifyGateBody,
+    create_calendar_event: CreateEventGateBody,
+    update_calendar_event: UpdateEventGateBody,
+    delete_calendar_event: DeleteEventGateBody,
+    create_gmail_filter: CreateFilterGateBody,
+    delete_gmail_filter: DeleteFilterGateBody,
+    run_shortcut: RunShortcutGateBody,
+    calendar_create_event: AppleCalendarCreateEventGateBody,
+    calendar_update_event: AppleCalendarUpdateEventGateBody,
+  };
 
 // The confirmation-gate UI affordance PLAN.md's Phase 9 step 3 requires.
 // Renders whatever raw payload the gated tool constructed — never
@@ -359,7 +363,9 @@ export function InterruptGate({ payload, onApprove, onDecline, disabled }: Inter
             <Badge
               variant="outline"
               className="gap-1 text-[0.65rem] text-muted-foreground"
-              title={voiceApprovable ? "Can be approved by voice" : "Text-only — not voice-approvable"}
+              title={
+                voiceApprovable ? "Can be approved by voice" : "Text-only — not voice-approvable"
+              }
             >
               {voiceApprovable ? <Mic className="size-3" /> : <Keyboard className="size-3" />}
               {voiceApprovable ? "Voice OK" : "Text only"}

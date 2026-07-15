@@ -15,7 +15,6 @@ import asyncio
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.graph import END
 from langgraph.types import Command
 
 from assistant.supervisor import (

@@ -331,7 +331,10 @@ describe("ChatPanel", () => {
     const user = userEvent.setup();
     render(<ChatPanel />);
     await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
-    await user.type(screen.getByPlaceholderText(/message the assistant/i), "cancel my dentist appt");
+    await user.type(
+      screen.getByPlaceholderText(/message the assistant/i),
+      "cancel my dentist appt",
+    );
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     const fields = await screen.findByTestId("interrupt-event-fields");

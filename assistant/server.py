@@ -52,7 +52,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from dotenv import load_dotenv
@@ -66,10 +66,10 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
 from langchain_core.messages import BaseMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 from langsmith import Client as LangSmithClient  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 from assistant import memory_store, thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
@@ -569,7 +569,7 @@ async def cost() -> dict[str, Any]:
             detail="LangSmith not configured (LANGSMITH_API_KEY missing or invalid)",
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async def _window(delta: timedelta | None) -> dict[str, Any]:
         start_time = (now - delta).isoformat() if delta else None

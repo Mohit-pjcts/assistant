@@ -411,7 +411,7 @@ async def test_delete_non_active_thread_leaves_pointer_unchanged() -> None:
 
 async def test_delete_active_thread_reassigns_the_pointer() -> None:
     with TestClient(server.app) as client:
-        other = client.post("/threads", json={"title": "other"}).json()
+        client.post("/threads", json={"title": "other"})
         active = client.post("/threads", json={"title": "active"}).json()
         # "active" is the pointer now (POST /threads always activates).
 

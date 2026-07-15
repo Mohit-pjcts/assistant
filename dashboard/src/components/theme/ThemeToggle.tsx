@@ -9,7 +9,11 @@ const NEXT: Record<Theme, Theme> = { system: "light", light: "dark", dark: "syst
 
 const ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 
-const LABEL = { system: "Following system appearance", light: "Light theme", dark: "Dark theme" } as const;
+const LABEL = {
+  system: "Following system appearance",
+  light: "Light theme",
+  dark: "Dark theme",
+} as const;
 
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();

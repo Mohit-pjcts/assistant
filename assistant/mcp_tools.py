@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from dotenv import load_dotenv
 from langchain_core.tools import BaseTool

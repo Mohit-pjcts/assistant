@@ -73,7 +73,10 @@ export function HistoryPanel() {
                   </Badge>
                 )}
                 {message.synthetic && (
-                  <Badge variant="outline" className="font-mono text-[0.65rem] text-muted-foreground">
+                  <Badge
+                    variant="outline"
+                    className="font-mono text-[0.65rem] text-muted-foreground"
+                  >
                     internal
                   </Badge>
                 )}

@@ -41,7 +41,12 @@ describe("ThreadSidebar", () => {
   it("lists threads and highlights the active one, reporting it to the parent", async () => {
     mockedFetchThreads.mockResolvedValue({
       threads: [
-        { id: "t1", title: "Trip planning", created_at: "x", last_active_at: "2026-07-15T00:00:00Z" },
+        {
+          id: "t1",
+          title: "Trip planning",
+          created_at: "x",
+          last_active_at: "2026-07-15T00:00:00Z",
+        },
         { id: "t2", title: null, created_at: "x", last_active_at: "2026-07-14T00:00:00Z" },
       ],
       activeThreadId: "t1",
@@ -73,7 +78,12 @@ describe("ThreadSidebar", () => {
       ],
       activeThreadId: "t1",
     });
-    mockedSetActiveThread.mockResolvedValue({ id: "t2", title: "Other thread", created_at: "x", last_active_at: "x" });
+    mockedSetActiveThread.mockResolvedValue({
+      id: "t2",
+      title: "Other thread",
+      created_at: "x",
+      last_active_at: "x",
+    });
 
     const { onActiveThreadChange } = renderSidebar();
     await screen.findByRole("button", { name: "Other thread" });
@@ -91,7 +101,12 @@ describe("ThreadSidebar", () => {
   it("creates a new chat via the New chat button", async () => {
     const user = userEvent.setup();
     mockedFetchThreads.mockResolvedValue({ threads: [], activeThreadId: "" });
-    mockedCreateThread.mockResolvedValue({ id: "new-1", title: null, created_at: "x", last_active_at: "x" });
+    mockedCreateThread.mockResolvedValue({
+      id: "new-1",
+      title: null,
+      created_at: "x",
+      last_active_at: "x",
+    });
 
     const { onActiveThreadChange } = renderSidebar();
     await waitFor(() => expect(mockedFetchThreads).toHaveBeenCalledTimes(1));
@@ -109,7 +124,12 @@ describe("ThreadSidebar", () => {
       threads: [{ id: "t1", title: "Old title", created_at: "x", last_active_at: "x" }],
       activeThreadId: "t1",
     });
-    mockedRenameThread.mockResolvedValue({ id: "t1", title: "New title", created_at: "x", last_active_at: "x" });
+    mockedRenameThread.mockResolvedValue({
+      id: "t1",
+      title: "New title",
+      created_at: "x",
+      last_active_at: "x",
+    });
 
     renderSidebar();
     await screen.findByRole("button", { name: "Old title" });

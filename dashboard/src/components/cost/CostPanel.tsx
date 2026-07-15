@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  fetchCost,
-  LangSmithNotConfiguredError,
-  type CostStats,
-  type CostWindow,
-} from "@/lib/api";
+import { fetchCost, LangSmithNotConfiguredError, type CostStats, type CostWindow } from "@/lib/api";
 
 // PLAN.md Phase 9 step 6, the last of the initial panel set — real
 // LangSmith token/cost aggregates (server.py's /cost), not a locally
@@ -96,8 +91,8 @@ export function CostPanel() {
       </div>
       {notConfigured && (
         <p className="text-sm text-muted-foreground">
-          LangSmith isn&apos;t configured (missing or invalid LANGSMITH_API_KEY) — cost tracking
-          is unavailable until it is.
+          LangSmith isn&apos;t configured (missing or invalid LANGSMITH_API_KEY) — cost tracking is
+          unavailable until it is.
         </p>
       )}
       {error && <p className="text-sm text-destructive">{error}</p>}

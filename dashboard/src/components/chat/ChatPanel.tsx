@@ -154,9 +154,7 @@ export function ChatPanel() {
   // 4) is where full transcript fidelity belongs, not this live chat view.
   const visibleMessages = messages.filter(
     (m) =>
-      (m.role === "user" || m.role === "assistant") &&
-      m.content.trim().length > 0 &&
-      !m.synthetic,
+      (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0 && !m.synthetic,
   );
 
   return (
@@ -171,9 +169,7 @@ export function ChatPanel() {
           to vitest. */}
       <ScrollArea className="min-h-0 flex-1 rounded-md border p-4">
         <div className="flex flex-col gap-3">
-          {!historyLoaded && (
-            <p className="text-sm text-muted-foreground">Loading conversation…</p>
-          )}
+          {!historyLoaded && <p className="text-sm text-muted-foreground">Loading conversation…</p>}
           {visibleMessages.map((message, index) => (
             <div
               key={index}

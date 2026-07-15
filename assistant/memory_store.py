@@ -19,11 +19,11 @@ small. Revisit if fact volume ever outgrows keyword matching.
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator
 
 import aiosqlite
 
@@ -77,7 +77,7 @@ async def save_fact(
     parameter default is bound once at function-definition time and would
     silently ignore a later monkeypatch (caught by a real test failure)."""
     db_path = db_path if db_path is not None else DEFAULT_DB_PATH
-    created_at = datetime.now(timezone.utc).isoformat()
+    created_at = datetime.now(UTC).isoformat()
     async with _connect(db_path) as db:
         cursor = await db.execute(
             "INSERT INTO facts (content, provenance, created_at) VALUES (?, ?, ?)",
