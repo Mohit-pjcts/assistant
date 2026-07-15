@@ -26,9 +26,17 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   backend/voice-daemon process-lifecycle item was re-confirmed live (not
   rebuilt) — see PLAN.md. The morning briefing (the phase's original "core
   build") was CUT from scope entirely at the user's explicit direction, not
-  deferred — Phase 10 is now polish-debt-only (voice accuracy,
-  extended-thinking recheck, Haiku eval, README/pytest/CI). Read PLAN.md's
-  Phase 10 section before doing any work.
+  deferred. Extended thinking is CLOSED (STEPS.md 74) — re-enabled on all 5
+  agent models behind a verified repair middleware for the bug that
+  originally forced it off (see the Load-bearing decisions section below).
+  Haiku eval CLOSED (STEPS.md 75, stays on Sonnet 5); pytest adopted, CI
+  declined (STEPS.md 76); README fully refreshed (STEPS.md 77); voice
+  accuracy accepted as-is, user's explicit call (STEPS.md 78). Every debt
+  item is now closed or explicitly accepted — Phase 10's done-when
+  criteria are met. Still labeled ACTIVE pending the user's sign-off to
+  flip it to COMPLETE (this file's own process: status edits happen only
+  with explicit approval). Read PLAN.md's Phase 10 section before doing
+  any work.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -211,6 +219,36 @@ STEPS.md                    # build log
 - **Checkpointer lifecycle:** main.py owns the `with get_checkpointer()` block
   for the process lifetime and passes it into `build_agent()`. agent.py never
   creates its own.
+- **Extended thinking: enabled (`thinking={"type": "adaptive"}`) on all 5
+  agent models, ALWAYS paired with `ThinkingBlockRepairMiddleware`
+  (superseded Phase 10, 2026-07-15, STEPS.md 74 — reverses the Phase 1/
+  Studio-era `thinking={"type": "disabled"}` fix from STEPS.md 28):
+  `langchain-anthropic`==1.4.8 (still latest on PyPI, no upstream fix
+  exists) has a confirmed SSE-chunk-merging bug that can drop a streamed
+  thinking block's required `thinking` field, which Anthropic's API then
+  rejects on replay (`messages.N.content.0.thinking.thinking: Field
+  required`) — live-reproduced against the real API at this decision
+  point, not just cited from the old record. Only affects streaming callers
+  (LangGraph Studio, and since Phase 14, the dashboard's `/chat`/`/resume`
+  SSE path via `astream_events`) — the CLI/voice daemon's non-streaming
+  `ainvoke()` was never at risk either way. Rather than disable thinking
+  project-wide again, `assistant/thinking_repair.py`'s
+  `ThinkingBlockRepairMiddleware` patches the exact malformed shape
+  (adds `"thinking": ""`, which fabricates nothing — that's the same value
+  Anthropic's own non-streaming path already returns for an empty thinking
+  block) on every model response before it can reach graph state.
+  Live-verified against the real API (unpatched replay 400s, patched
+  replay succeeds) and against the real graph end-to-end (a genuine
+  two-hop streamed turn — supervisor → research_agent → back through the
+  Phase 6 loop-back → coding_agent — completed cleanly with 0 malformed
+  blocks surviving in the persisted history). **Any new model construction
+  in supervisor.py/sub_agents.py that enables thinking MUST include this
+  middleware in its middleware list** — the bug is in the underlying
+  library, not one call site, so a new agent added without it is
+  vulnerable the moment its own multi-turn tool loop replays a thinking
+  block. `compaction.py`/`memory_extraction.py`'s Haiku calls stay
+  `thinking={"type": "disabled"}` deliberately (single-shot classification/
+  summarization, no orchestration reasoning to gain).
 - **Active-thread pointer, not a fixed `THREAD_ID` constant (superseded
   Phase 15, 2026-07-15):** every client previously shared one hardcoded
   `THREAD_ID = "cli-default-thread"`, which was fine until concurrent real

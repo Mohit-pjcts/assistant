@@ -44,7 +44,20 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "langgraph-cli[inmem]>=0.4.0",
+    # Phase 10: adopted so `pytest` can run/collect the existing plain-
+    # function test files (tests/ was already pytest-shaped — assert-based,
+    # test_*.py/test_* naming — just run via `python tests/test_x.py`
+    # before this). No test rewrites needed.
+    "pytest>=8.0.0",
+    # Several test files use `async def test_...` directly (their own
+    # __main__ runner blocks wrap each in asyncio.run()) — pytest can't
+    # call an async test function without this plugin.
+    "pytest-asyncio>=0.24.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [project.scripts]
 assistant = "assistant.main:main"

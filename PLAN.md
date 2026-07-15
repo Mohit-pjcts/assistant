@@ -706,38 +706,76 @@ want it. This changes Phase 10 from "polish debt + a new proactive feature"
 to "polish debt only" — there is no longer an unattended-cost/launchd-
 scheduling component to this phase at all.
 
-**Debt carried forward, still open:**
-- Voice ACCURACY still unresolved — Phase 8 fixed latency only; "mishears me"
-  never proven fixed (n=3 benchmark). Larger benchmark + initial_prompt/VAD
-  tuning, or a documented decision to accept as-is.
-- Extended thinking still globally DISABLED (STEPS.md 28) for a Studio-only
-  bug the CLI never hits. Re-checked at this resume checkpoint: installed
-  `langchain-anthropic` is 1.4.8, which is also the current latest release on
-  PyPI — there is no newer version to check yet. Decision is binary: test
-  re-enabling now and see if the Studio-only bug still reproduces, or
-  explicitly document leave-off and revisit when a new release ships.
-- Haiku evaluation for research_agent, deferred since Phase 3 — decide on real
-  LangSmith trace data (the Phase 9 Cost panel helps).
-- README refresh (portfolio-critical) — needs to also cover everything shipped
-  since the last refresh (Phases 11–15, plus Phase 14's Tauri packaging/
-  streaming work); pytest adoption; optional CI.
+**Debt carried forward, still open:** none — see below, everything is
+closed or explicitly accepted as-is.
+
+**Debt CLOSED this phase:**
+- ~~Voice ACCURACY~~ — **ACCEPTED AS-IS 2026-07-15 (STEPS.md 78), user's
+  explicit call ("its good as it is").** Phase 8 fixed latency only; the
+  n=3 benchmark never proved accuracy improved, but the user chose not to
+  run a larger benchmark this phase. Documented decision, not a silent
+  default — matches this phase's own done-when bar (closed, or an
+  explicit accept-as-is).
+- ~~README refresh~~ — **DONE 2026-07-15 (STEPS.md 77).** Full rewrite —
+  was stale since Phase 5. Now covers write access, Apple Calendar/Brave,
+  memory (compaction + long-term facts), the Tauri dashboard, multi-thread
+  support, and the thinking-repair middleware; roadmap lists all 15
+  phases; Development section uses `pytest`.
+- ~~pytest adoption~~ — **DONE 2026-07-15 (STEPS.md 76).** `pytest` +
+  `pytest-asyncio` added; `tests/` was already pytest-shaped, no test
+  rewrites needed. 160/160 pass.
+- ~~Optional CI~~ — **DECLINED 2026-07-15 (STEPS.md 76), user's explicit
+  choice.** The no-mocking test convention means CI would call real paid
+  APIs on every push or be scoped down to lint-only; presented both plus
+  skipping, user chose to skip. Documented accept-as-is, not an oversight.
+- ~~Extended thinking globally disabled~~ — **RESOLVED 2026-07-15 (STEPS.md
+  74), reopened rather than just rechecked.** The Studio-only bug (STEPS.md
+  28) was re-verified live against the real API (still present, and its
+  blast radius grew to include the dashboard's SSE streaming, not just
+  Studio) and then actually fixed: `assistant/thinking_repair.py`'s
+  `ThinkingBlockRepairMiddleware` neutralizes the exact malformed-
+  thinking-block shape, verified against the real API (unpatched replay
+  400s, patched replay succeeds) and against the real graph end-to-end (a
+  genuine two-hop streamed turn — the scenario most likely to replay a
+  thinking block — completed cleanly with 0 malformed blocks surviving).
+  `thinking={"type": "adaptive"}` is back on all 5 agent models (user's
+  explicit scope choice: everywhere, not just the supervisor). Also fixed
+  the motivating example directly: `SUPERVISOR_SYSTEM_PROMPT` now tells the
+  supervisor to resolve objective ambiguity (current time/timezone, etc.)
+  via research_agent rather than asking the user or guessing.
+- ~~Haiku evaluation for research_agent~~ — **DECIDED 2026-07-15 (STEPS.md
+  75): stays on `claude-sonnet-5`.** Real LangSmith trace data (49 calls,
+  ~$0.575 actual Sonnet 5 cost vs. an estimated ~$0.287 on Haiku) plus a
+  live 6-query benchmark against real historical queries, same prompt/tool/
+  middleware, model swapped. Haiku matched quality on straightforward
+  lookups and was faster/cheaper, but failed a real "what happened today"
+  query by getting confused about the current date — directly undercutting
+  this session's own new supervisor behavior (resolving current-date/time
+  ambiguity via research_agent). Decided, not deferred again.
 
 **Steps:**
 0. **DONE (this resume checkpoint, 2026-07-15).** Re-scoped: confirmed the
-   Tauri process-lifecycle item live (see above), confirmed the extended-
-   thinking version state (1.4.8 is latest), and the user cut the morning
-   briefing from scope entirely. Agreed order for the rest: extended-thinking
-   recheck → Haiku eval decision → README refresh → pytest/CI → voice
-   accuracy.
-1. Close the remaining debt in that order (extended-thinking recheck, Haiku
-   eval decision, README refresh, pytest/CI, voice accuracy). None of it
-   carries unattended-cost risk — that risk left the phase with the briefing.
-2. Verify each piece live; update STEPS.md throughout.
+   Tauri process-lifecycle item live (see above), and the user cut the
+   morning briefing from scope entirely. Agreed order for the rest:
+   extended-thinking recheck → Haiku eval decision → README refresh →
+   pytest/CI → voice accuracy.
+1. **DONE (STEPS.md 74).** Extended thinking: reopened past a simple recheck
+   into an actual fix (see above) at the user's request.
+2. **DONE (STEPS.md 75).** Haiku eval: decided via real trace data + a real
+   live benchmark, stays on Sonnet 5 (see above).
+3. **DONE (STEPS.md 76).** pytest adopted (160/160 pass); CI declined,
+   user's explicit choice.
+4. **DONE (STEPS.md 77).** README refresh — full rewrite, was stale since
+   Phase 5.
+5. **DONE (STEPS.md 78).** Voice accuracy — accepted as-is, user's explicit
+   call.
+6. Verify each piece live; update STEPS.md throughout. **All done.**
 
-**Done-when:** every debt item above is either closed or has an explicit,
-documented accept-as-is decision; README reflects the project as it actually
-stands through Phase 15; STEPS.md updated. (No launchd/spend-cap criterion —
-removed with the briefing.)
+**Done-when (met 2026-07-15):** every debt item above is either closed or
+has an explicit, documented accept-as-is decision ✓; README reflects the
+project as it actually stands through Phase 15 ✓; STEPS.md updated
+throughout (groups 73–78) ✓. Status flip to COMPLETE pending the user's
+sign-off per CLAUDE.md's Git rules — not flipped in this entry.
 
 ---
 

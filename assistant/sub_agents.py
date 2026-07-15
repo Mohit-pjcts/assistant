@@ -6,14 +6,18 @@ supervisor.py) and inherited automatically via nested checkpoint_ns when
 these are embedded as outer-graph nodes (verified directly against a real
 checkpoint file: STEPS.md 24).
 
-Extended thinking is explicitly disabled (thinking={"type": "disabled"}) on
-every model here and in supervisor.py — STEPS.md 28: a confirmed bug in
-langchain-anthropic==1.4.8 (the latest available) can drop a streamed
-thinking block's required "thinking" field during SSE chunk merging, which
-Anthropic's API then rejects on replay. Only affects streaming callers
-(LangGraph Studio); the CLI's non-streaming .ainvoke() was never at risk.
-Disabling thinking removes the bug class entirely rather than working
-around one call site.
+Extended thinking is enabled (thinking={"type": "adaptive"}) on every model
+here and in supervisor.py, paired with `ThinkingBlockRepairMiddleware` in
+every middleware list (assistant/thinking_repair.py) — STEPS.md 28/73/74: a
+confirmed bug in langchain-anthropic==1.4.8 (still the latest available) can
+drop a streamed thinking block's required "thinking" field during SSE chunk
+merging, which Anthropic's API then rejects on replay. Only affects
+streaming callers (LangGraph Studio, and as of Phase 14, the dashboard's
+`/chat`/`/resume` SSE path); the CLI's non-streaming .ainvoke() was never at
+risk. The original Phase 1-era fix disabled thinking project-wide to remove
+the bug class entirely; superseded at Phase 10's resume checkpoint by the
+repair middleware, verified live against the real bug and the real API
+(STEPS.md 73/74) rather than assumed safe.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
+from assistant.thinking_repair import ThinkingBlockRepairMiddleware
 from assistant.tools import execute_shell_command, read_file, web_search, write_file
 from assistant.write_tools import build_write_tools
 
@@ -116,12 +121,12 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
             tool replaces this hook in a later phase.
     """
     tools = [read_file, write_file, execute_shell_command, *(extra_tools or [])]
-    model = ChatAnthropic(model=CODING_MODEL_NAME, thinking={"type": "disabled"})
+    model = ChatAnthropic(model=CODING_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
         tools=tools,
         system_prompt=CODING_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware()],
+        middleware=[SubAgentWindowMiddleware(), ThinkingBlockRepairMiddleware()],
         name="coding_agent",
     )
 
@@ -143,12 +148,12 @@ RESEARCH_SYSTEM_PROMPT = (
 
 def build_research_agent() -> CompiledStateGraph:
     """Build the research sub-agent."""
-    model = ChatAnthropic(model=RESEARCH_MODEL_NAME, thinking={"type": "disabled"})
+    model = ChatAnthropic(model=RESEARCH_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
         tools=[web_search],
         system_prompt=RESEARCH_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware()],
+        middleware=[SubAgentWindowMiddleware(), ThinkingBlockRepairMiddleware()],
         name="research_agent",
     )
 
@@ -250,12 +255,12 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
             filtered down internally to the known Gmail/Calendar read tool
             names, plus the gated write-tool wrappers built from it.
     """
-    model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking={"type": "disabled"})
+    model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
         tools=_select_life_admin_tools(mcp_tools),
         system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware(), NoParallelWrites()],
+        middleware=[SubAgentWindowMiddleware(), NoParallelWrites(), ThinkingBlockRepairMiddleware()],
         name="life_admin_agent",
     )
 
@@ -350,11 +355,11 @@ def build_mac_control_agent() -> CompiledStateGraph:
     open_url_in_brave (ungated — see mac_tools.py's module docstring for
     the accepted-risk decision); NoParallelMacWrites added alongside since
     this agent now has more than one gated tool."""
-    model = ChatAnthropic(model=MAC_CONTROL_MODEL_NAME, thinking={"type": "disabled"})
+    model = ChatAnthropic(model=MAC_CONTROL_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
         tools=MAC_CONTROL_TOOLS,
         system_prompt=MAC_CONTROL_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware(), NoParallelMacWrites()],
+        middleware=[SubAgentWindowMiddleware(), NoParallelMacWrites(), ThinkingBlockRepairMiddleware()],
         name="mac_control_agent",
     )

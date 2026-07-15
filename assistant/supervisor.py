@@ -11,9 +11,12 @@ real, not assumed — see STEPS.md 24: a standalone spike confirmed the
 handoff actually routes, the final message list has no orphaned tool calls,
 and checkpoint_ns nests automatically under the parent node's name.
 
-Extended thinking is explicitly disabled on the supervisor's model — see
-sub_agents.py's module docstring and STEPS.md 28 for why (a confirmed
-langchain-anthropic streaming bug, not something specific to this file).
+Extended thinking is enabled (`thinking={"type": "adaptive"}`) on the
+supervisor's model, paired with `ThinkingBlockRepairMiddleware` — see
+`assistant/thinking_repair.py`'s module docstring and STEPS.md 28/73/74.
+A confirmed langchain-anthropic streaming bug can corrupt a thinking
+block on replay; the repair middleware neutralizes it rather than
+disabling the feature project-wide (the original Phase 1/Studio-era fix).
 
 Parallel tool calls are explicitly disabled on the supervisor's model via
 NoParallelHandoffs below — see STEPS.md 36 for the real, live-observed
@@ -73,6 +76,7 @@ from assistant.sub_agents import (
     build_mac_control_agent,
     build_research_agent,
 )
+from assistant.thinking_repair import ThinkingBlockRepairMiddleware
 
 # Self-contained on import, same reasoning as tools.py/agent.py.
 load_dotenv()
@@ -111,7 +115,14 @@ SUPERVISOR_SYSTEM_PROMPT = (
     "responds, you will see its result and can transfer to the next "
     "specialist the request needs. Keep doing this, one specialist per "
     "turn, until every part of the request has been handled, then answer "
-    "directly summarizing what was done instead of transferring again."
+    "directly summarizing what was done instead of transferring again. "
+    "If completing the request depends on an OBJECTIVE fact you can look "
+    "up rather than a genuine preference only the user can supply — the "
+    "current date/time, the user's current timezone, a real-world fact — "
+    "resolve it yourself via research_agent before finishing, instead of "
+    "asking the user or silently guessing. Still ask the user directly "
+    "when the missing piece is a genuine preference or decision only they "
+    "can make (which meeting time they want, who to invite, and similar)."
 )
 
 
@@ -280,7 +291,7 @@ def _route_after_specialist(state: GraphState) -> Command:
 def build_supervisor() -> CompiledStateGraph:
     """Build the supervisor sub-graph — a create_agent(...) ReAct loop whose
     tools are handoff tools, not real work tools."""
-    model = ChatAnthropic(model=SUPERVISOR_MODEL_NAME, thinking={"type": "disabled"})
+    model = ChatAnthropic(model=SUPERVISOR_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
         tools=[
@@ -290,7 +301,7 @@ def build_supervisor() -> CompiledStateGraph:
             TRANSFER_TO_MAC_CONTROL,
         ],
         system_prompt=SUPERVISOR_SYSTEM_PROMPT,
-        middleware=[NoParallelHandoffs()],
+        middleware=[NoParallelHandoffs(), ThinkingBlockRepairMiddleware()],
         name="supervisor",
     )
 

@@ -5797,4 +5797,265 @@ pytest/CI → voice accuracy.
 **Also surfaced at this checkpoint, not part of Phase 10 itself:** Phase 14
 (STEPS.md 71–72) was fully completed and logged but never committed —
 `HEAD` is still at the Phase 13 commit. Flagged to the user as its own
-commit boundary, separate from Phase 10's just-made planning edits.
+commit boundary, separate from Phase 10's just-made planning edits. Since
+resolved: user committed Phase 14 as `a9d022d` (which also picked up this
+checkpoint's PLAN.md/CLAUDE.md/STEPS.md edits — the user's call, not split
+out). User's standing instruction going forward: they'll commit Phase 10
+themselves once it's complete, no intermediate commit proposals needed.
+
+## 74. Extended thinking re-enabled (adaptive, all 5 agent models) via a
+verified repair middleware — supervisor orchestration prompt fix
+(2026-07-15)
+
+**Reopened, not just rechecked:** asked the user how to close the
+extended-thinking debt item; they asked whether the underlying bug could
+actually be fixed rather than permanently avoided, with a concrete
+motivating example — the supervisor should be able to resolve something
+like "set up a meeting at 15:00 tomorrow" by asking research_agent for the
+current time/timezone itself, rather than asking the user or guessing.
+
+**Two separable problems, deliberately not conflated:** (1) the supervisor
+proactively resolving objective ambiguity via a sub-agent handoff is an
+*orchestration/prompt* behavior, not an extended-thinking feature — the
+Phase 6 loop-back architecture (`_route_after_specialist`) already supports
+exactly this multi-hop pattern mechanically; `SUPERVISOR_SYSTEM_PROMPT`
+just never told it to do this. (2) extended thinking itself is a separate,
+genuinely fixable bug question. Both were done, but the fix for (1) does
+not require (2).
+
+**(1) Prompt fix:** `SUPERVISOR_SYSTEM_PROMPT` (supervisor.py) gained an
+explicit instruction: resolve OBJECTIVE facts (current date/time, the
+user's timezone, real-world facts) via research_agent before finishing,
+instead of asking the user or silently guessing; still ask the user
+directly when the missing piece is a genuine preference/decision only they
+can make. Deliberately scoped narrowly (objective vs. preference) so this
+doesn't make the supervisor overconfident about things it should still ask
+about.
+
+**(2) Extended thinking — root cause re-verified live against the REAL
+API, not re-derived from STEPS.md 28's old notes:**
+- `langchain-anthropic` is still 1.4.8, still the latest release on PyPI —
+  no upstream fix exists.
+- STEPS.md 28's `thinking={"type": "enabled", "budget_tokens": ...}` shape
+  is now itself STALE for this model: `claude-sonnet-5` rejects
+  `thinking.type=enabled` outright (`"thinking.type.enabled" is not
+  supported for this model. Use "thinking.type.adaptive"...`) — confirmed
+  via a real API call. All thinking config in this codebase now uses
+  `{"type": "adaptive"}`.
+- Reproduced the exact bug live, today, on the first attempt: a real
+  `astream()` call on `claude-sonnet-5` with adaptive thinking produced a
+  thinking block with a signature but NO `thinking` key
+  (`{'signature': '...', 'type': 'thinking', 'index': 0}`) — root cause
+  matches STEPS.md 28 exactly (the `content_block_start` handler in
+  `langchain_anthropic/chat_models.py` only emits a starter chunk when the
+  opening event's thinking-or-signature text is non-empty; when a block's
+  visible reasoning is genuinely empty, no starter chunk means the block
+  is built purely from a later `signature_delta`, whose own `model_dump()`
+  never carries a `thinking` key).
+- Confirmed replaying that exact malformed block in a follow-up turn 400s
+  with the documented error
+  (`messages.1.content.0.thinking.thinking: Field required`).
+- Confirmed patching the block with `thinking: ""` before replay makes the
+  identical follow-up turn succeed cleanly. Also confirmed (via a plain
+  non-streaming `ainvoke()` call) that Anthropic's non-streaming path
+  already always includes `"thinking": ""` even when empty — patching in
+  an empty string fabricates nothing; it fills in exactly the value that
+  was already true, in the shape the API's own non-buggy path already
+  uses.
+
+**Fix shipped:** new `assistant/thinking_repair.py` —
+`ThinkingBlockRepairMiddleware`, an `awrap_model_call` middleware (same
+family as `NoParallelHandoffs`/`SubAgentWindowMiddleware`) that walks every
+model response's messages after each call and patches any `thinking`-type
+content block missing its `thinking` key, before it can ever be persisted
+to state and replayed. Scope decision (user's explicit call, offered
+supervisor-only vs. everywhere): **everywhere** — all 5 agent models
+(supervisor + coding/research/life_admin/mac_control) now run
+`thinking={"type": "adaptive"}` with the repair middleware in their
+middleware list. `compaction.py`/`memory_extraction.py`'s Haiku calls stay
+`thinking={"type": "disabled"}` — single-shot classification/summarization
+tasks, no orchestration reasoning to gain. Both `supervisor.py`'s and
+`sub_agents.py`'s module docstrings updated to reflect the reversal (the
+original Phase 1-era "disable everywhere" fix is superseded, not deleted
+from the record — STEPS.md 28 stays as the origin of the diagnosis).
+
+**Verified — full test suite (all 15 test files, run individually per this
+project's no-pytest-yet convention) passes, plus a new
+`tests/test_thinking_repair.py`** (6 tests: the repair function's
+add-missing-key/leave-well-formed-alone/noop-on-string/no-copy-when-clean
+behaviors, plus the middleware end-to-end via a fake handler).
+
+**Verified live, real graph, the exact scenario this reopened over:** a
+throwaway script drove the actual compiled graph
+(`supervisor.build_graph()`, a scratch SQLite checkpointer + scratch
+workspace file, both deleted after) through `astream_events()` — the same
+call `server.py`'s `/chat` uses — with a genuine two-hop request ("search
+the web for the current UTC time, then write it to a file"): research_agent
+→ back to the supervisor → coding_agent, exactly the loop-back path where
+the supervisor's own earlier (thinking-bearing) message gets replayed into
+its second invocation. Result: 196 streamed events, zero chain errors, the
+file was written with the real fetched time, the final answer was correct,
+and inspecting the persisted message history directly found 4 real thinking
+blocks produced across the turn with 0 malformed ones remaining — the
+middleware caught and repaired all of them before they reached state.
+
+**Debt item status:** CLOSED (not just documented-as-accepted) — thinking
+is back on everywhere, the bug that caused the original disabling is now
+neutralized and verified against the real API and the real graph, not
+worked around.
+
+## 75. Haiku evaluation for research_agent — decided: stay on Sonnet 5
+(2026-07-15)
+
+Deferred since Phase 3 (STEPS.md 24/25), carried forward through every
+phase plan since as "decide on real LangSmith trace data." Decided this
+session with both real trace data and a real live benchmark — not
+deferred again, and not decided from cost math alone.
+
+**Real historical cost data (LangSmith, `checkpoint_ns` filtered to
+`research_agent`):** 49 real LLM calls to date, 245,186 input / 8,459
+output tokens, 100% on `claude-sonnet-5`. At current pricing (Sonnet 5
+$2/$10 per MTok introductory through 2026-08-31; Haiku 4.5 $1/$5 per
+MTok): actual Sonnet 5 cost ≈$0.575 total; the same token volume on Haiku
+4.5 would have been ≈$0.287. Real ~2x savings, negligible in absolute
+dollars at this project's current usage volume.
+
+**Live benchmark, real API, 6 real historical user queries pulled
+verbatim from LangSmith run inputs** (not synthetic prompts) — Super Bowl
+result, Argentina-Switzerland World Cup match, latest OpenAI news, current
+Bitcoin price, 2026 public holidays, and "what was the result of today's
+FIFA games." Both models run through the EXACT `research_agent` system
+prompt, tool (`web_search`), and middleware — only the model swapped.
+
+**Confirmed along the way:** `claude-haiku-4-5` rejects
+`thinking={"type": "adaptive"}` outright ("adaptive thinking is not
+supported on this model") — it's a legacy-tier model in this generation's
+thinking scheme, same tier as the Haiku calls in `compaction.py`/
+`memory_extraction.py`. A Haiku-based research_agent would run
+`thinking={"type": "disabled"}`, which is fine for this task, but is a
+real code-shape difference from every other current agent, not just a
+model-string swap.
+
+**Result:** Haiku 4.5 was consistently faster (~4.5-6.8s vs Sonnet 5's
+~6-14s) and matched Sonnet 5's quality on straightforward factual lookups
+(scores, prices, news) — comparable depth and correctness on 4 of 6
+queries. Two real quality gaps, both favoring Sonnet 5:
+- **Public holidays 2026** — Sonnet flagged the country ambiguity before
+  defaulting to US ("varies by country... let me know if you need a
+  different country"); Haiku silently assumed US with no flag.
+- **"What was the result of today's FIFA games"** — the decisive case.
+  Sonnet correctly reasoned from the search results that today is
+  2026-07-15 and gave a confident, correct answer. Haiku got confused
+  about what "today" actually is, called the results "in the future, as
+  these appear to be projected," and refused to answer — asking the user
+  to clarify the date instead.
+
+**Why that last failure is disqualifying, not just a minor miss:** this
+session's supervisor-prompt fix (this same STEPS.md entry's neighbor, the
+SUPERVISOR_SYSTEM_PROMPT ambiguity-resolution instruction added earlier
+today) makes resolving current-date/time queries via `research_agent` a
+load-bearing behavior for the first time — the user's own motivating
+example was the supervisor asking research_agent for the current time to
+resolve a scheduling request. Haiku demonstrably failing at exactly that
+category of reasoning, on a real historical query, directly undercuts the
+thing this project just started depending on `research_agent` for.
+
+**Decision: research_agent stays on `claude-sonnet-5`.** Not deferred
+again — closed with real trace data AND a real live benchmark backing it,
+per this project's verification discipline. Documented rather than
+silently kept as the default. Revisit only if a future Haiku release
+demonstrably closes the date/time-reasoning gap, or if research_agent's
+role narrows to exclude time-sensitive queries.
+
+## 76. pytest adoption; CI declined (2026-07-15)
+
+**pytest adoption:** `tests/` was already pytest-shaped per CLAUDE.md
+(assert-based, `test_*.py`/`test_*` naming, runnable with plain python) —
+this just wires up the actual `pytest` runner rather than each file's own
+`if __name__ == "__main__":` block. Added `pytest>=8.0.0` to
+`pyproject.toml`'s `dev` extra and `requirements.txt` (kept in sync per
+CLAUDE.md's packaging convention); `[tool.pytest.ini_options]` sets
+`testpaths = ["tests"]`.
+
+**One real gap found, not just a config nit:** several test files define
+`async def test_...()` directly (their own `__main__` blocks wrap each
+call in `asyncio.run()`) — pytest can't invoke an async test function
+without a plugin, and failed 58/160 with "async def functions are not
+natively supported" on the first run. Added `pytest-asyncio>=0.24.0` +
+`asyncio_mode = "auto"` in `pyproject.toml`. No test files needed edits —
+the existing `async def test_...` shape is exactly what the plugin
+expects.
+
+**Verified:** `pytest --collect-only` finds all 160 tests; a full
+`pytest` run passes 160/160 in ~51s (real Anthropic/Tavily/LangSmith API
+calls throughout, per this project's own no-mocking test convention — same
+cost profile as running each file individually, just one command now).
+
+**CI — asked, declined for now.** The test suite's no-mocking convention
+means CI would either (a) call real paid APIs on every push/PR, needing
+`ANTHROPIC_API_KEY`/`TAVILY_API_KEY`/`LANGSMITH_API_KEY` as GitHub repo
+secrets, or (b) be scoped down to lint/collection-only and not actually
+prove the suite passes. Presented both options plus skipping; user chose
+to skip CI for now — pytest adoption alone covers local test running.
+Documented as a deliberate decision, not an oversight, per this project's
+Phase 10 done-when ("closed or has an explicit, documented accept-as-is
+decision").
+
+## 77. README refresh (2026-07-15)
+
+The README was stale since Phase 5 — it described a Phase-5-era project
+(read-only Gmail/Calendar, no write access, no dashboard, no Mac-native
+cluster beyond Phase 4, no memory system, no multi-thread support, a
+6-phase roadmap that stopped at "6. Proactivity"). Full rewrite covering
+everything shipped since: write-access tools (`write_tools.py`), Apple
+Calendar + Brave (`mac_tools.py`), compaction + long-term memory
+(`compaction.py`/`memory_store.py`/`memory_extraction.py`), multi-thread
+support (`thread_store.py`), the Tauri dashboard (`dashboard/`, its own
+process-lifecycle ownership, SSE streaming), and the extended-thinking
+repair middleware from this same phase (`thinking_repair.py`).
+
+Updated: "What it can do today" (write access, Apple Calendar/Brave,
+memory, dashboard, multi-thread), the architecture tree (every new
+module + the full `dashboard/` tree), setup (Gmail scope widened to
+`gmail.modify`+`gmail.settings.basic`, Calendar's read-only enforcement
+note removed since write is now a real gated capability, dashboard
+install/run instructions, mlx-whisper swap), the security model section
+(write-tool gating, long-term memory's security design, skill-vetting
+policy), the roadmap (all 15 phases, Phase 10 marked active with its
+current partial status), and the Development section (`pytest`, replacing
+the old per-file `python tests/test_x.py` list, with the no-mocking
+cost/CI caveat carried over from STEPS.md 76).
+
+## 78. Voice accuracy — accepted as-is, Phase 10 debt list fully closed
+(2026-07-15)
+
+Last open item from the Phase 10 resume checkpoint (STEPS.md 73): Phase 8
+fixed voice latency only (STT swap to `mlx-whisper large-v3`) and left
+accuracy unproven — the benchmark's WER was tied across all four
+candidates on an n=3 sample, too small to conclude anything either way
+(STEPS.md 52/53). Asked whether to design a larger benchmark or accept
+current accuracy as-is; user's answer: "its good as it is."
+
+**Decision: accept current voice accuracy as-is, no further benchmarking
+this phase.** Explicit, documented, user's own call — not a silent
+default. Matches the done-when bar this phase set for every debt item:
+closed, or an explicit accept-as-is decision. Real-world daily use
+remains the actual accuracy test going forward (same framing STEPS.md 53
+already used when the n=3 sample was accepted as insufficient to block
+Phase 8). Revisit only if real-world mishearing becomes a live complaint
+again.
+
+**Phase 10 debt list status, all items now resolved:**
+- Tauri backend/voice-daemon process lifecycle — re-confirmed live (STEPS.md 73)
+- Extended thinking — closed, re-enabled via a verified repair middleware (STEPS.md 74)
+- Haiku eval for research_agent — decided, stays on Sonnet 5 (STEPS.md 75)
+- pytest — adopted, 160/160 pass (STEPS.md 76)
+- CI — declined, user's explicit choice (STEPS.md 76)
+- README — fully refreshed through Phase 15 (STEPS.md 77)
+- Voice accuracy — accepted as-is, user's explicit choice (this entry)
+- Morning briefing — cut from scope entirely at the user's direction
+  (STEPS.md 73), no longer part of this phase's done-when at all
+
+Every item is either closed or has an explicit, documented accept-as-is
+decision, and the README reflects the project through Phase 15 — Phase
+10's done-when criteria are met.

@@ -21,3 +21,7 @@ langsmith>=0.10.0
 
 # Dev-only: LangGraph Studio (`langgraph dev`), not needed to run `assistant`
 langgraph-cli[inmem]>=0.4.0
+
+# Dev-only: test runner (Phase 10) -- tests/ was already pytest-shaped
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
