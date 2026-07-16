@@ -37,6 +37,8 @@ from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from assistant import prompts
+
 # Self-contained on import, same reasoning as tools.py/agent.py.
 load_dotenv()
 
@@ -68,12 +70,18 @@ _BRIDGE_MARKER_KEY = "phase6_routing_bridge"
 _SUMMARY_MARKER_KEY = "phase7_compaction_summary"
 _RECALLED_FACTS_MARKER_KEY = "phase7_recalled_facts"
 
-_SUMMARY_PROMPT = (
+# Langfuse prompt name: "compaction-summary-prompt" (scripts/
+# sync_prompts_to_langfuse.py). Mandatory local fallback, same content as
+# before Phase 16 — only the variable syntax changed, {transcript} ->
+# {{transcript}}, to match Langfuse's own templating syntax so this
+# fallback compiles identically whether or not a Langfuse client exists
+# (assistant/prompts.py's get_prompt()/_compile_local()).
+_SUMMARY_PROMPT_FALLBACK = (
     "Summarize the following personal-assistant conversation history in a "
     "few sentences, preserving concrete facts (names, dates, file paths, "
     "decisions made) over prose. If a '[Summary of earlier conversation: "
     "...]' block appears first, treat it as prior context to fold into the "
-    "new summary, not raw dialogue to re-describe.\n\n{transcript}"
+    "new summary, not raw dialogue to re-describe.\n\n{{transcript}}"
 )
 
 
@@ -165,9 +173,10 @@ def compact_history_node(state: dict[str, Any]) -> dict[str, Any]:
         for m in to_summarize
     )
     model = ChatAnthropic(model=SUMMARIZER_MODEL_NAME, thinking={"type": "disabled"})
-    summary_text = model.invoke(
-        [HumanMessage(content=_SUMMARY_PROMPT.format(transcript=transcript))]
-    ).content
+    summary_prompt = prompts.get_prompt(
+        "compaction-summary-prompt", _SUMMARY_PROMPT_FALLBACK, transcript=transcript
+    )
+    summary_text = model.invoke([HumanMessage(content=summary_prompt)]).content
 
     summary_message = HumanMessage(
         content=f"[Summary of earlier conversation: {summary_text}]",

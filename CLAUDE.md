@@ -20,23 +20,47 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **ACTIVE: Phase 10** — Proactivity + polish (resumed 2026-07-15; parked
-  2026-07-14 to run the write-access/browser/UI arc, now that Phases
-  11–15 are complete). At the resume checkpoint (2026-07-15): the Tauri
-  backend/voice-daemon process-lifecycle item was re-confirmed live (not
-  rebuilt) — see PLAN.md. The morning briefing (the phase's original "core
-  build") was CUT from scope entirely at the user's explicit direction, not
-  deferred. Extended thinking is CLOSED (STEPS.md 74) — re-enabled on all 5
-  agent models behind a verified repair middleware for the bug that
-  originally forced it off (see the Load-bearing decisions section below).
-  Haiku eval CLOSED (STEPS.md 75, stays on Sonnet 5); pytest adopted, CI
-  declined (STEPS.md 76); README fully refreshed (STEPS.md 77); voice
-  accuracy accepted as-is, user's explicit call (STEPS.md 78). Every debt
-  item is now closed or explicitly accepted — Phase 10's done-when
-  criteria are met. Still labeled ACTIVE pending the user's sign-off to
-  flip it to COMPLETE (this file's own process: status edits happen only
-  with explicit approval). Read PLAN.md's Phase 10 section before doing
-  any work.
+- **ACTIVE: Phase 16** — Langfuse v2 integration (all three pillars), then
+  migration to v3 (started 2026-07-16). Demo/portfolio phase: additive to
+  LangSmith (Phase 3), which stays untouched (`/cost` keeps using it). Full
+  narrative in `PHASE16_LANGFUSE.md`; chronological detail in STEPS.md
+  79–82; this entry is a pointer, not the record.
+  **Observability/tracing:** `assistant/observability.py` wires a shared,
+  lazily-built `CallbackHandler` into `agent.make_thread_config()` (the one
+  place all three call sites — CLI, voice, dashboard SSE — pick it up for
+  free), no-op when Langfuse isn't configured. A real blocker (Langfuse
+  v2's actual final release, EOL since Sept 2025, cannot import at all
+  against this project's LangChain 1.x — unresolved upstream bug,
+  langfuse/langfuse#9758) was resolved with a verified `sys.modules`
+  compatibility shim restoring the exact legacy import paths v2 needs as
+  re-exports of their real `langchain_core` equivalents — the same
+  relationship pre-1.0 LangChain itself shipped, not a mock or a downgrade;
+  scoped Part-A-only, deleted at the Part B (v3) migration. Live-verified
+  against a real account using the official `langfuse/skills` GitHub skill
+  (installed to `~/.claude/skills/langfuse/` after reading it in full —
+  cleared the Phase 11 vetting bar), which surfaced and fixed real gaps
+  (trace naming/tags needed `configure_client()`, constructor-bound in v2;
+  `LANGFUSE_HOST` vs. the skill's own `LANGFUSE_BASE_URL` name caused real
+  401s) and confirmed one NOT fixed — v2's frozen usage-tracking schema
+  silently drops output-token/cost data under extended thinking/prompt
+  caching (unconditional in this project) — documented rather than
+  monkeypatched, and confirmed live to be fixed in v3.
+  **Prompt management:** 6 system/summary prompts migrated to Langfuse
+  (`assistant/prompts.py`, `scripts/sync_prompts_to_langfuse.py`), each
+  with its original text kept as a mandatory local fallback.
+  `memory_extraction.py`'s `_EXTRACTION_PROMPT` deliberately excluded — its
+  source-restriction guarantee is structural, not instruction-based, and
+  CLAUDE.md's "do not weaken without discussion" standing note on that
+  module applies.
+  **Evaluations:** confirmation-gate approve/decline outcomes logged as
+  Langfuse scores (`observability.score_gate_outcome()`), fired as a
+  background task at all three resume points. A real trace-misattribution
+  race (Langfuse indexes a session's traces out of creation order) was
+  found live and fixed with a time-bounded lookup.
+  174/174 tests pass. Still open: voice and dashboard call sites haven't
+  individually been driven live for tracing (only CLI has); Part B not
+  started — see PLAN.md's Phase 16 section before doing any further work
+  here.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -57,10 +81,23 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   accuracy question left open) (STEPS.md groups 52–53)
 - Complete: Phase 9 — Tauri desktop dashboard as a peer client of the graph
   (chat/history/memory/cost panels, gated-action GUI) (STEPS.md groups 54–61)
+- Complete: Phase 10 — Proactivity + polish (resumed 2026-07-15 after the
+  write-access/browser/UI arc below; status flip to COMPLETE approved by
+  the user 2026-07-16). Tauri backend/voice-daemon process-lifecycle
+  re-confirmed live, not rebuilt. Morning briefing CUT from scope entirely
+  (user's explicit call), not deferred. Extended thinking CLOSED (STEPS.md
+  74) — re-enabled on all 5 agent models behind a verified repair
+  middleware for the bug that originally forced it off (see Load-bearing
+  decisions below). Haiku eval CLOSED (STEPS.md 75, research_agent stays
+  on Sonnet 5); pytest adopted, CI declined (STEPS.md 76); README fully
+  refreshed (STEPS.md 77); voice accuracy accepted as-is, user's explicit
+  call (STEPS.md 78).
 - **PARKED: Phase 10** — proactivity + polish, parked 2026-07-14 to run the
   write-access/browser/UI arc; its deferred-debt checklist is recorded in
   PLAN.md's Phase 10 park note (voice accuracy, extended-thinking re-enable,
   Haiku eval, backend lifecycle, README/pytest/CI, the briefing itself).
+  Resumed 2026-07-15 and completed 2026-07-16 — see Phase 10's own entry
+  below for the full resolution.
 - Complete: Phase 11 — skills cleanup + vetting policy: removed the
   High-Risk `browser-use` skill, the ~1,840-skill `antigravity-awesome-skills`
   bulk install, and the full `anthropics/skills` clone; kept only
@@ -142,7 +179,8 @@ WRITE, 13 Apple Calendar + open-URL-in-Brave, 14 UI rework. Phase 15
 clients; kept as its own phase rather than folded into 12. Phase 13
 completed 2026-07-15 (STEPS.md groups 69–70). Phase 14 completed
 2026-07-15 (STEPS.md groups 71–72). Phase 10 resumed 2026-07-15 now that
-the write-access/browser/UI arc (11–15) is complete. See PLAN.md.
+the write-access/browser/UI arc (11–15) is complete, and its status flip to
+COMPLETE was approved by the user 2026-07-16. See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

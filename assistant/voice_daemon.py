@@ -81,7 +81,7 @@ from langgraph.types import Command  # noqa: E402
 from pynput.keyboard import GlobalHotKeys  # noqa: E402
 from PyObjCTools import AppHelper  # noqa: E402
 
-from assistant import thread_store  # noqa: E402
+from assistant import observability, thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.main import _render_content  # noqa: E402
@@ -95,6 +95,14 @@ from assistant.voice_io import (  # noqa: E402
     speak,
     transcribe,
 )
+
+# Must run before observability's lazy handler is first constructed (i.e.
+# before the first make_thread_config() call) — tags are constructor-bound
+# in Langfuse v2, not per-call overridable. Set at module level (unlike
+# main.py's own call, which lives inside main() specifically so importing
+# _render_content above doesn't wrongly claim "cli") since nothing else
+# imports from voice_daemon.py.
+observability.configure_client("voice")
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +275,7 @@ class VoiceDaemon:
 
             while "__interrupt__" in result:
                 payload = result["__interrupt__"][0].value
+                action = payload.get("action") if isinstance(payload, dict) else None
                 if isinstance(payload, dict) and payload.get("voice_approvable") is False:
                     # Phase 7 Part B's memory-write confirmations set this —
                     # fact content is harder to vet by ear than an action
@@ -278,12 +287,16 @@ class VoiceDaemon:
                         speak, "That needs a text confirmation, so I'm skipping it for now."
                     )
                     result = await self._graph.ainvoke(Command(resume=False), config=config)
+                    # Evaluations pillar (STEPS.md 82) — background task,
+                    # never awaited, so scoring never adds latency here.
+                    asyncio.create_task(observability.score_gate_outcome(thread_id, False, action))
                     continue
                 question = _spoken_question(payload)
                 logger.info("confirmation asked: %s", question)
                 approved = await self._ask_confirmation(question)
                 logger.info("confirmation outcome: %s", "approved" if approved else "declined")
                 result = await self._graph.ainvoke(Command(resume=approved), config=config)
+                asyncio.create_task(observability.score_gate_outcome(thread_id, approved, action))
 
             reply = _render_content(result["messages"][-1].content)
             logger.info("assistant: %s", reply)

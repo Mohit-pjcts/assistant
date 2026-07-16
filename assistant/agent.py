@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from assistant import observability
+
 
 def make_thread_config(thread_id: str) -> dict[str, Any]:
     """Build the LangGraph invocation config for a given conversation thread.
@@ -22,8 +24,16 @@ def make_thread_config(thread_id: str) -> dict[str, Any]:
     graph: sub-agent/supervisor subgraph checkpoint_ns nesting is automatic
     (STEPS.md 24), not something this config needs to express.
 
+    Phase 16: also merges in Langfuse tracing config (callbacks + per-call
+    session metadata) via `observability.langfuse_run_config()` — the one
+    place all three call sites (CLI, voice, dashboard) pick it up, per this
+    module's own "never build invocation config dicts by hand" convention.
+    A no-op ({}) when Langfuse isn't configured.
+
     Args:
         thread_id: Identifier for the conversation thread (e.g. a UUID
             generated once per CLI session).
     """
-    return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config.update(observability.langfuse_run_config(thread_id))
+    return config

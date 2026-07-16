@@ -68,6 +68,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
+from assistant import prompts
 from assistant.compaction import compact_history_node
 from assistant.memory_extraction import extract_and_propose_memory_node, recall_memory_node
 from assistant.sub_agents import (
@@ -93,7 +94,12 @@ class GraphState(TypedDict):
 
 SUPERVISOR_MODEL_NAME = "claude-sonnet-5"
 
-SUPERVISOR_SYSTEM_PROMPT = (
+# Langfuse prompt name: "supervisor-system-prompt" (scripts/
+# sync_prompts_to_langfuse.py). This constant is the mandatory local
+# fallback — kept byte-for-byte identical to the pre-Phase-16 text, used
+# verbatim whenever Langfuse is unconfigured/unreachable/missing the
+# prompt (assistant/prompts.py.get_prompt()).
+SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "You are the routing supervisor of a personal assistant. Decide which "
     "specialist to hand off to and transfer immediately — do not attempt "
     "the task yourself. Hand off to coding_agent for file/shell tasks in "
@@ -123,6 +129,10 @@ SUPERVISOR_SYSTEM_PROMPT = (
     "asking the user or silently guessing. Still ask the user directly "
     "when the missing piece is a genuine preference or decision only they "
     "can make (which meeting time they want, who to invite, and similar)."
+)
+
+SUPERVISOR_SYSTEM_PROMPT = prompts.get_prompt(
+    "supervisor-system-prompt", SUPERVISOR_SYSTEM_PROMPT_FALLBACK
 )
 
 

@@ -39,6 +39,12 @@ dependencies = [
     # Was already a transitive dep (LangSmith tracing, Phase 3); made
     # explicit now that server.py imports it directly.
     "langsmith>=0.10.0",
+    # Phase 16 Part A: Langfuse v2 tracing, additive to LangSmith above, not
+    # a replacement. Pinned <3.0 deliberately -- v2 is EOL (last release
+    # Sept 2025) and needs assistant/observability.py's compatibility shim
+    # to import against this project's LangChain 1.x line; see that
+    # module's docstring for the full why. Part B changes this pin.
+    "langfuse>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]

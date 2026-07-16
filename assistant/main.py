@@ -15,7 +15,7 @@ load_dotenv()
 
 from langgraph.types import Command  # noqa: E402
 
-from assistant import thread_store  # noqa: E402
+from assistant import observability, thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
@@ -146,6 +146,12 @@ async def _run(start_new: bool) -> None:
                     payload = result["__interrupt__"][0].value
                     approved = input(f"\n[confirm] {payload} Proceed? (y/n): ").strip().lower() == "y"
                     result = await graph.ainvoke(Command(resume=approved), config=config)
+                    # Evaluations pillar (STEPS.md 82): log the real
+                    # approve/decline outcome as a Langfuse score. Fired as
+                    # a background task, never awaited — scoring must never
+                    # add latency to the response the user is waiting on.
+                    action = payload.get("action") if isinstance(payload, dict) else None
+                    asyncio.create_task(observability.score_gate_outcome(thread_id, approved, action))
 
                 final_message = result["messages"][-1]
                 print(f"\nAssistant: {_render_content(final_message.content)}")
@@ -173,6 +179,13 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Sync entry point (required by the `assistant` console script) that
     drives the async chat loop."""
+    # Must run before observability's lazy handler is first constructed
+    # (i.e. before the first make_thread_config() call) — tags are
+    # constructor-bound in Langfuse v2, not per-call overridable. Set here
+    # rather than at module level: voice_daemon.py imports _render_content
+    # from this module, which must NOT have the side effect of claiming
+    # "cli" as the client identity for a process that is actually voice.
+    observability.configure_client("cli")
     args = _parse_args()
     try:
         asyncio.run(_run(start_new=args.new))

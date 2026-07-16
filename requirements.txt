@@ -19,6 +19,13 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 langsmith>=0.10.0
 
+# Phase 16 Part A: Langfuse v2 tracing (additive to LangSmith, not a
+# replacement). Pinned <3.0 deliberately -- v2 is EOL (no releases since
+# Sept 2025) and needs assistant/observability.py's compatibility shim to
+# import at all against this project's LangChain 1.x; see that module's
+# docstring. Part B (v3 migration) will change this pin.
+langfuse>=2.0,<3.0
+
 # Dev-only: LangGraph Studio (`langgraph dev`), not needed to run `assistant`
 langgraph-cli[inmem]>=0.4.0
 

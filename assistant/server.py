@@ -71,13 +71,18 @@ from langgraph.types import Command  # noqa: E402
 from langsmith import Client as LangSmithClient  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from assistant import memory_store, thread_store  # noqa: E402
+from assistant import memory_store, observability, thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
+
+# Must run before observability's lazy handler is first constructed (i.e.
+# before the first make_thread_config() call) — tags are constructor-bound
+# in Langfuse v2, not per-call overridable. See observability.py.
+observability.configure_client("dashboard")
 
 # Overridable so tests/throwaway runs can redirect to a temp copy instead of
 # the real conversation_memory.sqlite (CLAUDE.md's verification-discipline
@@ -221,12 +226,22 @@ def _extract_token_text(content: object) -> str:
 
 
 async def _stream_turn(
-    graph: Any, thread_id: str, input_or_command: Any
+    graph: Any,
+    thread_id: str,
+    input_or_command: Any,
+    gate_outcome: tuple[bool, str | None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Stream one turn (a fresh message OR a Command(resume=...)) as SSE
     frames: zero or more `{"type": "token", "text": ...}` deltas, followed
     by exactly one terminal frame — `{"type": "interrupt", "payload": ...}`
     or `{"type": "message", "content": ...}`.
+
+    `gate_outcome` (STEPS.md 82, evaluations pillar): when this call is a
+    `/resume`, the caller passes `(request.approved, action)` — scored as a
+    Langfuse score ONLY once this specific resume fully resolves (the
+    "message" branch below, not another chained "interrupt"), as a
+    background task that never blocks the SSE response the client is
+    actively streaming.
 
     Interrupt detection is the load-bearing part (CLAUDE.md's standing
     confirmation-gate rule) and does NOT work the way the old
@@ -272,6 +287,9 @@ async def _stream_turn(
         else:
             final_message = state.values["messages"][-1]
             yield _sse_event({"type": "message", "content": _render_content(final_message.content)})
+            if gate_outcome is not None:
+                approved, action = gate_outcome
+                asyncio.create_task(observability.score_gate_outcome(thread_id, approved, action))
         await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
     except asyncio.CancelledError:
         # /chat/stop already told its caller "stopped: true" — nothing left
@@ -418,8 +436,25 @@ async def chat(request: ChatRequest) -> StreamingResponse:
 @app.post("/resume")
 async def resume(request: ResumeRequest) -> StreamingResponse:
     thread_id = await _resolve_thread_id(request.thread_id)
+    # Read the pending interrupt's payload BEFORE resuming, purely to
+    # extract its `action` for scoring (STEPS.md 82, evaluations pillar) —
+    # same aget_state()/state.tasks[*].interrupts read _stream_turn itself
+    # already does at the end of a turn, just done here first since the
+    # action needs to be known before the resume call that resolves it.
+    state = await app.state.graph.aget_state(make_thread_config(thread_id))
+    pending = [i for t in state.tasks for i in t.interrupts]
+    action = (
+        pending[0].value.get("action")
+        if pending and isinstance(pending[0].value, dict)
+        else None
+    )
     return StreamingResponse(
-        _stream_turn(app.state.graph, thread_id, Command(resume=request.approved)),
+        _stream_turn(
+            app.state.graph,
+            thread_id,
+            Command(resume=request.approved),
+            gate_outcome=(request.approved, action),
+        ),
         media_type="text/event-stream",
     )
 

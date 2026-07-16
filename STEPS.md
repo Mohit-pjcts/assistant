@@ -6059,3 +6059,406 @@ again.
 Every item is either closed or has an explicit, documented accept-as-is
 decision, and the README reflects the project through Phase 15 — Phase
 10's done-when criteria are met.
+
+---
+
+## 79. Phase 16 opened — Langfuse v2 wired in, real EOL/compat blocker found and resolved (2026-07-16)
+
+**Objective for this entry:** Phase 16 (Langfuse v2 integration, then
+migration to v3) proposed and scoped; Part A's first real slice —
+tracing wired into `make_thread_config()` so all three call sites (CLI,
+voice, dashboard SSE) pick it up for free — implemented, verified, and
+landed.
+
+**Real blocker found by verification, not assumed (Verification
+discipline in action again):** installed `langfuse>=2.0,<3.0` and its
+actual latest/final release resolved to `2.60.10` — Sept 2025, the last
+v2 release ever; the v2 line is EOL. `from langfuse.callback import
+CallbackHandler` raised a bare `ModuleNotFoundError` against this
+project's real installed `langchain==1.3.12`: v2's LangChain integration
+hard-imports three legacy paths (`langchain.callbacks.base`,
+`langchain.schema.agent`, `langchain.schema.document`) that LangChain's
+1.0 rewrite deleted. Confirmed this is a known, unresolved upstream bug
+(langfuse/langfuse#9758) — not something specific to this project's
+setup. Tried the obvious fix first and confirmed it does NOT work:
+LangChain's own official `langchain-classic` backport package installs
+as a separate namespace (`langchain_classic.*`), not a monkeypatch of
+the old `langchain.*` paths — verified by installing it and re-running
+the exact same import, still failed.
+
+Also checked, since it changes the phase's whole premise: Langfuse v3
+(`3.15.0`, its current release) imports cleanly against this project's
+LangChain 1.x with zero shimming — but Langfuse itself has already moved
+past v3. The SDK was rewritten again into v4 in March 2026; v3's last
+release was v3.15.0 in May 2026. So "v2 vs. evaluating v3" (the
+original framing) is stale on two fronts: v2 doesn't actually run here,
+and v3 isn't current anymore either.
+
+**Presented this to the user rather than building on a broken or stale
+premise** (AskUserQuestion: skip v2 / stand up v2 in an isolated pinned
+env / target v3→v4 instead). The user's answer was direct: they need v2
+integrated first, then migrated to v3, as originally asked — wanted to
+know if there was a real way to do it, not a way around it.
+
+**Resolution — a verified, principled compatibility shim, not a
+downgrade or a mock:** the three legacy paths v2 imports were themselves
+just re-export shims over `langchain_core` classes in pre-1.0 LangChain
+(that's exactly what 1.0 deleted — the shim layer, not the underlying
+classes). `assistant/observability.py`'s
+`_install_langchain_legacy_shim()` restores those three paths in
+`sys.modules`, pointing at the real `langchain_core.callbacks.base.
+BaseCallbackHandler` / `langchain_core.agents.{AgentAction,AgentFinish}`
+/ `langchain_core.documents.Document` — the identical objects the
+legacy shims used to re-export. Verified live: with this in place,
+`langfuse.callback.CallbackHandler` imports AND constructs cleanly
+against the real installed LangChain 1.x. Explicitly scoped as
+Part-A-only in the module's docstring — Part B (v3) deletes this
+function and its call site entirely, since v3 doesn't need it; that
+deletion is itself part of the migration diff worth showing.
+
+**Design decision — one shared handler, not one per turn:** grepped the
+real installed `langfuse/callback/langchain.py` source rather than
+guessing — confirmed `metadata.get("langfuse_session_id")` overrides the
+handler's own `self.session_id` on every call. So a single
+`CallbackHandler` is built once per process (lazy singleton in
+`observability.py`, `None` if `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`
+are unset — same defensive posture as `server.py`'s `LangSmithClient`
+handling), and `agent.make_thread_config()` merges in
+`{"callbacks": [...], "metadata": {"langfuse_session_id": thread_id}}`
+per call. Rebuilding the handler per turn would have leaked a background
+flush thread per turn in the long-lived voice daemon/dashboard backend
+processes — this avoids that. All three call sites (`main.py`,
+`voice_daemon.py`, `server.py`) get tracing for free with zero
+per-call-site code, since they all already build their config through
+`make_thread_config()`.
+
+**Known open question, deliberately not solved yet:** v2's LangChain
+integration only supports `langfuse_session_id`/`langfuse_user_id`/
+`langfuse_prompt` via per-call metadata — no `langfuse_trace_id`. A
+confirmation-gated turn is two separate `ainvoke()`/`astream_events()`
+calls (pre-interrupt, then `Command(resume=...)`) sharing one
+checkpoint; without explicit trace linking these will likely show as two
+separate traces grouped under the same session rather than one. Left as
+a real live-verification item once real Langfuse API keys exist, not
+guessed at now.
+
+**Delivered:** `assistant/observability.py` (new); `agent.
+make_thread_config()` merges in the Langfuse run config (no-op `{}`
+when unconfigured); `requirements.txt`/`pyproject.toml` gained
+`langfuse>=2.0,<3.0`; `.env.example` gained
+`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`/`LANGFUSE_HOST`;
+`tests/test_observability.py` (5 new tests, no mocking — real
+`CallbackHandler` construction with throwaway keys, since construction
+doesn't authenticate synchronously, verified by hand). Full suite:
+165/165 pass (160 prior + 5 new), including `test_supervisor.py`/
+`test_server.py`/`test_write_tools.py` exercising real graph invocations
+through the now-modified `make_thread_config()` — confirms the change
+doesn't disturb the interrupt/resume path or any existing call site.
+`ruff check` clean.
+
+**Not yet done (next in Part A):** live verification against a real
+Langfuse account — the user still needs to create one and provide real
+`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` (same CHECKPOINT pattern as
+Phase 2's Google Cloud Console steps) before a real trace can be
+confirmed in the Langfuse UI for each of the three call sites, and
+before the interrupt/resume trace-linking question above can be
+answered by observation instead of left open.
+
+---
+
+## 80. Langfuse skill installed + used to audit/fix the v2 integration; live-verified against a real account (2026-07-16)
+
+**Skill install, per the standing Phase 11 vetting policy:** user asked to
+install the official `langfuse/skills` GitHub repo and use it. Read it
+first, in full, before installing anything — not just a WebFetch summary:
+fetched every raw file (`SKILL.md` + all 10 `references/*.md`) via
+`raw.githubusercontent.com` and reviewed the actual content. Findings:
+published under the official `langfuse` GitHub org (MIT licensed), its
+`allowed-tools` frontmatter is narrowly scoped (`WebFetch(domain:
+langfuse.com)`, `curl *langfuse.com/*`, and read-only `langfuse-cli`
+patterns only — `list`/`get`/`--help`/`__schema`, no `create`/`update`/
+`delete`), and it explicitly instructs agents never to ask users to paste
+secret keys into chat. Cleared the vetting bar (not high/medium risk, not
+"full agent permissions," vendor's own skill for their own product — same
+trust category as the already-vetted Gmail/Calendar MCP servers). Installed
+to `~/.claude/skills/langfuse/` (matches the existing `frontend-design`/
+`find-skills` user-level layout — this project has no project-scoped
+`.claude/skills/` directory), downloaded via `curl` directly to guarantee
+byte-for-byte fidelity rather than retyped from a fetch summary.
+
+**Used the skill's `references/instrumentation.md` workflow** (assess
+state → verify baseline requirements → run and self-audit real traces →
+fix gaps) against the existing Part A integration. Fetched the real
+best-practices doc fresh per the skill's explicit instruction ("never audit
+from memory"): https://langfuse.com/docs/observability/best-practices.
+
+**Finding 1 — trace scope resolves the STEPS.md 79 open question, not a
+gap:** the best-practices doc explicitly lists "your workflow spans
+multiple requests with human-in-the-loop steps in between" as a case where
+session-grouping (not single-trace-spanning) is the right model. This is
+exactly this project's confirmation-gate pattern (pre-interrupt
+`ainvoke()`, then a separate post-resume `ainvoke()`). Conclusion: two
+separate traces under one shared `langfuse_session_id` for a gated action
+is the intended pattern, not something to fix. Closes the open question
+from STEPS.md 79.
+
+**Finding 2 — trace naming and tags, fixed:** grepped the real installed
+source and confirmed `trace_name`/`tags` are constructor-bound in v2, not
+per-call overridable via metadata the way `langfuse_session_id` is (without
+a name, the code falls back to the triggering LangChain class's own name,
+e.g. `CompiledStateGraph` — fails the best-practices "choose good names"
+guidance). Added `observability.configure_client(name)`: each of the three
+call sites is already its own dedicated long-lived process, so a
+per-process handler built once with `trace_name="agent-turn"` (stable,
+verb-ish, identical operation across all three clients) and
+`tags=["client:cli"|"client:voice"|"client:dashboard"]` fits naturally —
+wired into `main.py` (inside `main()`, not module scope — `voice_daemon.py`
+imports `_render_content` from `main.py` and must not inherit a "cli" tag
+as a side effect of that import), `voice_daemon.py`, and `server.py`.
+
+**Finding 3 — a second real env-var bug, found via the skill's own
+documented gotcha:** `auth_check()` 401'd against both US and EU cloud
+hosts. Root cause: the user's `.env` used `LANGFUSE_BASE_URL` (the
+`langfuse-cli` skill's own name for this setting, per its `references/
+cli.md`), not `LANGFUSE_HOST` (this project's `.env.example` name) —
+`observability.py` was only reading `LANGFUSE_HOST`, silently falling back
+to the wrong default region (US) instead of the account's real region (JP
+cloud, `https://jp.cloud.langfuse.com`). Fixed `_get_handler()` to accept
+either name, `LANGFUSE_HOST` taking precedence if both are set; documented
+in `.env.example`. Re-verified: `auth_check()` now returns `True`.
+
+**Live end-to-end verification (real account, real Anthropic calls, real
+trace fetched back):** ran one real turn through the actual graph (a
+throwaway checkpointer DB, cleaned up after — this project's "throwaway
+scripts must not pollute real state" rule), tagged `client:cli`, then
+fetched the resulting trace back via the Langfuse Python SDK's
+`fetch_trace()` (not `npx langfuse-cli` — the auto-mode classifier
+correctly declined running an unreviewed third-party npm package with real
+secret keys exported into its environment; the already-installed, already-
+read `langfuse` Python SDK was the safer and equally valid way to do the
+same read). Confirmed: trace name `agent-turn` ✓, session_id matches
+thread_id ✓, tags `['client:cli']` ✓, span hierarchy correctly nests the
+real graph structure (`supervisor`, `recall_memory`, `extract_memory`,
+`compact_history`, sub-agent `model` nodes) with zero extra code — framework
+integration handles this automatically, exactly as the best-practices doc
+predicts.
+
+**Finding 4 — a real, confirmed, NOT-fixed v2 limitation:** both
+GENERATION observations in the real fetched trace (Haiku's memory
+extraction call, Sonnet's supervisor call) show `usage.output` and
+`usage.total` as `0` despite the calls succeeding and `usage.input` being
+correct. Root-caused by reading the real installed source
+(`_parse_usage`/`_parse_usage_model` in `langfuse/callback/langchain.py`):
+Anthropic's modern usage shape (via extended thinking + prompt caching —
+both unconditional, project-wide, load-bearing decisions) includes fields
+v2's fixed `UpdateGenerationBody` pydantic schema doesn't recognize,
+throwing a validation error internally on every single generation's usage
+update (caught by LangChain's own callback-error handling, so it never
+crashes a turn — just silently loses the token/cost data point). This is
+systemic, not occasional, given extended thinking/caching are always on.
+Deliberately NOT patched: unlike the import-path shim (STEPS.md 79, which
+restores something LangChain itself used to ship), fixing this would mean
+monkeypatching Langfuse's own internal validation logic — a materially
+different and much less principled kind of intervention. Documented in
+`observability.py`'s docstring as a confirmed, live-verified v2 limitation
+and left as a concrete Part B verification target (does v3 handle modern
+Anthropic usage shapes correctly?) — itself useful, honest content for the
+user's v2→v3 demo, not a gap to hide.
+
+**Delivered:** `~/.claude/skills/langfuse/` installed; `observability.py`
+gained `configure_client()`, `TRACE_NAME`, the `LANGFUSE_HOST`/
+`LANGFUSE_BASE_URL` fallback, and the usage-tracking finding documented;
+`main.py`/`voice_daemon.py`/`server.py` each call `configure_client()`;
+`.env.example` documents the host-name alias; `tests/test_observability.py`
+gained a 6th test (`test_configure_client_sets_trace_name_and_tags`). Full
+suite: 166/166 pass; `ruff check` clean.
+
+**Not yet done:** live verification for the voice and dashboard call sites
+specifically (only CLI was exercised directly above, though the trace
+structure confirms the shared `make_thread_config()` wiring is
+client-agnostic); the Part A open item from STEPS.md 79/PLAN.md — deciding
+whether the confirmed session-grouped-not-single-trace behavior for gated
+actions needs any further action (current answer, per Finding 1: no, it's
+the intended pattern).
+
+---
+
+## 81. Coverage check + confirmed v3 fixes the output-token bug (2026-07-16)
+
+**Coverage question, answered directly:** Langfuse's three pillars are
+observability/tracing, prompt management, and evaluations. Phase 16 so far
+covers ONLY the first — `assistant/observability.py` is exclusively a
+`CallbackHandler` wired into `make_thread_config()`. Prompt management
+(`get_prompt()`/`create_prompt()`, versioning) is untouched — this
+project's system prompts (`SUPERVISOR_SYSTEM_PROMPT`,
+`LIFE_ADMIN_SYSTEM_PROMPT`, etc.) remain plain Python constants in
+`supervisor.py`/`sub_agents.py`. Evaluations (datasets, experiments,
+scores, LLM-as-judge) are also untouched — no datasets exist in Langfuse
+for this project, nothing is scored. Flagged explicitly rather than left
+implied by the "integrated Langfuse" framing.
+
+**v3 output-token bug check — confirmed fixed, tested empirically, not
+assumed.** Temporarily upgraded the venv to `langfuse>=3.0,<4.0` (v2's own
+code/tests untouched — reverted after). Fetched the real, current v3
+LangChain integration doc fresh
+(https://langfuse.com/integrations/frameworks/langchain) rather than
+guessing the API. Ran two real `ChatAnthropic(thinking={"type":
+"adaptive"})` calls through v3's `langfuse.langchain.CallbackHandler`
+against the real account:
+
+1. A trivial question (thinking likely skipped by the adaptive model) —
+   `usage_metadata={'input_tokens': 30, 'output_tokens': 3, 'total_tokens':
+   33, 'input_token_details': {...cache fields...}}`. No callback errors.
+   Fetched the resulting trace: `usage_details={'input': 30, 'output': 3,
+   'total': 33}` plus real non-zero `cost_details` — correct.
+2. A genuine multi-step reasoning question that DID trigger visible
+   thinking content (`has_reasoning_content: True`) — `usage_metadata`
+   showed `output_tokens: 493`. No callback errors. Fetched the trace:
+   `usage_details={'input': 92, 'output': 493, 'total': 585}` — exact match,
+   correct.
+
+Both cases are the same failure mode that broke every generation in v2's
+Part A testing (STEPS.md 80, Finding 4) — Anthropic's modern usage shape
+via extended thinking/prompt caching. v3 handles it cleanly with zero
+validation errors in both the trivial and thinking-heavy case. **This
+confirms the Part B verification target from STEPS.md 80/PLAN.md: v3 does
+fix the output-token/cost tracking bug.** Revered the venv to
+`langfuse>=2.0,<3.0` afterward (Part A's actual shipped code still targets
+v2); `tests/test_observability.py` re-confirmed passing (6/6) post-revert.
+This is real, concrete evidence for the migration demo: a bug that's
+100%-reproducible on every real turn in v2, gone on v3, verified against
+the same account.
+
+---
+
+## 82. All three Langfuse pillars implemented in v2 — prompt management + evaluations (2026-07-16)
+
+**Objective:** per the user's explicit direction, implement Langfuse's other
+two pillars (prompt management, evaluations) in v2 as well — Part A was
+tracing-only until now (STEPS.md 79–81).
+
+### Prompt management
+
+Migrated 6 system prompts to Langfuse (label="production"), each with its
+original text kept as a MANDATORY local fallback, never removed:
+`supervisor-system-prompt`, `coding-agent-system-prompt`,
+`research-agent-system-prompt`, `life-admin-agent-system-prompt`,
+`mac-control-agent-system-prompt` (all in `supervisor.py`/`sub_agents.py`),
+and `compaction-summary-prompt` (`compaction.py`, the one templated prompt —
+`{transcript}` → `{{transcript}}` to match Langfuse's own syntax).
+
+**Deliberately excluded `memory_extraction.py`'s `_EXTRACTION_PROMPT`.**
+Every migrated prompt is a normal agent system prompt whose security
+properties already depend on the model choosing to follow instructions — a
+"soft" trust boundary. The extraction prompt is different in kind: Phase 7
+Part B's source-restriction guarantee is explicitly STRUCTURAL, built
+specifically NOT to depend on the model being told the right thing (prompt-
+based defenses were judged insufficient for that one channel — a durable
+memory write outliving a single turn). Making that prompt's TEXT fetchable
+from a third-party account would add a new prompt-supply-chain trust
+dependency to the one place in this project explicitly designed not to need
+it. CLAUDE.md's "do not weaken without discussion" standing note on that
+module applies — stays local-only, on purpose, documented in `assistant/
+prompts.py`'s module docstring, not silently dropped.
+
+**Design (`assistant/prompts.py`, new):** `get_prompt(name, fallback, /,
+**variables)` — positional-only `name`/`fallback` (see the real bug below);
+reuses `observability.get_client()` (new: the underlying plain `Langfuse`
+client, same lazy singleton/credentials the `CallbackHandler` already
+owns — no second client/connection). Uses the SDK's own native `fallback=`
+kwarg on `get_prompt()` (verified against the real source: this returns a
+real, `.compile()`-able prompt client wrapping the fallback text on any
+fetch error, not just a bare string) rather than hand-rolling try/except as
+the only safety net. A local `_compile_local()` mirrors Langfuse's own
+simple `{{var}}` substitution so the fallback path behaves identically to a
+real hosted prompt whether or not a client exists at all.
+
+**Real bug caught by the new test suite itself, fixed:**
+`get_prompt(name, fallback, **variables)`'s original signature meant a
+prompt containing a `{{name}}` variable could never be compiled —
+`variables["name"]` collided with the function's own `name` parameter.
+Fixed by making `name`/`fallback` positional-only (`/`) on both
+`get_prompt()` and `_compile_local()`. None of this project's current
+prompts happen to use `name`/`fallback`/`template` as a variable, but the
+API shouldn't silently break the day one does — caught before it could,
+not after.
+
+**Migration script:** `scripts/sync_prompts_to_langfuse.py` (new, manual,
+repeatable — not run automatically at app startup). Imports each module's
+`*_FALLBACK` constant and pushes it via `create_prompt(..., labels=
+["production"])`. Run live against the real account:
+
+```
+python scripts/sync_prompts_to_langfuse.py
+```
+
+**Live-verified (real account, not assumed):** before the sync, all 5
+non-templated prompts correctly returned the local fallback (404s from
+Langfuse, caught and handled — visible as the SDK's own logged warnings,
+not a crash). After the sync: all 5 fetch successfully from Langfuse with
+ZERO fallback triggered, and the resolved text is byte-for-byte identical
+to the original local fallback (perfect round-trip fidelity — nothing
+corrupted in the push/fetch/compile cycle). The templated
+`compaction-summary-prompt` was separately verified: fetches from Langfuse,
+`{{transcript}}` correctly substituted, no leftover placeholder.
+
+### Evaluations
+
+**Design:** log confirmation-gate approve/decline outcomes as Langfuse
+scores (`gate_outcome`, `BOOLEAN`, comment = the gated action's name) —
+implicit feedback on this project's own real usage pattern, not a synthetic
+dataset. `observability.score_gate_outcome(thread_id, approved, action)`
+(new), wired in as a fire-and-forget `asyncio.create_task(...)` at all
+three resume points (`main.py`'s CLI interrupt loop, `voice_daemon.py`'s
+`_process_turn` — both the voice-declined and normal-answered branches,
+`server.py`'s `/resume` endpoint via a new `_stream_turn(..., gate_outcome=
+...)` parameter, scored only once the resume fully resolves — no further
+chained interrupt). Never awaited inline anywhere: scoring is best-effort
+enrichment and must never add latency to a confirm/decline round trip a
+user is actively waiting on, nor ever raise into the caller.
+
+**A real, live-caught concurrency/attribution bug, found and fixed before
+shipping:** a gated action is TWO traces sharing one session (pre-interrupt,
+then the resume) — confirmed as the CORRECT intended pattern back in
+STEPS.md 80's Finding 1. The first version of `score_gate_outcome()`
+queried `trace.list(session_id=..., order_by="timestamp.desc")[0]`,
+trusting the ordering. Live test (using the existing `send_test_notification`
+dummy gated tool — no real side effects) caught it attaching the score to
+the WRONG (older, pre-interrupt) trace: Langfuse indexes traces
+asynchronously and NOT necessarily in creation order, so at query time only
+the older trace had finished indexing — making it the only, and therefore
+wrongly "most recent," result. Fixed with a `from_timestamp` filter that
+structurally excludes traces before a cutoff, so an incomplete result set
+can't be misattributed the way "the only trace found so far" was. A first
+fix attempt (10-second cutoff) UNDERSHOT and matched nothing at all — a
+second real, live-caught bug — root-caused to real, measured gaps between
+local wall-clock time and Langfuse's own recorded trace timestamp wide
+enough to clip the correct trace out of a tight window. Rather than chase
+an exact number (really measuring client/server clock alignment, not the
+actual property needed), widened to a generous 2-minute cutoff: since this
+only ever runs as a detached background task, a wider window costs nothing
+user-facing, and 2 minutes still reliably separates "this gate's own resume
+trace" from a genuinely distinct, much older interaction in the same
+long-lived session. Retry budget also increased (3×1.5s → 9×2s, ~18s) after
+the first live test showed Langfuse's indexing lag exceeding the original
+budget.
+
+**Live-verified, final version:** a real gated call through the real graph
+(the dummy notification tool), scored, and fetched back — confirmed the
+`gate_outcome=1.0` (`BOOLEAN`) score with `comment='send_test_notification'`
+attached to the CORRECT (newer, resume) trace, with the older pre-interrupt
+trace in the same session carrying no score.
+
+**Delivered:** `assistant/prompts.py` (new); `assistant/observability.py`
+gained `get_client()` and `score_gate_outcome()`; `scripts/
+sync_prompts_to_langfuse.py` (new); `supervisor.py`/`sub_agents.py`/
+`compaction.py` each route their system/summary prompt through
+`prompts.get_prompt()`, original text preserved as `*_FALLBACK`;
+`main.py`/`voice_daemon.py`/`server.py` each fire `score_gate_outcome()`
+after a resume resolves. `tests/test_prompts.py` (new, 5 tests) and 3 new
+tests in `tests/test_observability.py`. Full suite: 174/174 pass; `ruff
+check` clean.
+
+**Scope note carried forward from STEPS.md 81, now closed:** Langfuse's
+three pillars — observability/tracing, prompt management, evaluations —
+are now ALL implemented in this project's v2 integration.
