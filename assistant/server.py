@@ -274,11 +274,24 @@ async def _stream_turn(
     try:
         config = make_thread_config(thread_id)
         async for event in graph.astream_events(input_or_command, config=config, version="v2"):
-            if event.get("event") != "on_chat_model_stream":
-                continue
-            text = _extract_token_text(event["data"]["chunk"].content)
-            if text:
-                yield _sse_event({"type": "token", "text": text})
+            if event.get("event") == "on_chat_model_stream":
+                text = _extract_token_text(event["data"]["chunk"].content)
+                if text:
+                    yield _sse_event({"type": "token", "text": text})
+            elif event.get("event") == "on_custom_event" and event.get("name") == "research_fa_token":
+                # Phase 16 Part A.5 (the mentor's distributed-tracing
+                # spike): supervisor.py's research_agent_proxy() re-dispatches
+                # tokens it streams from the FA process via
+                # adispatch_custom_event(), since that's the one mechanism
+                # verified live to actually surface through astream_events()
+                # as a real event — LangGraph's own get_stream_writer()
+                # custom channel does NOT (checked empirically, not
+                # assumed). Forwarded identically to a normal token frame;
+                # the dashboard client can't tell the difference, same as
+                # the whole point of the spike being invisible to callers.
+                text = event["data"].get("text", "")
+                if text:
+                    yield _sse_event({"type": "token", "text": text})
 
         state = await graph.aget_state(config)
         pending = [i for t in state.tasks for i in t.interrupts]

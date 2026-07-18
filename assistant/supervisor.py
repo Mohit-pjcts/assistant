@@ -53,22 +53,27 @@ decide it's done can't spin the graph forever.
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+import json
+from typing import Annotated, Any, TypedDict
 
+import httpx
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
+from langchain_core.callbacks import adispatch_custom_event
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages.utils import convert_to_messages
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
-from assistant import prompts
+from assistant import observability, prompts
 from assistant.compaction import compact_history_node
 from assistant.memory_extraction import extract_and_propose_memory_node, recall_memory_node
 from assistant.sub_agents import (
@@ -78,6 +83,19 @@ from assistant.sub_agents import (
     build_research_agent,
 )
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
+
+# Phase 16 Part A.5 (the mentor's distributed-tracing spike, PLAN.md):
+# toggles research_agent between its normal in-process embedding and the
+# HTTP-proxied version calling assistant/fa_service.py as a separate
+# process — see build_graph()'s own use of this and research_agent_proxy()
+# below. Spike-scoped, off by default; flip to demonstrate the distributed
+# hop without touching any other sub-agent.
+RESEARCH_AGENT_VIA_HTTP = False
+RESEARCH_FA_URL = "http://127.0.0.1:8100/research"
+# Streaming counterpart, used by research_agent_proxy() below. /research
+# (blocking) is left in fa_service.py for direct comparison/testing, not
+# called by anything now that the proxy uses the streaming relay.
+RESEARCH_FA_STREAM_URL = "http://127.0.0.1:8100/research/stream"
 
 # Self-contained on import, same reasoning as tools.py/agent.py.
 load_dotenv()
@@ -298,6 +316,150 @@ def _route_after_specialist(state: GraphState) -> Command:
     return Command(goto="supervisor", update={"messages": [_make_routing_bridge()]})
 
 
+async def research_agent_proxy(state: GraphState) -> dict[str, Any]:
+    """Phase 16 Part A.5 (the mentor's distributed-tracing spike): replaces
+    the in-process `research_agent` subgraph node with an HTTP call to
+    `assistant/fa_service.py` running as its own process — reproducing
+    Nova's superagent-to-functional-agent hop in miniature. Registered
+    under the SAME "research_agent" graph node key as the normal
+    embedding (see build_graph()) — the handoff tool
+    (`TRANSFER_TO_RESEARCH`) and `destinations=(...)` both route by that
+    name string, so nothing else about the graph changes; only WHERE
+    research_agent actually runs does.
+
+    Uses `langgraph.config.get_config()` rather than taking `config` as a
+    second parameter — the existing plain nodes in this project
+    (`compact_history_node`, `recall_memory_node`) never needed the
+    RunnableConfig, so this is the first one that does; `get_config()` is
+    the documented way to reach it from inside a node body without
+    changing this function's call signature.
+
+    Message serialization: the same `model_dump()`/`convert_to_messages()`
+    round-trip `fa_service.py` uses, verified live before either side was
+    written.
+
+    Step 4 (v2-style cross-process trace nesting): reads the current
+    trace/observation id off the shared `CallbackHandler`'s private
+    `.runs` dict — explicitly fragile, spike-quality (PLAN.md Phase 16
+    Part A.5 design decision 3; the mentor's own doc calls this "the
+    fiddly bit"). **Fixed after a real code-review finding (CONFIRMED,
+    STEPS.md this spike):** the first version took `.runs`' LAST-inserted
+    entry as "this node's own" span — unsafe under concurrent clients,
+    since `.runs` is a dict on the ONE shared process-wide handler
+    (`observability.py`'s own singleton), not scoped per request; a
+    verifier confirmed a genuine asyncio yield point exists (langfuse's
+    `CallbackHandler` doesn't override `run_inline`) where a concurrent
+    client's callback could insert between this node starting and this
+    line reading `.runs`, misattributing trace IDs across unrelated
+    conversations. Fixed by keying the lookup on
+    `get_config()["callbacks"].parent_run_id` — verified live that this is
+    a real, exact LangChain run id matching one specific key in `.runs`
+    for THIS node's own execution context, not a heuristic guess. No
+    handler configured, no matching entry, means no linking info is sent —
+    the FA just falls back to its own session-only trace (still correctly
+    grouped, per Part A's already-verified session model), not an error.
+
+    Streaming relay (the design decision made once Steps 0-4 above proved
+    the core nesting question, not built first): consumes
+    `fa_service.py`'s `/research/stream` SSE endpoint instead of the
+    blocking `/research`, re-dispatching each token via
+    `langchain_core.callbacks.adispatch_custom_event` — verified live
+    before writing this that LangGraph's OWN `get_stream_writer()` custom
+    channel does NOT surface through `astream_events()` at all (a real,
+    empty-handed empirical test came first), whereas
+    `adispatch_custom_event()` genuinely does, as a real `on_custom_event`
+    event `server.py`'s `_stream_turn` can pick up (see that module's own
+    matching addition). Cancellation (`/chat/stop` mid-run) is expected to
+    propagate through httpx's async streaming context manager and actually
+    abort the underlying connection to the FA, not just stop listening
+    locally — verified live, not assumed (see STEPS.md, this spike).
+
+    Error handling (also fixed after the same review): the whole FA call
+    used to have no try/except at all — an unreachable/erroring FA raised
+    an uncaught `httpx` exception straight out of this node, crashing the
+    graph turn, which directly contradicts CLAUDE.md's "Tool errors are
+    data, not exceptions" load-bearing rule. Now caught and turned into a
+    real `AIMessage` the supervisor can react to. A malformed/unexpected
+    SSE line (missing `type`, bad JSON) is skipped rather than crashing the
+    node, and a stream that ends without ever sending a `"final"` frame
+    (FA-side error, dropped connection) is now detected explicitly instead
+    of silently returning an empty message list as if research succeeded
+    with nothing to report.
+    """
+    config = get_config()
+    thread_id = config["configurable"]["thread_id"]
+    outgoing = [m.model_dump() for m in state["messages"]]
+
+    handler = observability._get_handler()
+    langfuse_trace_id = None
+    langfuse_parent_observation_id = None
+    if handler is not None:
+        current_span = handler.runs.get(config["callbacks"].parent_run_id)
+        if current_span is not None:
+            langfuse_trace_id = current_span.trace_id
+            langfuse_parent_observation_id = current_span.id
+
+    final_messages_raw: list[dict[str, Any]] | None = None
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client, client.stream(
+            "POST",
+            RESEARCH_FA_STREAM_URL,
+            json={
+                "messages": outgoing,
+                "thread_id": thread_id,
+                "langfuse_trace_id": langfuse_trace_id,
+                "langfuse_parent_observation_id": langfuse_parent_observation_id,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    payload = json.loads(line[len("data: ") :])
+                except json.JSONDecodeError:
+                    continue
+                event_type = payload.get("type")
+                if event_type == "token":
+                    text = payload.get("text")
+                    if text:
+                        await adispatch_custom_event("research_fa_token", {"text": text})
+                elif event_type == "final":
+                    final_messages_raw = payload.get("messages", [])
+                elif event_type == "error":
+                    return {
+                        "messages": [
+                            AIMessage(
+                                content=f"Research request failed: {payload.get('detail', 'unknown error')}",
+                                name="research_agent",
+                            )
+                        ]
+                    }
+    except httpx.HTTPError as exc:
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"Research request failed: could not reach the research "
+                    f"service ({type(exc).__name__}).",
+                    name="research_agent",
+                )
+            ]
+        }
+
+    if final_messages_raw is None:
+        return {
+            "messages": [
+                AIMessage(
+                    content="Research request did not complete (the research service "
+                    "closed the connection without returning a result).",
+                    name="research_agent",
+                )
+            ]
+        }
+
+    return {"messages": convert_to_messages(final_messages_raw)}
+
+
 def build_supervisor() -> CompiledStateGraph:
     """Build the supervisor sub-graph — a create_agent(...) ReAct loop whose
     tools are handoff tools, not real work tools."""
@@ -364,7 +526,15 @@ def build_graph(
         ),
     )
     builder.add_node("coding_agent", build_coding_agent(coding_extra_tools))
-    builder.add_node("research_agent", build_research_agent())
+    # Phase 16 Part A.5: RESEARCH_AGENT_VIA_HTTP swaps the in-process
+    # research_agent subgraph for the HTTP-proxied version calling
+    # assistant/fa_service.py — see that flag's own module-level docstring.
+    # Same node key either way, so nothing downstream (handoff tool,
+    # destinations tuple, routing) needs to change.
+    builder.add_node(
+        "research_agent",
+        research_agent_proxy if RESEARCH_AGENT_VIA_HTTP else build_research_agent(),
+    )
     builder.add_node("life_admin_agent", build_life_admin_agent(mcp_tools))
     builder.add_node("mac_control_agent", build_mac_control_agent())
     builder.add_node(

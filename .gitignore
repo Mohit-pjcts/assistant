@@ -32,3 +32,6 @@ tokens.json
 # jobs, which are themselves separate git repos and must never be added as
 # gitlinks to this one.
 .claude/
+
+# Obsidian notes-app config — personal editor state, not project content.
+.obsidian/

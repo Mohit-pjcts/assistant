@@ -26,6 +26,12 @@ langsmith>=0.10.0
 # docstring. Part B (v3 migration) will change this pin.
 langfuse>=2.0,<3.0
 
+# Phase 16 Part A.5: the mentor's distributed-tracing spike. Was already a
+# transitive dep (via anthropic's own SDK); made explicit now that
+# supervisor.py/fa_service.py import it directly for the FA proxy's HTTP
+# calls (a real code-review finding -- an undeclared direct import).
+httpx>=0.27.0
+
 # Dev-only: LangGraph Studio (`langgraph dev`), not needed to run `assistant`
 langgraph-cli[inmem]>=0.4.0
 

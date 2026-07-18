@@ -1364,6 +1364,129 @@ live-verified ✓; a missing/bad Langfuse key doesn't break chat on any client
 live re-confirm optional given the mechanism is identical across clients);
 STEPS.md updated ✓.
 
+### Part A.5 — Distributed tracing spike (mentor-directed, precedes Part B) — COMPLETE (2026-07-18)
+
+**Why this exists:** the user's mentor (reviewing the Phase 16 work for a
+separate distributed system, "Nova") shared `DISTRIBUTED_TRACING_SPIKE.md`
+at the project root — this project's trace nesting is "free" because
+everything runs in one process (supervisor + all sub-agents share one
+in-memory handler/OTEL context); Nova's real system calls each functional
+agent over HTTP, in a separate process, where in-memory trace context does
+NOT cross the boundary. The spike asks to reproduce that exact gap in
+miniature — peel `research_agent` off into its own HTTP service, watch
+nesting break, fix it the v2 way (mirroring Nova's current hand-rolled
+`trace_id`/`parent_observation_id` plumbing) — before Part B's actual v3
+migration replaces that plumbing with OTEL `traceparent` propagation
+(the spike's own Step 5, which happens AS PART OF Part B, not before it).
+
+**Guardrails (from the mentor's doc, verbatim intent):** only touch
+`research_agent` — the other three sub-agents stay in-process; don't touch
+the security model, memory, or the confirmation gate (research is
+read-only, deliberately chosen for exactly this reason); reuse
+`build_research_agent()` as-is, don't reimplement the agent; lives on a
+branch (`spike/distributed-tracing`), fully revertible.
+
+**Design decisions locked with the user before starting (not in the
+mentor's original doc, added at the user's direction):**
+1. The proxy-to-FA hop is a real streaming HTTP/SSE relay, not the doc's
+   literal blocking `httpx.post()` — sequenced as a follow-on AFTER the
+   core blocking version proves the actual trace-nesting break/fix (the
+   spike's real point), not built streaming from the first attempt.
+2. "Streaming survives the hop" (acceptance criterion 3) means: hitting
+   `/chat/stop` mid-run must actually ABORT the in-flight HTTP request to
+   the FA, not just stop listening to it locally while it keeps running
+   server-side — needs live verification, not assumed.
+3. Step 4's per-request `CallbackHandler(stateful_client=...)` construction
+   on the FA side (needed because binding "which parent trace to nest
+   under" happens at construction time in v2, unlike `session_id` which is
+   per-call-overridable) reintroduces the exact per-call-handler-thread-
+   leak pattern `observability.py` deliberately avoided elsewhere in this
+   project. Accepted as fine for spike-scale traffic; the user will ask
+   their mentor separately (after this project) whether Nova's real FA
+   services have the same pattern in production or handle it differently
+   — not blocking this spike.
+
+**Steps (mirrors the mentor's doc):**
+0. **DONE (STEPS.md 83).** Baseline: confirmed the CURRENT (already-shipped,
+   in-process) architecture shows one trace (`agent-turn`) with
+   `research_agent`'s spans nested under the supervisor turn — live,
+   real query. (Tangent, resolved: this run surfaced a real stored
+   long-term-memory fact affecting output tone, flagged to the user
+   immediately and deleted before continuing — not a bug in this spike,
+   but worth knowing before mentor-facing screenshots.)
+1. **DONE (STEPS.md 83).** New file `assistant/fa_service.py`: minimal
+   FastAPI app, one endpoint running `build_research_agent()` as its own
+   process on a separate port; its own Langfuse identity via
+   `observability.configure_client("research-fa")`. A real bug caught and
+   fixed live: the import-order trap (`sub_agents.py`'s own module-level
+   prompt fetches construct the lazy handler before `configure_client()`
+   ran) — the exact same class of bug `main.py` already had to dodge,
+   missed here on the first attempt, caught by checking the fetched
+   trace's actual tags rather than assuming.
+2. **DONE (STEPS.md 83).** Swapped `supervisor.py`'s in-process
+   `research_agent` node for an HTTP proxy node (`research_agent_proxy`)
+   calling the FA service — blocking version first (design decision 1).
+   Gated by `RESEARCH_AGENT_VIA_HTTP` (default `False`); full 174/174 suite
+   reconfirmed passing with the flag off before proceeding further.
+3. **DONE (STEPS.md 83).** Observed the breakage live: same query as Step
+   0, flag on, showing TWO disconnected traces exactly as predicted —
+   Nova's exact problem, reproduced across two real separate OS processes.
+4. **DONE (STEPS.md 83).** Fixed nesting the v2 way — and verified the
+   mentor's own doc's API claims empirically before coding against them:
+   confirmed `.runs` is only readable mid-execution (empty once a call
+   completes), confirmed which entry is "the current one" (last-inserted,
+   verified via a live probe), confirmed `parent_observation_id` actually
+   nests (not just doesn't error, checked via a real fetched trace).
+   Implemented caller-side extraction + FA-side `stateful_client` binding.
+   **Live-verified end to end: ONE correctly nested trace tree spanning
+   two real processes** — `LangGraph → research_agent (handoff span) →
+   research-fa (linking span) → research_agent (FA's own agent) → model →
+   tools → tavily_search` — confirmed by walking every `parent_observation_id`
+   in the fetched trace, not just "it looks fine."
+5. **NOT STARTED — this is Part B's own work, deferred until Part B
+   begins.** Fix it the v3/OTEL way — `traceparent` header propagation,
+   delete the Step-4 v2 plumbing. That deletion is part of the actual
+   migration diff.
+
+**Streaming relay + real abort-on-stop — DONE (STEPS.md 84), the design
+decision deferred from earlier in this Part.** Real finding first: verified
+empirically that LangGraph's own `get_stream_writer()` custom-stream
+channel does NOT surface through `astream_events()` at all (a throwaway
+test came back empty-handed); `langchain_core.callbacks.
+adispatch_custom_event()` does, as a genuine `on_custom_event`. Built on
+that: `fa_service.py` gained a `/research/stream` SSE endpoint (final
+message list captured from the root run's `on_chain_end`, since this
+stateless FA has no checkpointer to `aget_state()` from);
+`research_agent_proxy()` now consumes it via `httpx`'s streaming client,
+re-dispatching tokens through `adispatch_custom_event`; `server.py`'s
+`_stream_turn` gained a small addition to forward those as ordinary token
+frames — indistinguishable to the dashboard client from an in-process
+token, which is the actual point. Live-verified: 11 real token frames
+arrived assembling into the exact final text; the FA's own access log
+confirmed the streaming endpoint was actually hit; trace nesting from Step
+4 still holds unchanged. **Cancellation, checked directly rather than
+trusted:** cancelled the caller mid-stream on a deliberately long query,
+then inspected the FA's own fetched trace — its observations came back at
+`ERROR` level with the literal message "Cancelled via cancel scope ... by
+<Task ... RequestResponseCycle.run_asgi() ...>", definitive proof the FA's
+own request handler was genuinely aborted mid-flight, not left running to
+completion after the caller stopped listening.
+
+**Acceptance criteria (from the mentor's doc):** v2 cross-process nesting
+correct ✓ (Step 4); v3 cross-process nesting correct via OTEL, v2 plumbing
+deleted (Step 5, Part B — not started, by design); streaming survives the
+hop including real abort-on-stop ✓ (STEPS.md 84, live-verified both
+directions); research-fa's thinking-tier output tokens show up non-zero in
+v3 across the process boundary (depends on Part B's v3 migration happening
+first — not yet testable, not a gap in this spike).
+
+**Done-when (Part A.5):** Steps 0–4 live-verified against the real
+Langfuse account ✓, including real UI screenshots (baseline/breakage/fixed,
+saved to `~/Desktop/langfuse-spike-screenshots/`); the streaming relay and
+real-abort-on-stop behavior built and live-verified ✓ (STEPS.md 84);
+STEPS.md updated ✓ (entries 83–84). Step 5 is Part B's own work, not this
+spike's — Part A.5 itself is now complete.
+
 ### Part B — Migrate to v3
 
 **Steps:**

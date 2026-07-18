@@ -6462,3 +6462,308 @@ check` clean.
 **Scope note carried forward from STEPS.md 81, now closed:** Langfuse's
 three pillars — observability/tracing, prompt management, evaluations —
 are now ALL implemented in this project's v2 integration.
+
+---
+
+## 83. Distributed tracing spike (mentor-directed, Phase 16 Part A.5): Steps 0-4 complete (2026-07-18)
+
+**Context:** the user's mentor (reviewing the Langfuse v2 work for a
+separate distributed system, "Nova") shared `DISTRIBUTED_TRACING_SPIKE.md`
+at the project root, asking for this spike BEFORE Part B's v3 migration —
+this project's trace nesting is "free" (single process, shared in-memory
+handler); Nova calls each functional agent over real HTTP, in a separate
+process, where in-memory context does NOT cross the boundary. Full plan
+recorded in PLAN.md's new "Part A.5" section (inserted between Part A and
+Part B). Work done on a new branch, `spike/distributed-tracing`, per the
+doc's own guardrail (revertible, isolated).
+
+**Design decisions locked with the user before starting** (discussed across
+several turns, not in the mentor's original doc): the proxy-to-FA hop is a
+real streaming HTTP/SSE relay eventually, sequenced AFTER the core blocking
+version proves the actual trace-nesting break/fix (not built streaming
+first); "streaming survives the hop" means `/chat/stop` must actually ABORT
+the in-flight FA request, not just stop listening locally; the FA-side
+per-request `CallbackHandler(stateful_client=...)` construction (Step 4)
+reintroduces the exact per-call-handler thread-leak pattern `observability.py`
+avoided elsewhere — accepted for spike scale, the user will ask their
+mentor separately (after this project) whether Nova's real FA services have
+the same pattern in production.
+
+**Step 0 — baseline (verified live):** a real research query through the
+current, already-shipped in-process architecture produced exactly ONE
+trace with `research_agent`/`tavily_search` correctly nested under it — the
+"single-process nesting is free" reference point. (Tangent, not a bug in
+this spike: this run surfaced a genuinely stored `long_term_memory.sqlite`
+fact — "User prefers to be referred to as 'daddy'" — recalled correctly per
+Phase 7's own security framing but visibly affecting output tone; flagged
+to the user immediately since it could show up in mentor-facing
+screenshots; user deleted it before continuing.)
+
+**Step 1 — `assistant/fa_service.py` (new):** minimal FastAPI app running
+`build_research_agent()` (reused as-is, per the guardrails) as its own
+uvicorn process on port 8100. Own Langfuse identity via
+`observability.configure_client("research-fa")`. Message serialization
+verified live before writing any service code: LangChain's own
+`model_dump()`/`convert_to_messages()` round-trip preserves type and
+`additional_kwargs` markers (e.g. the Phase 6/7 turn-boundary markers)
+intact through JSON.
+
+**A real bug, caught live and fixed:** the FA's first version had its
+traces tagged `[]` instead of `['client:research-fa']`. Root cause:
+`from assistant.sub_agents import build_research_agent` triggers
+`sub_agents.py`'s own module-level `prompts.get_prompt()` calls for all
+five of ITS system prompts at import time — and that call chain
+(`prompts.get_prompt -> observability.get_client -> _get_handler`) is what
+actually constructs the lazy singleton handler, with `tags=None`, if the
+import happens before `configure_client()` runs. Exactly the ordering trap
+`main.py`'s own `configure_client()` call already had to dodge (STEPS.md
+80) — missed here on the first attempt, caught by checking the fetched
+trace's own `tags` field rather than assuming the call order was fine.
+Fixed by moving `configure_client("research-fa")` to before the
+`sub_agents` import; re-verified live, tags correct.
+
+**Step 2 — HTTP proxy node (`supervisor.py`):** `research_agent_proxy()`
+(new), registered under the SAME `"research_agent"` graph node key the
+in-process version used (confirmed via `TRANSFER_TO_RESEARCH`'s own
+definition that the handoff tool and `destinations=(...)` route by that
+name string — so nothing else about the graph needed to change). Gated by
+a new `RESEARCH_AGENT_VIA_HTTP` module flag, default `False` — the shipped
+in-process path is completely unaffected; full 174/174 suite re-confirmed
+passing with the flag off before touching anything further. Uses
+`langgraph.config.get_config()` (verified to exist and work, not assumed)
+to reach the RunnableConfig from inside a plain node function, since
+neither existing plain node (`compact_history_node`, `recall_memory_node`)
+previously needed it.
+
+**Step 3 — breakage observed, live:** with the flag flipped, the same
+query produced exactly the predicted TWO disconnected traces — one tagged
+`client:research-fa` containing the FA's own real work (`tavily_search`,
+its internal `research_agent` reasoning), one tagged `client:cli`
+containing the supervisor's turn, which shows a `research_agent` span (the
+handoff boundary) but nothing nested inside it. Nova's exact problem,
+reproduced end-to-end across two genuinely separate OS processes.
+
+**Step 4 — v2-style fix, live-verified, with the API itself verified
+before coding against it:** rather than trust the mentor's doc's code
+snippet at face value, checked directly:
+- `handler.runs` (the private dict the doc's Step 4 points at) is EMPTY
+  once a call fully completes — entries close out as their spans end. Can
+  only be read from INSIDE a still-executing node, confirmed by probing it
+  from within `research_agent_proxy` itself mid-run: 3 live entries, all
+  sharing one `trace_id`, with the LAST-inserted entry (dicts preserve
+  insertion order) confirmed to be the current node's own handoff span.
+- `trace.span(parent_observation_id=..., name=...)` — not type-hinted in
+  the convenience wrapper's signature (only `**kwargs`) — verified via a
+  real probe trace, fetched back, that the child's `parent_observation_id`
+  genuinely matches the intended parent's `id`, not just "didn't error."
+- `CallbackHandler(stateful_client=...)` confirmed against
+  `base_callback_handler.py`'s own source as the documented interop
+  mechanism for binding a handler to a pre-existing span.
+
+Implemented: caller side (`research_agent_proxy`) extracts
+`trace_id`/`observation_id` from `.runs`' last entry, sends them in the
+POST body; FA side (`fa_service.py`'s new `_tracing_config()`) rebuilds the
+parent span and constructs a `stateful_client`-bound handler when those
+fields are present, falling back to the normal session-tagged handler
+otherwise.
+
+**Verified live, real end-to-end result:** ONE trace, correctly nested
+across the process boundary —
+`LangGraph → research_agent (supervisor's handoff span) → research-fa
+(FA's linking span) → research_agent (FA's own internal agent) → model →
+tools → tavily_search`. Fetched back and inspected `parent_observation_id`
+at every level to confirm the actual chain, not just "no error." This is
+the mentor's own Step 4 acceptance bar, met.
+
+**Delivered:** `assistant/fa_service.py` (new); `assistant/supervisor.py`
+gained `RESEARCH_AGENT_VIA_HTTP`/`RESEARCH_FA_URL` module flags and
+`research_agent_proxy()`; PLAN.md's new Part A.5 section. Full suite
+174/174 pass with the flag at its default (off); `ruff check` clean.
+Manual live verification only for the flag-on path (this is spike-scoped
+demonstrator code per the guardrails, not shipped default behavior — no
+automated tests added for the HTTP proxy path itself).
+
+**Not yet done:** the streaming HTTP/SSE relay (replacing the current
+blocking `httpx.post()`) and real abort-on-`/chat/stop` behavior — the
+locked design decision was to prove the core trace-nesting break/fix first
+(now done) before tackling the more open-ended streaming problem. Step 5
+(the v3/OTEL fix, deleting this step's v2 plumbing) is Part B's own work,
+not this spike's — deferred until Part B actually starts, per the spike
+doc's own sequencing.
+
+---
+
+## 84. Distributed tracing spike: streaming HTTP/SSE relay + real abort-on-stop (2026-07-18)
+
+**Objective:** the design decision deferred from STEPS.md 83 — make the
+proxy-to-FA hop a real streaming relay (not the blocking `httpx.post()`
+Steps 0-4 used to prove the core nesting question), and verify that
+`/chat/stop` mid-run actually ABORTS the in-flight FA request, not just
+stops listening locally.
+
+**Real finding, checked empirically before designing around it:**
+LangGraph's own `get_stream_writer()` custom-stream channel does NOT
+surface through `graph.astream_events()` at all — verified with a minimal
+throwaway graph (a node calling `writer({"custom_data": ...})`); the data
+never appeared in the event stream, only in `stream_mode="custom"`, which
+`server.py`'s `_stream_turn` doesn't use. The mechanism that DOES surface
+through `astream_events()` is `langchain_core.callbacks.
+adispatch_custom_event()` — confirmed with the same kind of throwaway
+test, showing up as a real `on_custom_event` event with the dispatched
+name/data intact. This is the one that makes the relay possible.
+
+**Delivered:**
+- `assistant/fa_service.py` gained `/research/stream` (new) — an SSE
+  endpoint mirroring `server.py`'s own `_stream_turn` shape:
+  `on_chat_model_stream` events forwarded as `{"type": "token", ...}`
+  frames, followed by exactly one `{"type": "final", "messages": [...]}`.
+  Since this FA has no checkpointer (by design — stateless per request),
+  the final message list is captured from the ROOT run's `on_chain_end`
+  event (`parent_ids == []`) instead of `aget_state()` — verified live
+  first that a real `create_agent(...)`-built graph's root `on_chain_end`
+  really does carry the full final `messages` list in `data.output`.
+  `/research` (blocking) is left in place, unused, for direct comparison.
+- `assistant/supervisor.py`'s `research_agent_proxy()` now consumes
+  `/research/stream` via `httpx.AsyncClient().stream(...)`, re-dispatching
+  each token through `adispatch_custom_event("research_fa_token", ...)`.
+- `assistant/server.py`'s `_stream_turn` gained a small, targeted addition:
+  alongside the existing `on_chat_model_stream` handling, it now also
+  recognizes `on_custom_event` named `research_fa_token` and forwards it
+  as an identical token frame — the dashboard client can't tell the
+  difference between an in-process token and a relayed cross-process one,
+  which is the actual point.
+
+**Live-verified, real end-to-end (not assumed from the mechanism alone):**
+- Called `_stream_turn` directly against the real graph (flag on): 11 real
+  token frames arrived and assembled into text matching the final message
+  exactly; the FA service's own access log confirmed `/research/stream`
+  (not the blocking endpoint) was actually hit.
+- Re-checked the resulting trace: nesting from Step 4 still holds exactly
+  (`research_agent → research-fa → research_agent → model/tools/
+  tavily_search`) — switching to the streaming endpoint didn't regress the
+  cross-process link.
+- **Cancellation, the harder claim, checked directly rather than trusted:**
+  started a real streaming turn on a deliberately long query, cancelled the
+  caller's task ~3s in (simulating `/chat/stop`), then inspected the FA's
+  own fetched trace. Its `LangGraph`/`research_agent`/`model` observations
+  came back at `ERROR` level with the literal message `"Cancelled via
+  cancel scope ... by <Task ... RequestResponseCycle.run_asgi() ...>"` —
+  definitive proof the FA's own uvicorn request handler was genuinely
+  cancelled mid-flight, not left running to completion in the background
+  after the caller stopped listening. This is exactly the "real abort"
+  requirement from the design decision (STEPS.md 83), confirmed live.
+
+**Delivered files:** `assistant/fa_service.py` (`/research/stream`, new;
+`_extract_token_text`/`_sse_event` helpers, mirroring `server.py`'s own,
+duplicated deliberately per that module's own established precedent);
+`assistant/supervisor.py` (`research_agent_proxy()` rewritten to stream;
+`RESEARCH_FA_STREAM_URL` added); `assistant/server.py` (`_stream_turn`
+gained the `on_custom_event` branch). Full suite 174/174 pass; `ruff
+check` clean. No new automated tests added — this remains spike-scoped
+demonstrator code (flag defaults off), verified live by hand same as
+Steps 0-4.
+
+**Part A.5 status: all four acceptance criteria from the mentor's doc are
+now met** — v2 cross-process nesting (Step 4), streaming survives the hop
+including real abort-on-stop (this entry), and research-fa's output-token
+tracking (the Part A usage-tracking bug) remains the one item that
+genuinely depends on Part B's v3 migration happening first, not
+something this spike can close on its own. Step 5 (the actual v3/OTEL
+fix, deleting this spike's v2 plumbing) stays deferred to Part B, per the
+mentor's own doc sequencing.
+
+---
+
+## 85. Code review (/code-review high) on the spike branch — 6 correctness bugs found and fixed (2026-07-18)
+
+**Objective:** ran a high-effort code review (8 finder angles, 1-vote verify)
+against the uncommitted `spike/distributed-tracing` diff, then fixed the 6
+correctness findings (left the 4 cleanup findings — dead code, hardcoded
+event-name string, hardcoded FA URL, duplicated helpers — unfixed, per the
+user's explicit scope).
+
+**Two findings checked and refuted before fixing anything, worth recording
+since they were about this session's own prior work:**
+- A claim that CLAUDE.md's Current Status still lists Phase 10 as ACTIVE —
+  checked directly (`grep "^- \*\*ACTIVE"` on CLAUDE.md): false, it correctly
+  shows Phase 16.
+- A claim that marking "Part A.5 ... COMPLETE" in the same diff that built
+  it violates CLAUDE.md's propose-then-approve rule for status edits — an
+  independent verifier checked and found this is the established, repeated
+  convention throughout PLAN.md itself (Phase 9's numbered steps, Phase 16's
+  own Part A, Phase 7's Part A/B, all tag sub-parts "DONE"/"delivered"
+  inline); the rule targets the top-level Phase status line specifically,
+  which stayed untouched (`## Phase 16 ... — ACTIVE`). Refuted.
+
+**Fix 1 — the concurrency race (CONFIRMED by an independent verifier with a
+concrete mechanism):** `research_agent_proxy()` used to take
+`list(handler.runs.values())[-1]` — the LAST-inserted entry in the shared,
+process-wide `CallbackHandler`'s `.runs` dict — as "this node's own" span.
+Verified this handler is a genuine singleton reused across every concurrent
+client (by `observability.py`'s own design), and that langfuse's
+`CallbackHandler` doesn't override `run_inline`, so a real asyncio yield
+point exists where a concurrent client's callback could insert into the
+same dict between this node starting and this line reading it —
+misattributing trace IDs across unrelated conversations. Fixed by finding
+a REAL per-request identifier instead of guessing: `get_config()["callbacks"]`
+is a real `AsyncCallbackManager` with a `.parent_run_id` attribute — verified
+live (a probe against the real graph) that this exactly matches one specific
+key in `handler.runs` for THIS node's own execution context, not a heuristic.
+Replaced the heuristic with `handler.runs.get(config["callbacks"].parent_run_id)`
+— an exact lookup, safe under any concurrency. Re-verified live after the
+fix: trace nesting (`research_agent → research-fa → research_agent →
+model/tools/tavily_search`) still holds correctly.
+
+**Fixes 2, 4, 5 — error handling in `research_agent_proxy()` (all
+CONFIRMED by direct code reading):** the httpx call (including
+`response.raise_for_status()`) had no try/except at all, directly
+contradicting CLAUDE.md's "Tool errors are data, not exceptions" rule; the
+SSE line parser had no error handling around `json.loads()`/`payload["type"]`;
+and there was no check that a `"final"` frame was ever actually received
+before returning, so a stream that ended early (FA error, dropped
+connection) silently produced `{"messages": []}` as if research had
+succeeded with nothing to report. Fixed together: the whole call is now
+wrapped in `try/except httpx.HTTPError`, malformed JSON lines are skipped
+rather than crashing, `payload.get("type")` replaces the bare index, and
+`final_messages_raw` is now `None` by default (not `[]`) so "never arrived"
+is distinguishable from "arrived, genuinely empty" — either failure mode now
+returns a real `AIMessage` explaining what happened instead of crashing or
+silently pretending nothing was wrong.
+
+**Fix 3 — `fa_service.py`'s `/research/stream` had no try/except at all
+(CONFIRMED by direct code reading), unlike `server.py`'s own `_stream_turn`
+which it's modeled on.** Fixed by mirroring that exact pattern:
+`asyncio.CancelledError` propagates (a genuine cancellation, not an error),
+anything else becomes a `{"type": "error", "detail": ...}` frame — which
+`research_agent_proxy`'s new error handling (fixes above) now explicitly
+recognizes and surfaces as an `AIMessage`, not just silently absorbed.
+
+**Fix 6 — `httpx` imported but never declared as a project dependency
+(CONFIRMED via `grep`/`pip show`):** genuinely available today only because
+`anthropic` (a real, declared dependency) happens to require it — works, but
+violates this project's own established convention (see the existing
+fastapi/uvicorn/langsmith comments) of declaring a dependency explicitly
+once something imports it directly. Added `httpx>=0.27.0` to both
+`requirements.txt` and `pyproject.toml`, with a comment matching that
+established pattern.
+
+**Live-verified, not just code-reviewed:**
+- A real turn through the real graph (flag on) after the `parent_run_id` fix:
+  nesting confirmed still correct via a fetched trace.
+- A real turn with the FA service deliberately stopped (simulating an
+  outage): confirmed the graph did NOT crash — the supervisor received the
+  new `AIMessage` error content and actually reacted to it in its final
+  answer ("I attempted to reach the research specialist twice ... both
+  attempts failed due to a connection error ... please try again later"),
+  exactly the graceful-degradation behavior the fix was meant to produce.
+  Before this fix, this exact scenario raised an uncaught
+  `httpx.ConnectError` and crashed the whole turn.
+
+**Not fixed, per explicit scope:** the 4 cleanup findings (dead `/research`
+blocking endpoint + `RESEARCH_FA_URL`; the hardcoded `"research_fa_token"`
+event-name string with no shared constant; the hardcoded
+`127.0.0.1:8100` URLs with no env-var override; the duplicated
+`_extract_token_text`/`_sse_event`/message-serialization helpers) — left
+as-is at the user's direction.
+
+Full suite: 174/174 pass; `ruff check` clean.

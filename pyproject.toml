@@ -45,6 +45,11 @@ dependencies = [
     # to import against this project's LangChain 1.x line; see that
     # module's docstring for the full why. Part B changes this pin.
     "langfuse>=2.0,<3.0",
+    # Phase 16 Part A.5: the mentor's distributed-tracing spike. Was already
+    # a transitive dep (via anthropic's own SDK); made explicit now that
+    # supervisor.py/fa_service.py import it directly for the FA proxy's
+    # HTTP calls (a real code-review finding -- an undeclared direct import).
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
