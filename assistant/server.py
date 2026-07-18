@@ -79,9 +79,10 @@ from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
 
-# Must run before observability's lazy handler is first constructed (i.e.
-# before the first make_thread_config() call) — tags are constructor-bound
-# in Langfuse v2, not per-call overridable. See observability.py.
+# Historically had to run before observability's lazy handler was first
+# constructed, since tags were constructor-bound in Langfuse v2. No longer
+# a hard ordering requirement as of the v3 migration (STEPS.md 86) — tags
+# are read fresh per-call now. See observability.py's configure_client().
 observability.configure_client("dashboard")
 
 # Overridable so tests/throwaway runs can redirect to a temp copy instead of
@@ -273,36 +274,49 @@ async def _stream_turn(
         app.state.active_tasks[thread_id] = task
     try:
         config = make_thread_config(thread_id)
-        async for event in graph.astream_events(input_or_command, config=config, version="v2"):
-            if event.get("event") == "on_chat_model_stream":
-                text = _extract_token_text(event["data"]["chunk"].content)
-                if text:
-                    yield _sse_event({"type": "token", "text": text})
-            elif event.get("event") == "on_custom_event" and event.get("name") == "research_fa_token":
-                # Phase 16 Part A.5 (the mentor's distributed-tracing
-                # spike): supervisor.py's research_agent_proxy() re-dispatches
-                # tokens it streams from the FA process via
-                # adispatch_custom_event(), since that's the one mechanism
-                # verified live to actually surface through astream_events()
-                # as a real event — LangGraph's own get_stream_writer()
-                # custom channel does NOT (checked empirically, not
-                # assumed). Forwarded identically to a normal token frame;
-                # the dashboard client can't tell the difference, same as
-                # the whole point of the spike being invisible to callers.
-                text = event["data"].get("text", "")
-                if text:
-                    yield _sse_event({"type": "token", "text": text})
+        # Phase 16 Part B (v3 migration): wraps the actual graph streaming
+        # in Langfuse v3's per-call session/tags/trace-name propagation —
+        # observability.py's module docstring has the full why this
+        # replaced v2's config-dict-based metadata approach. Scoped tightly
+        # around the streaming/state-read work, not the DB touch below,
+        # since that isn't a traced operation.
+        with observability.tracing_context(thread_id):
+            async for event in graph.astream_events(input_or_command, config=config, version="v2"):
+                if event.get("event") == "on_chat_model_stream":
+                    text = _extract_token_text(event["data"]["chunk"].content)
+                    if text:
+                        yield _sse_event({"type": "token", "text": text})
+                elif (
+                    event.get("event") == "on_custom_event"
+                    and event.get("name") == "research_fa_token"
+                ):
+                    # Phase 16 Part A.5 (the mentor's distributed-tracing
+                    # spike): supervisor.py's research_agent_proxy()
+                    # re-dispatches tokens it streams from the FA process
+                    # via adispatch_custom_event(), since that's the one
+                    # mechanism verified live to actually surface through
+                    # astream_events() as a real event — LangGraph's own
+                    # get_stream_writer() custom channel does NOT (checked
+                    # empirically, not assumed). Forwarded identically to a
+                    # normal token frame; the dashboard client can't tell
+                    # the difference, same as the whole point of the spike
+                    # being invisible to callers.
+                    text = event["data"].get("text", "")
+                    if text:
+                        yield _sse_event({"type": "token", "text": text})
 
-        state = await graph.aget_state(config)
-        pending = [i for t in state.tasks for i in t.interrupts]
-        if pending:
-            yield _sse_event({"type": "interrupt", "payload": pending[0].value})
-        else:
-            final_message = state.values["messages"][-1]
-            yield _sse_event({"type": "message", "content": _render_content(final_message.content)})
-            if gate_outcome is not None:
-                approved, action = gate_outcome
-                asyncio.create_task(observability.score_gate_outcome(thread_id, approved, action))
+            state = await graph.aget_state(config)
+            pending = [i for t in state.tasks for i in t.interrupts]
+            if pending:
+                yield _sse_event({"type": "interrupt", "payload": pending[0].value})
+            else:
+                final_message = state.values["messages"][-1]
+                yield _sse_event(
+                    {"type": "message", "content": _render_content(final_message.content)}
+                )
+                if gate_outcome is not None:
+                    approved, action = gate_outcome
+                    observability.fire_score_gate_outcome(thread_id, approved, action)
         await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
     except asyncio.CancelledError:
         # /chat/stop already told its caller "stopped: true" — nothing left

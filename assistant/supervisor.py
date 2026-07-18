@@ -338,26 +338,39 @@ async def research_agent_proxy(state: GraphState) -> dict[str, Any]:
     round-trip `fa_service.py` uses, verified live before either side was
     written.
 
-    Step 4 (v2-style cross-process trace nesting): reads the current
-    trace/observation id off the shared `CallbackHandler`'s private
-    `.runs` dict — explicitly fragile, spike-quality (PLAN.md Phase 16
-    Part A.5 design decision 3; the mentor's own doc calls this "the
-    fiddly bit"). **Fixed after a real code-review finding (CONFIRMED,
-    STEPS.md this spike):** the first version took `.runs`' LAST-inserted
-    entry as "this node's own" span — unsafe under concurrent clients,
-    since `.runs` is a dict on the ONE shared process-wide handler
-    (`observability.py`'s own singleton), not scoped per request; a
-    verifier confirmed a genuine asyncio yield point exists (langfuse's
-    `CallbackHandler` doesn't override `run_inline`) where a concurrent
-    client's callback could insert between this node starting and this
-    line reading `.runs`, misattributing trace IDs across unrelated
-    conversations. Fixed by keying the lookup on
-    `get_config()["callbacks"].parent_run_id` — verified live that this is
-    a real, exact LangChain run id matching one specific key in `.runs`
-    for THIS node's own execution context, not a heuristic guess. No
-    handler configured, no matching entry, means no linking info is sent —
-    the FA just falls back to its own session-only trace (still correctly
-    grouped, per Part A's already-verified session model), not an error.
+    Step 4, cross-process trace nesting — **migrated off v2's fragile
+    handler-internals reads to real OTEL context propagation (Phase 16 Part
+    B, STEPS.md 89).** The ORIGINAL spike (STEPS.md this spike) read the
+    current trace/observation id off the shared `CallbackHandler`'s private
+    `.runs` dict, keyed on `get_config()["callbacks"].parent_run_id` after a
+    real code-review-caught concurrency bug (a naive "last inserted entry"
+    lookup could misattribute trace IDs across unrelated conversations under
+    concurrent clients). That whole mechanism was v2/Langfuse-specific and
+    stopped compiling once `observability.py` moved to v3's `CallbackHandler`
+    (no `stateful_client` constructor kwarg to bind a handler to a specific
+    parent span). v3's architecture makes the old workaround unnecessary:
+    Langfuse traces ARE OpenTelemetry traces now (same trace_id, real OTEL
+    spans under the hood), so cross-process linking is just standard W3C
+    Trace Context propagation — `observability.inject_trace_headers()`
+    below serializes whatever OTEL span is ambient/active in THIS coroutine
+    (the LangChain CallbackHandler's own span for this node's execution,
+    set via contextvars the same way `propagate_attributes()` already
+    relies on) into a plain `traceparent` HTTP header. Centralized in
+    observability.py rather than calling `opentelemetry.propagate.inject()`
+    directly here (a real /code-review max finding, STEPS.md 91 — the raw
+    OTEL call used to live inline in this function). No handler internals,
+    no Langfuse-specific ids, no concurrency-scoped lookup needed —
+    `inject_trace_headers()` is a pure function of the ambient context, not
+    shared mutable state. `fa_service.py`'s matching
+    `observability.attached_parent_context()` turns that header back into
+    the parent context for every span the FA creates, live-verified end to
+    end (STEPS.md 89: real nested trace, same trace_id, correct
+    parent_observation_id, fetched back from the account). A caller with no
+    active span (no Langfuse configured, or this proxy invoked completely
+    outside a traced turn) still works — injecting from an empty context is
+    simply a no-op header, and the FA falls back to its
+    own session-only trace (Part A's already-verified session model), not
+    an error.
 
     Streaming relay (the design decision made once Steps 0-4 above proved
     the core nesting question, not built first): consumes
@@ -390,26 +403,21 @@ async def research_agent_proxy(state: GraphState) -> dict[str, Any]:
     thread_id = config["configurable"]["thread_id"]
     outgoing = [m.model_dump() for m in state["messages"]]
 
-    handler = observability._get_handler()
-    langfuse_trace_id = None
-    langfuse_parent_observation_id = None
-    if handler is not None:
-        current_span = handler.runs.get(config["callbacks"].parent_run_id)
-        if current_span is not None:
-            langfuse_trace_id = current_span.trace_id
-            langfuse_parent_observation_id = current_span.id
+    # Standard W3C Trace Context propagation (see this function's own
+    # docstring for the full why) — a pure function of whatever OTEL span
+    # is ambient right now, no shared-state lookup at all. Centralized in
+    # observability.py (STEPS.md 91) rather than calling
+    # `opentelemetry.propagate.inject()` directly here, so there's one
+    # implementation any future HTTP-proxied sub-agent reuses.
+    trace_headers = observability.inject_trace_headers()
 
     final_messages_raw: list[dict[str, Any]] | None = None
     try:
         async with httpx.AsyncClient(timeout=60.0) as client, client.stream(
             "POST",
             RESEARCH_FA_STREAM_URL,
-            json={
-                "messages": outgoing,
-                "thread_id": thread_id,
-                "langfuse_trace_id": langfuse_trace_id,
-                "langfuse_parent_observation_id": langfuse_parent_observation_id,
-            },
+            json={"messages": outgoing, "thread_id": thread_id},
+            headers=trace_headers,
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():

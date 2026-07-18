@@ -133,25 +133,34 @@ async def _run(start_new: bool) -> None:
                     config = make_thread_config(thread_id)
                     continue
 
-                result = await graph.ainvoke(
-                    {"messages": [("user", user_input)]},
-                    config=config,
-                )
+                # Phase 16 Part B (v3 migration): wraps the whole turn
+                # (initial call + any resume loop below) in Langfuse v3's
+                # per-call session/tags/trace-name propagation —
+                # observability.py's module docstring has the full why this
+                # replaced v2's config-dict-based metadata approach.
+                with observability.tracing_context(thread_id):
+                    result = await graph.ainvoke(
+                        {"messages": [("user", user_input)]},
+                        config=config,
+                    )
 
-                # A tool (e.g. interrupts.send_test_notification) paused the
-                # graph for confirmation — CLAUDE.md's standing rule for
-                # side-effectful actions. Loop in case a resumed turn hits a
-                # second interrupt.
-                while "__interrupt__" in result:
-                    payload = result["__interrupt__"][0].value
-                    approved = input(f"\n[confirm] {payload} Proceed? (y/n): ").strip().lower() == "y"
-                    result = await graph.ainvoke(Command(resume=approved), config=config)
-                    # Evaluations pillar (STEPS.md 82): log the real
-                    # approve/decline outcome as a Langfuse score. Fired as
-                    # a background task, never awaited — scoring must never
-                    # add latency to the response the user is waiting on.
-                    action = payload.get("action") if isinstance(payload, dict) else None
-                    asyncio.create_task(observability.score_gate_outcome(thread_id, approved, action))
+                    # A tool (e.g. interrupts.send_test_notification) paused
+                    # the graph for confirmation — CLAUDE.md's standing rule
+                    # for side-effectful actions. Loop in case a resumed turn
+                    # hits a second interrupt.
+                    while "__interrupt__" in result:
+                        payload = result["__interrupt__"][0].value
+                        approved = (
+                            input(f"\n[confirm] {payload} Proceed? (y/n): ").strip().lower() == "y"
+                        )
+                        result = await graph.ainvoke(Command(resume=approved), config=config)
+                        # Evaluations pillar (STEPS.md 82): log the real
+                        # approve/decline outcome as a Langfuse score. Fired
+                        # as a background task, never awaited — scoring must
+                        # never add latency to the response the user is
+                        # waiting on.
+                        action = payload.get("action") if isinstance(payload, dict) else None
+                        observability.fire_score_gate_outcome(thread_id, approved, action)
 
                 final_message = result["messages"][-1]
                 print(f"\nAssistant: {_render_content(final_message.content)}")
@@ -179,10 +188,12 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Sync entry point (required by the `assistant` console script) that
     drives the async chat loop."""
-    # Must run before observability's lazy handler is first constructed
-    # (i.e. before the first make_thread_config() call) — tags are
-    # constructor-bound in Langfuse v2, not per-call overridable. Set here
-    # rather than at module level: voice_daemon.py imports _render_content
+    # Historically had to run before observability's lazy handler was first
+    # constructed, since tags were constructor-bound in Langfuse v2. No
+    # longer a hard ordering requirement as of the v3 migration (STEPS.md
+    # 86) — tags are read fresh per-call now (see configure_client()'s own
+    # docstring). Still set here rather than at module level for an
+    # unrelated, still-real reason: voice_daemon.py imports _render_content
     # from this module, which must NOT have the side effect of claiming
     # "cli" as the client identity for a process that is actually voice.
     observability.configure_client("cli")

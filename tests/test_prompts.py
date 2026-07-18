@@ -32,30 +32,40 @@ def test_compile_local_leaves_unmatched_placeholders_untouched() -> None:
 
 def test_get_prompt_returns_fallback_without_client(monkeypatch) -> None:
     """Unconfigured Langfuse must never prevent a prompt from resolving —
-    same defensive posture as langfuse_run_config()'s {} no-op."""
+    same defensive posture as langfuse_run_config()'s {} no-op.
+
+    Resets `_client`/`_client_attempted` (v3's real gating globals), not
+    the v2-era `_handler_attempted` this used to reset (a real
+    /code-review max finding, STEPS.md 91) — that attribute no longer
+    exists on observability.py, so the old reset silently touched a dead
+    name instead of the state get_client() actually caches on."""
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    observability._client = None
+    observability._client_attempted = False
     observability._handler = None
-    observability._handler_attempted = False
 
     result = prompts.get_prompt("some-prompt-name", "the fallback text")
     assert result == "the fallback text"
 
+    observability._client = None
+    observability._client_attempted = False
     observability._handler = None
-    observability._handler_attempted = False
 
 
 def test_get_prompt_compiles_fallback_variables_without_client(monkeypatch) -> None:
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    observability._client = None
+    observability._client_attempted = False
     observability._handler = None
-    observability._handler_attempted = False
 
     result = prompts.get_prompt("some-prompt-name", "Hi {{name}}", name="Bob")
     assert result == "Hi Bob"
 
+    observability._client = None
+    observability._client_attempted = False
     observability._handler = None
-    observability._handler_attempted = False
 
 
 if __name__ == "__main__":

@@ -1,257 +1,261 @@
-"""Phase 16 Part A: Langfuse v2 tracing for the three real graph-invocation
+"""Phase 16 Part B: Langfuse v3 tracing for the three real graph-invocation
 call sites (main.py's CLI loop, voice_daemon.py's per-turn pipeline,
 server.py's SSE stream). Additive to LangSmith (Phase 3) — this does not
 replace or touch server.py's /cost panel, which stays on LangSmith.
 
-Wired in at exactly one point: `agent.make_thread_config()` merges this
-module's `langfuse_run_config(thread_id)` into every invocation config it
-builds, so all three call sites get tracing for free with zero per-call-site
-code — consistent with CLAUDE.md's "never build invocation config dicts by
-hand" rule. A single shared `CallbackHandler` is constructed once per
-process (lazily, on first use) rather than once per turn: constructing it
-allocates a background flush thread (see its `threads`/`flush_at`/
-`flush_interval` constructor params), and voice_daemon.py/server.py are
-long-lived processes handling many turns — rebuilding it per call would leak
-a thread per turn. Session identity is instead set PER CALL via
-`metadata={"langfuse_session_id": thread_id}` (verified against the real
-installed source, `langfuse/callback/langchain.py`: `metadata.get(
-"langfuse_session_id")` overrides the handler's own `self.session_id` on
-every invocation) — this maps Langfuse's "session" concept onto this
-project's thread_store threads for free, with no per-thread handler churn.
+**Migrated from Part A's v2 integration — this is the actual migration
+diff worth showing.** Two real, structural differences from v2, not just a
+version bump:
 
-**Load-bearing shim, Part-A-only, deleted at the Part B (v3) migration:**
-Langfuse's actual final v2 release (2.60.10, its last ever — the v2 line is
-EOL, no releases since Sept 2025) hard-imports three legacy LangChain module
-paths — `langchain.callbacks.base`, `langchain.schema.agent`,
-`langchain.schema.document` — that this project's LangChain 1.x (the
-Load-bearing "LangChain 1.x line" decision in CLAUDE.md) deleted in its 1.0
-rewrite. Confirmed live: `from langfuse.callback import CallbackHandler`
-raises a bare `ModuleNotFoundError` on this project's real installed
-`langchain==1.3.12`; the official `langchain-classic` backport package does
-NOT fix it either (it's a separate namespace, not a monkeypatch of the old
-paths — confirmed by installing it and re-testing the exact same import).
-This is an open, unresolved upstream bug (langfuse/langfuse#9758) that will
-never be patched in v2 specifically because v2 itself stopped receiving
-releases before LangChain 1.0 existed.
+1. **No compatibility shim needed.** v2's final release (2.60.10, EOL since
+   Sept 2025) required a `sys.modules` shim restoring legacy LangChain
+   import paths (`langchain.callbacks.base` etc.) that this project's
+   LangChain 1.x deleted — see STEPS.md 79/85 for the full story. Verified
+   live before writing this: `from langfuse.langchain import
+   CallbackHandler` imports cleanly against this project's real installed
+   `langchain==1.3.12` with NO shim at all. That whole file section —
+   `_install_langchain_legacy_shim()` and its call site — is gone. Its
+   deletion IS part of the migration diff.
 
-`_install_langchain_legacy_shim()` below restores exactly those three
-paths as thin re-exports of their real `langchain_core` equivalents —
-NOT stand-ins or approximations: pre-1.0 LangChain's own
-`langchain.callbacks.base`/`langchain.schema.agent`/`langchain.schema.
-document` were THEMSELVES already just re-export shims over these same
-`langchain_core` classes, so this restores the exact relationship LangChain
-shipped for years, using the identical underlying objects v2 was actually
-built and tested against — not a compatibility hack that changes behavior,
-just an import path 1.0 deleted. Verified live: with the shim installed,
-`langfuse.callback.CallbackHandler` imports and constructs cleanly against
-the real installed `langchain==1.3.12`/`langchain-core==1.4.9`.
+2. **Session/tags/trace-name propagation moved from constructor-time +
+   per-call-metadata (v2's split, awkward model) to a single, uniform
+   per-call context manager.** v2 forced an asymmetry: `langfuse_session_id`
+   was overridable per call via metadata, but `trace_name`/`tags` were
+   constructor-bound — which is *why* Part A needed `configure_client()`
+   and hit the real import-ordering bug in `fa_service.py` (STEPS.md 84).
+   v3's `langfuse.propagate_attributes()` sets session_id/tags/trace_name
+   ALL per-call, uniformly, as a context manager wrapping the actual graph
+   invocation — verified live (this file's own migration testing) that it
+   sets all three correctly on a real fetched trace. This is a genuine
+   architectural improvement, not just new syntax: it eliminates the whole
+   "which attribute is constructor-bound vs. per-call" class of bug v2 had.
+   The real cost: each of the three call sites now needs to wrap its own
+   `ainvoke()`/`astream_events()` call in `with observability.
+   tracing_context(thread_id):` — a small, real, unavoidable change,
+   since a context manager has to physically wrap the call it scopes,
+   unlike v2's model where everything could be smuggled into a config dict
+   `agent.make_thread_config()` built centrally. `make_thread_config()`
+   still centralizes the callback handler itself (see below) — only the
+   session/tags/trace-name propagation moved to the call sites, and each
+   does it identically (a one-line `with` block), so there's still exactly
+   one pattern to get right, not three different ones.
 
-Langfuse v3 does not need this shim (`langfuse.langchain.CallbackHandler`
-imports cleanly against LangChain 1.x on its own, verified live) — Part B's
-migration deletes `_install_langchain_legacy_shim()` and its call site
-entirely, which is itself part of the migration diff worth showing.
+`get_client()`'s own singleton pattern is now much simpler than v2's: v3's
+own client library already treats `Langfuse(...)`/`get_client()` as a
+process-wide singleton internally, so this module's `_client` global is
+just a thin cache of the credentials-resolution step (still needed to
+support the `LANGFUSE_HOST`/`LANGFUSE_BASE_URL` dual-naming fix from
+STEPS.md 80 — v3's own env-var resolution wasn't re-verified to handle
+both names, so this project keeps doing it explicitly rather than assume).
 
-**Trace naming and tags (audited against Langfuse's real, freshly-fetched
-best-practices doc via the `langfuse` skill — not assumed):** grepped the
-real installed source (`langfuse/callback/langchain.py`) and confirmed
-`trace_name`/`tags` are constructor-bound, NOT overridable per call the way
-`langfuse_session_id` is — the code falls back to the triggering LangChain
-class's own name (e.g. `CompiledStateGraph`) when `trace_name` is unset,
-which fails the best-practices doc's "choose good names" guidance (verb
-first, stable, not the framework's internal class name). Fixed via
-`configure_client(name)`: each of the three call sites is already its own
-long-lived, single-purpose process (main.py = CLI only, voice_daemon.py =
-voice only, server.py = dashboard only), so a per-process handler
-constructed once with `trace_name="agent-turn"` (stable across all three —
-they're the same fundamental operation: one user message, one graph run to
-completion or interrupt) and `tags=[f"client:{name}"]` is a natural fit,
-not a workaround — this is exactly the "how does X differ between our
-web/api users" tagging pattern the best-practices doc describes, applied to
-this project's three clients instead. Each entry point calls
-`configure_client()` once at startup, before the first `make_thread_config()`
-call (same ordering convention as `load_dotenv()`).
+**Known v2 limitation, confirmed fixed here (STEPS.md 81, re-confirmed
+during this migration):** v2's frozen usage-tracking schema silently
+dropped output-token/cost data under extended thinking/prompt caching
+(both unconditional in this project). Verified live during this migration
+(a real `ChatAnthropic` call through `propagate_attributes()` +
+`CallbackHandler()`): `usage.output`/`usage.total` come back correct, not
+zero. This is the concrete, demonstrable payoff of the migration.
 
-**Masking sensitive data — a deliberate no-op, not an oversight:** the
-best-practices audit flagged that this graph reads real Gmail/Calendar/
-long-term-memory content into context, and `CallbackHandler` supports a
-`mask` constructor param for exactly this. Not implemented: LangSmith
-tracing (Phase 3) has shipped full, unmasked conversation content to its
-cloud since this project's early phases with no masking layer ever built or
-discussed — building one only for Langfuse would be an arbitrary asymmetry
-between the two tracing backends, not a genuine security improvement.
-Flagged here for the record rather than silently skipped; revisit only if
-the user decides trace-content sensitivity needs addressing project-wide
-(both backends), not as a Langfuse-specific patch.
-
-**Known, confirmed-live v2 limitation — NOT fixed, documented instead
-(STEPS.md 80):** real end-to-end verification (a real graph turn, real
-Anthropic calls, real trace fetched back from Langfuse) found that
-GENERATION observations' output-token/cost data silently fails to record —
-`usage.output` and `usage.total` come back `0` even though the call itself
-succeeded and `usage.input` is correct. Root cause, confirmed by reading the
-real installed source (`langfuse/callback/langchain.py`'s `_parse_usage*`
-helpers): Anthropic's modern usage shape (via extended thinking + prompt
-caching — both load-bearing, project-wide decisions, see CLAUDE.md) includes
-fields v2's fixed pydantic schema for `UpdateGenerationBody` doesn't
-recognize, so validation throws internally on every single generation's
-usage update. This is systemic, not occasional — it will happen on every
-real turn while extended thinking/caching stay enabled, which is
-unconditional in this project. Deliberately NOT patched here: unlike the
-import-path shim above (restoring something LangChain itself used to ship),
-this would mean monkeypatching Langfuse's own internal validation logic —
-a materially different, much less principled kind of intervention. Left as
-a documented, confirmed v2 limitation and a concrete Part B verification
-target (does v3 handle modern Anthropic usage shapes correctly?) rather than
-worked around. **Update (STEPS.md 81):** confirmed live that Langfuse v3
-DOES fix this — two real calls through v3's CallbackHandler (trivial and
-thinking-heavy) both recorded correct output tokens/cost with zero
-validation errors.
-
-**Prompt management and evaluations (STEPS.md 82) — `get_client()` below is
-the shared seam both use.** Rather than each own a separate `Langfuse`
-client/connection, `assistant/prompts.py` (prompt fetching) and
-`score_gate_outcome()` below (evaluations) both call `get_client()`, which
-reuses the handler's own already-built `Langfuse` client — same
-credentials, same lazy-singleton lifecycle, no second client.
+Prompt management (`assistant/prompts.py`) and evaluations
+(`score_gate_outcome()` below) both call `get_client()` — verified during
+this migration that the underlying REST-API-level methods they depend on
+(`get_prompt`, `create_prompt`, `api.trace.list`/`.get`, `flush`, `score`)
+are essentially UNCHANGED between v2 and v3, so neither module needed any
+logic changes, only this module's client/handler construction did.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
-import sys
-import types
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from langfuse import Langfuse, propagate_attributes
+from langfuse.langchain import CallbackHandler
+from opentelemetry import context as otel_context
+from opentelemetry import propagate
+
 logger = logging.getLogger(__name__)
 
-
-def _install_langchain_legacy_shim() -> None:
-    """Idempotent: registers the three legacy module paths in sys.modules
-    if they aren't already importable, so `langfuse.callback`'s v2 import
-    succeeds. See this module's docstring for why this is safe rather than
-    a behavior-changing hack. Safe to call multiple times/from multiple
-    call sites (only this module calls it, but defensive regardless)."""
-    if "langchain.callbacks.base" in sys.modules:
-        return
-
-    from langchain_core.agents import AgentAction, AgentFinish
-    from langchain_core.callbacks.base import BaseCallbackHandler
-    from langchain_core.documents import Document
-
-    callbacks_base = types.ModuleType("langchain.callbacks.base")
-    callbacks_base.BaseCallbackHandler = BaseCallbackHandler
-    callbacks_pkg = types.ModuleType("langchain.callbacks")
-    callbacks_pkg.base = callbacks_base
-
-    schema_agent = types.ModuleType("langchain.schema.agent")
-    schema_agent.AgentAction = AgentAction
-    schema_agent.AgentFinish = AgentFinish
-    schema_document = types.ModuleType("langchain.schema.document")
-    schema_document.Document = Document
-    schema_pkg = types.ModuleType("langchain.schema")
-    schema_pkg.agent = schema_agent
-    schema_pkg.document = schema_document
-
-    sys.modules["langchain.callbacks"] = callbacks_pkg
-    sys.modules["langchain.callbacks.base"] = callbacks_base
-    sys.modules["langchain.schema"] = schema_pkg
-    sys.modules["langchain.schema.agent"] = schema_agent
-    sys.modules["langchain.schema.document"] = schema_document
-
-
-_install_langchain_legacy_shim()
-
-from langfuse.callback import CallbackHandler  # noqa: E402
-
+_client: Langfuse | None = None
+_client_attempted = False
 _handler: CallbackHandler | None = None
-_handler_attempted = False
 _client_name: str | None = None
 
-# Stable, verb-ish, deliberately the SAME across all three clients per the
-# best-practices doc's "keep dynamic values out of names" / "treat names
-# like an API" guidance — the operation is identical everywhere (one user
-# message in, one graph run to completion or interrupt). What varies by
-# client goes in tags instead (see configure_client()).
+# Stable, verb-ish, deliberately the SAME across all three clients — the
+# operation is identical everywhere (one user message in, one graph run to
+# completion or interrupt). What varies by client goes in tags instead.
 TRACE_NAME = "agent-turn"
 
 
 def configure_client(name: str) -> None:
-    """Call once at process startup, before the first `make_thread_config()`
-    call — main.py/voice_daemon.py/server.py each call this with their own
-    identity ("cli"/"voice"/"dashboard"). Must run before the handler is
-    first constructed: `tags` is constructor-bound in v2, not per-call
-    overridable (see module docstring), so this has no effect if the lazy
-    singleton was already built."""
+    """Call once at process startup — main.py/voice_daemon.py/server.py
+    each call this with their own identity ("cli"/"voice"/"dashboard").
+    Unlike v2, this has no import-ordering hazard to dodge: `tags` is read
+    fresh by `tracing_context()` on every call, not baked into a handler
+    at construction time — so this can even be called AFTER the handler
+    is first built, though every call site still does it at startup for
+    clarity."""
     global _client_name
     _client_name = name
 
 
-def _get_handler() -> CallbackHandler | None:
-    """Lazily construct the single process-lifetime handler. Returns None
+def _get_client_internal() -> Langfuse | None:
+    """Lazily construct the single process-lifetime client. Returns None
     (defensively, like server.py's LangSmithClient pattern) if
     LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY aren't set, so a missing/bad
-    Langfuse config doesn't break chat on any client. `_handler_attempted`
-    guards against retrying construction (and re-logging) on every single
-    turn once we know it's unconfigured or failed."""
-    global _handler, _handler_attempted
-    if _handler is not None or _handler_attempted:
-        return _handler
-    _handler_attempted = True
+    Langfuse config doesn't break chat on any client."""
+    global _client, _client_attempted
+    if _client is not None or _client_attempted:
+        return _client
+    _client_attempted = True
 
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
     if not public_key or not secret_key:
         return None
 
-    # LANGFUSE_HOST is this project's own name (.env.example); LANGFUSE_BASE_URL
-    # is the name the langfuse-cli skill's own docs use for the same setting —
-    # verified live (STEPS.md 80) that a real account on JP cloud
-    # (https://jp.cloud.langfuse.com) silently 401'd when only
-    # LANGFUSE_BASE_URL was set, because this used to read LANGFUSE_HOST only
-    # and fell back to the US default instead. Accept either name rather than
-    # require the user to pick the "right" one.
+    # Same dual-naming fix as v2 (STEPS.md 80) — LANGFUSE_HOST is this
+    # project's own name; LANGFUSE_BASE_URL is the langfuse-cli skill's own
+    # name for the same setting. Resolved explicitly rather than assumed:
+    # a real /code-review max pass (STEPS.md 91) caught that passing this
+    # as `host=` doesn't actually win — the installed SDK's own
+    # `_base_url` resolution (`_client/client.py`) checks `base_url` kwarg,
+    # then the raw `LANGFUSE_BASE_URL` env var, THEN `host=`, so a real
+    # `LANGFUSE_BASE_URL` env var would silently override this project's
+    # intended `LANGFUSE_HOST` priority. Passing our resolved value as
+    # `base_url=` instead of `host=` forces it to win regardless of
+    # environment state, live-confirmed against the installed SDK source.
     host = os.environ.get("LANGFUSE_HOST") or os.environ.get(
         "LANGFUSE_BASE_URL", "https://us.cloud.langfuse.com"
     )
-    tags = [f"client:{_client_name}"] if _client_name else None
     try:
-        _handler = CallbackHandler(
-            public_key=public_key,
-            secret_key=secret_key,
-            host=host,
-            trace_name=TRACE_NAME,
-            tags=tags,
-        )
+        _client = Langfuse(public_key=public_key, secret_key=secret_key, base_url=host)
+    except Exception:
+        _client = None
+    return _client
+
+
+def get_client() -> Langfuse | None:
+    """The underlying `Langfuse` client — used directly by
+    `assistant/prompts.py` and `score_gate_outcome()` below for prompt
+    fetching/scoring, and internally by `_get_handler()`/`tracing_context()`
+    for tracing. Same public name/contract as v2's version, so no caller
+    needed to change."""
+    return _get_client_internal()
+
+
+def _get_handler() -> CallbackHandler | None:
+    """Lazily construct the single process-lifetime LangChain callback
+    handler. Unlike v2, this handler carries NO session/tags/trace_name
+    state at all — those are set per-call by `tracing_context()` via
+    `propagate_attributes()` instead, so this handler is genuinely
+    identity-less and safe to share across every thread/client with zero
+    per-call configuration needed here.
+
+    `CallbackHandler()` construction is guarded the same way
+    `_get_client_internal()`'s `Langfuse(...)` call is (STEPS.md 91's
+    review caught this asymmetry) — a real, live-verified misconfiguration
+    couldn't be found (`CallbackHandler()` just does a guarded singleton
+    lookup reusing the already-validated client), but nothing here should
+    depend on that staying true forever, and it costs nothing to match the
+    sibling function's own defensive posture."""
+    global _handler
+    if _handler is not None:
+        return _handler
+    if _get_client_internal() is None:
+        return None
+    try:
+        _handler = CallbackHandler()
     except Exception:
         _handler = None
     return _handler
 
 
-def langfuse_run_config(thread_id: str) -> dict[str, Any]:
-    """Extra RunnableConfig keys to merge into `agent.make_thread_config()`'s
-    return value: the shared callback handler plus per-call session routing
-    via the `langfuse_session_id` metadata key (see module docstring — this
-    overrides the handler's own state on every call, so one handler safely
-    serves every thread/turn). Returns {} when Langfuse isn't configured,
-    so `config.update({})` at the call site is a clean no-op."""
+def langfuse_callbacks() -> list[Any]:
+    """The `callbacks` list for `agent.make_thread_config()` to merge in —
+    just the shared, identity-less handler. Returns `[]` when Langfuse
+    isn't configured, so `config["callbacks"] = langfuse_callbacks()` is a
+    clean no-op either way."""
     handler = _get_handler()
-    if handler is None:
-        return {}
-    return {"callbacks": [handler], "metadata": {"langfuse_session_id": thread_id}}
+    return [handler] if handler is not None else []
 
 
-def get_client() -> Any:
-    """The underlying plain `Langfuse` client (for prompt fetching and
-    scoring — anything that isn't the LangChain callback handler itself),
-    reusing the SAME lazily-built singleton `_get_handler()` already owns
-    rather than constructing a second client/connection with the same
-    credentials. Returns None under the identical conditions
-    `langfuse_run_config()` does (unconfigured or failed construction)."""
-    handler = _get_handler()
-    return handler.langfuse if handler is not None else None
+@contextmanager
+def tracing_context(thread_id: str) -> Iterator[None]:
+    """Wrap a graph invocation (`ainvoke()`/`astream_events()`) in this to
+    get v3's per-call session_id/tags/trace_name propagation — the direct
+    replacement for v2's `langfuse_run_config()`-returned metadata dict,
+    since v3 sets these via `propagate_attributes()`, a context manager
+    that has to physically wrap the call it scopes rather than ride along
+    in a config dict. Each of the three call sites (`main.py`,
+    `voice_daemon.py`, `server.py`) uses this identically:
+
+    ```python
+    with observability.tracing_context(thread_id):
+        result = await graph.ainvoke(..., config=config)
+    ```
+
+    No-ops cleanly (plain `yield`, no Langfuse call at all) when Langfuse
+    isn't configured — verified this doesn't require a configured client
+    at all to be a safe no-op."""
+    if _get_client_internal() is None:
+        yield
+        return
+    tags = [f"client:{_client_name}"] if _client_name else None
+    with propagate_attributes(session_id=thread_id, tags=tags, trace_name=TRACE_NAME):
+        yield
+
+
+def inject_trace_headers() -> dict[str, str]:
+    """Standard W3C Trace Context propagation, the caller side (Phase 16
+    Part B's OTEL migration of the Part A.5 spike's v2-only trace-linking,
+    STEPS.md 89/91) — a pure read of whatever OTEL span is ambient in the
+    calling coroutine (the LangChain CallbackHandler's own span for the
+    currently-executing node, via the same contextvars mechanism
+    `propagate_attributes()` relies on), serialized into a plain headers
+    dict any HTTP client can send. Centralized here rather than each
+    HTTP-proxied sub-agent calling `opentelemetry.propagate.inject()`
+    directly (a real /code-review max finding, STEPS.md 91) so there's one
+    implementation for any future cross-process hop to reuse, matching
+    `attached_parent_context()` below on the receiving side."""
+    headers: dict[str, str] = {}
+    propagate.inject(headers)
+    return headers
+
+
+@contextmanager
+def attached_parent_context(headers: Mapping[str, str], thread_id: str) -> Iterator[None]:
+    """The receiving side of `inject_trace_headers()` — for any HTTP-proxied
+    sub-agent process (like `fa_service.py`) handling an incoming request.
+    Extracts a `traceparent` header (if present) and attaches it as the
+    ambient OTEL context, so every span this process creates during the
+    `with` block becomes a real, standard-OTEL child of the caller's own
+    span — then layers this process's own `tracing_context(thread_id)`
+    inside that attached context, and detaches cleanly on the way out
+    (`finally`, safe under cancellation — OTEL's own `context.detach()` is
+    itself defensively guarded against a wrong-Context token, verified
+    live, STEPS.md 91). One indivisible context manager instead of the
+    extract+attach+tracing_context+detach boilerplate duplicated at every
+    call site (a real /code-review max finding, STEPS.md 91 — this
+    replaces what used to be `_extract_parent_context()` plus manual
+    attach/detach hand-written at each of `fa_service.py`'s two endpoints).
+    A request with no `traceparent` header (no active span on the caller's
+    side, or a caller not doing distributed tracing at all) extracts to an
+    empty context unchanged — this process then just opens its own new
+    root trace, the same graceful fallback the code this replaces had."""
+    ctx = propagate.extract(dict(headers))
+    token = otel_context.attach(ctx)
+    try:
+        with tracing_context(thread_id):
+            yield
+    finally:
+        otel_context.detach(token)
 
 
 async def score_gate_outcome(thread_id: str, approved: bool, action: str | None = None) -> None:
@@ -263,45 +267,31 @@ async def score_gate_outcome(thread_id: str, approved: bool, action: str | None 
     latency to a confirm/decline round trip a user is actively waiting on,
     nor ever raise into the caller.
 
-    Deliberately does NOT use `CallbackHandler.get_trace_id()` — the
-    library's OWN docstring calls that method "deprecated... not
-    concurrency-safe" (it reads mutable state off the one shared
-    per-process handler, a real risk in server.py where different threads'
-    /resume calls can genuinely run concurrently). Instead: after flushing,
-    look up the most recent trace for THIS thread's own session_id — safe
-    under cross-thread concurrency because the lookup is scoped to one
-    thread's session, not shared process state.
+    Mostly unchanged from v2 (STEPS.md 82) except the client construction
+    this calls into and one real, live-caught rename: v2's `client.score()`
+    became v3's `client.create_score()` — a genuine API rename, not a typo
+    on this project's side, confirmed by checking `hasattr(client, 'score')`
+    directly (False) after a live call raised `AttributeError: 'Langfuse'
+    object has no attribute 'score'`. An earlier `inspect.signature()` check
+    during this same migration had actually already surfaced this (its
+    printed signature belonged to `create_score`, with a literal "no score"
+    on the very next line) but was misread as confirming `.score()` instead
+    — corrected once the live call caught it for real. `client.api.trace.
+    list()`/`.get()` and `client.flush()` are unchanged, so the rest of this
+    function's own logic (including the `from_timestamp`-filtered lookup
+    that fixed a real trace-misattribution race in v2, STEPS.md 82) needed
+    no changes.
 
-    **A real bug found and fixed here, live (STEPS.md 82):** a gated action
-    is TWO traces in one session (pre-interrupt, then this resume) — and
-    Langfuse's backend indexes them asynchronously, not necessarily in
-    creation order. An early version of this function picked
-    `trace.list(..., order_by="timestamp.desc")[0]` trusting that ordering,
-    and caught it live scoring the WRONG (older, pre-interrupt) trace: at
-    query time only the older trace had finished indexing yet, so it was
-    the only — and therefore "most recent" — result, even though the newer
-    resume trace existed and would appear moments later. Fixed with a
-    `from_timestamp` filter: any trace older than the cutoff is
-    structurally excluded regardless of indexing order, so "the only trace
-    in the window" can't be misattributed the way "the only trace found so
-    far" was.
-
-    A first attempt used a tight 10-second cutoff and immediately caught a
-    SECOND real bug, live: it undershot and matched nothing at all, even
-    though the correct trace existed. Root cause, also observed directly
-    (not assumed): Langfuse's recorded trace `timestamp` doesn't line up
-    tightly with local wall-clock "now" at the moment this function starts
-    running — a gap wide enough that a 10s margin clipped the real trace
-    out. Rather than chase an exact number that's really measuring client/
-    server clock alignment (fragile, and not the actual property this
-    filter needs), the cutoff is now generous (2 minutes) — since a gated
-    action's pre-interrupt and resume traces are typically only seconds
-    apart, a 2-minute window still reliably separates "this gate's own
-    resume trace" from a genuinely distinct, much older interaction in the
-    same long-lived session, without depending on tight clock precision. A
-    retry loop still absorbs the indexing lag itself (up to ~18s) — since
-    this only ever runs as a detached background task, a longer wait costs
-    nothing user-facing.
+    Deliberately does NOT use any deprecated trace-id-off-the-handler
+    shortcut — looks up the most recent trace for THIS thread's own
+    session_id instead, safe under cross-thread concurrency because the
+    lookup is scoped to one thread's session, not shared process state. A
+    gated action is TWO traces in one session (pre-interrupt, then this
+    resume) and Langfuse's backend indexes them asynchronously, not
+    necessarily in creation order — the `from_timestamp` filter (a
+    generous 2-minute cutoff, not a tight one — see STEPS.md 82 for why an
+    earlier tight cutoff undershot) structurally excludes older traces so
+    an incomplete result set can't be misattributed.
     """
     client = get_client()
     if client is None:
@@ -320,7 +310,7 @@ async def score_gate_outcome(thread_id: str, approved: bool, action: str | None 
             logger.warning("No trace found to score for session %r after retries", thread_id)
             return
 
-        client.score(
+        client.create_score(
             trace_id=traces.data[0].id,
             name="gate_outcome",
             value=int(approved),
@@ -328,4 +318,32 @@ async def score_gate_outcome(thread_id: str, approved: bool, action: str | None 
             comment=action,
         )
     except Exception:
-        logger.warning("Failed to score gate outcome for session %r", thread_id, exc_info=True)
+        # ERROR, not WARNING (STEPS.md 91's review caught the old level as
+        # too easy to miss) — this branch means a real API-shape break (the
+        # exact class of bug the score()->create_score() rename already
+        # was), not just "no trace indexed yet" (that expected case returns
+        # above via its own explicit `logger.warning`, never reaches here).
+        # Still never raises into the caller — this remains best-effort
+        # enrichment, per this function's own docstring.
+        logger.error("Failed to score gate outcome for session %r", thread_id, exc_info=True)
+
+
+def fire_score_gate_outcome(thread_id: str, approved: bool, action: str | None = None) -> None:
+    """The one correct way for a call site to schedule `score_gate_outcome()`
+    — `asyncio.create_task(score_gate_outcome(...))` directly (what all
+    three call sites did before this helper existed) copies whatever OTEL
+    context is ambient at the call site, including a still-open
+    `propagate_attributes()` scope from an enclosing `tracing_context()`
+    block (STEPS.md 91's review: main.py/voice_daemon.py/server.py all fire
+    this from inside that block, since the interrupt/resume loop that needs
+    it is itself inside the `with`). `score_gate_outcome()` doesn't create
+    any spans of its own — it only calls plain REST-style client methods
+    (`flush`/`api.trace.list`/`create_score`) — so no concretely observed
+    bug traced back to this, but there's no reason a fire-and-forget
+    background task should run in a borrowed, possibly-already-closed
+    tracing scope at all. `context=contextvars.Context()` gives it a
+    genuinely empty context instead, independent of whatever scope was
+    active at the call site."""
+    asyncio.create_task(
+        score_gate_outcome(thread_id, approved, action), context=contextvars.Context()
+    )

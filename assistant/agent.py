@@ -24,16 +24,23 @@ def make_thread_config(thread_id: str) -> dict[str, Any]:
     graph: sub-agent/supervisor subgraph checkpoint_ns nesting is automatic
     (STEPS.md 24), not something this config needs to express.
 
-    Phase 16: also merges in Langfuse tracing config (callbacks + per-call
-    session metadata) via `observability.langfuse_run_config()` — the one
-    place all three call sites (CLI, voice, dashboard) pick it up, per this
-    module's own "never build invocation config dicts by hand" convention.
-    A no-op ({}) when Langfuse isn't configured.
+    Phase 16 Part B (v3 migration): merges in the Langfuse callback handler
+    via `observability.langfuse_callbacks()` — the one place all three call
+    sites (CLI, voice, dashboard) pick it up, per this module's own "never
+    build invocation config dicts by hand" convention. A no-op ([]) when
+    Langfuse isn't configured. Unlike v2, session/tags/trace-name are NOT
+    part of this config dict — v3 sets those via `observability.
+    tracing_context(thread_id)`, a context manager each call site wraps its
+    own `ainvoke()`/`astream_events()` call in, since that's how v3's
+    `propagate_attributes()` mechanism works (see observability.py's module
+    docstring for the full why).
 
     Args:
         thread_id: Identifier for the conversation thread (e.g. a UUID
             generated once per CLI session).
     """
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    config.update(observability.langfuse_run_config(thread_id))
+    callbacks = observability.langfuse_callbacks()
+    if callbacks:
+        config["callbacks"] = callbacks
     return config

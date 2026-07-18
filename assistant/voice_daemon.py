@@ -96,10 +96,11 @@ from assistant.voice_io import (  # noqa: E402
     transcribe,
 )
 
-# Must run before observability's lazy handler is first constructed (i.e.
-# before the first make_thread_config() call) — tags are constructor-bound
-# in Langfuse v2, not per-call overridable. Set at module level (unlike
-# main.py's own call, which lives inside main() specifically so importing
+# Historically had to run before observability's lazy handler was first
+# constructed, since tags were constructor-bound in Langfuse v2. No longer
+# a hard ordering requirement as of the v3 migration (STEPS.md 86) — tags
+# are read fresh per-call now. Set at module level (unlike main.py's own
+# call, which lives inside main() specifically so importing
 # _render_content above doesn't wrongly claim "cli") since nothing else
 # imports from voice_daemon.py.
 observability.configure_client("voice")
@@ -268,35 +269,45 @@ class VoiceDaemon:
             thread_id = await thread_store.get_active_thread_id()
             config = make_thread_config(thread_id)
 
-            result = await self._graph.ainvoke(
-                {"messages": [("user", text)]},
-                config=config,
-            )
+            # Phase 16 Part B (v3 migration): wraps the whole turn (initial
+            # call + any resume loop below) in Langfuse v3's per-call
+            # session/tags/trace-name propagation — observability.py's
+            # module docstring has the full why this replaced v2's
+            # config-dict-based metadata approach.
+            with observability.tracing_context(thread_id):
+                result = await self._graph.ainvoke(
+                    {"messages": [("user", text)]},
+                    config=config,
+                )
 
-            while "__interrupt__" in result:
-                payload = result["__interrupt__"][0].value
-                action = payload.get("action") if isinstance(payload, dict) else None
-                if isinstance(payload, dict) and payload.get("voice_approvable") is False:
-                    # Phase 7 Part B's memory-write confirmations set this —
-                    # fact content is harder to vet by ear than an action
-                    # verb like "send", so this gate never asks by voice.
-                    # Fail-closed (declined) rather than silently skip, same
-                    # convention as an unclear/timed-out spoken answer.
-                    logger.info("confirmation requires text — declining by voice")
-                    await asyncio.to_thread(
-                        speak, "That needs a text confirmation, so I'm skipping it for now."
+                while "__interrupt__" in result:
+                    payload = result["__interrupt__"][0].value
+                    action = payload.get("action") if isinstance(payload, dict) else None
+                    if isinstance(payload, dict) and payload.get("voice_approvable") is False:
+                        # Phase 7 Part B's memory-write confirmations set
+                        # this — fact content is harder to vet by ear than
+                        # an action verb like "send", so this gate never
+                        # asks by voice. Fail-closed (declined) rather than
+                        # silently skip, same convention as an unclear/
+                        # timed-out spoken answer.
+                        logger.info("confirmation requires text — declining by voice")
+                        await asyncio.to_thread(
+                            speak, "That needs a text confirmation, so I'm skipping it for now."
+                        )
+                        result = await self._graph.ainvoke(Command(resume=False), config=config)
+                        # Evaluations pillar (STEPS.md 82) — background
+                        # task, never awaited, so scoring never adds
+                        # latency here.
+                        observability.fire_score_gate_outcome(thread_id, False, action)
+                        continue
+                    question = _spoken_question(payload)
+                    logger.info("confirmation asked: %s", question)
+                    approved = await self._ask_confirmation(question)
+                    logger.info(
+                        "confirmation outcome: %s", "approved" if approved else "declined"
                     )
-                    result = await self._graph.ainvoke(Command(resume=False), config=config)
-                    # Evaluations pillar (STEPS.md 82) — background task,
-                    # never awaited, so scoring never adds latency here.
-                    asyncio.create_task(observability.score_gate_outcome(thread_id, False, action))
-                    continue
-                question = _spoken_question(payload)
-                logger.info("confirmation asked: %s", question)
-                approved = await self._ask_confirmation(question)
-                logger.info("confirmation outcome: %s", "approved" if approved else "declined")
-                result = await self._graph.ainvoke(Command(resume=approved), config=config)
-                asyncio.create_task(observability.score_gate_outcome(thread_id, approved, action))
+                    result = await self._graph.ainvoke(Command(resume=approved), config=config)
+                    observability.fire_score_gate_outcome(thread_id, approved, action)
 
             reply = _render_content(result["messages"][-1].content)
             logger.info("assistant: %s", reply)

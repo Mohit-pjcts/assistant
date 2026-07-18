@@ -6767,3 +6767,428 @@ event-name string with no shared constant; the hardcoded
 as-is at the user's direction.
 
 Full suite: 174/174 pass; `ruff check` clean.
+
+## 86. Three-branch demo split (`before-v2`/`langfuse-v2-final`) + Phase 16 Part B started: `observability.py` migrated to Langfuse v3 (2026-07-18)
+
+**Branch strategy, user-directed:** `main` stays untouched throughout Phase
+16 (never renamed). Three reference branches for a v2-vs-v3 demo to the
+user's mentor/boss: `before-v2` (pre-Phase-16 state), `langfuse-v2-final`
+(Part A + Part A.5 + the code review fixes, group 85's endpoint), and
+eventually `langfuse-v3-final` once Part B completes. `spike/distributed-
+tracing` (groups 83-85) left untouched as its own branch, not merged.
+`.obsidian/` added to `.gitignore` per explicit request before the `git add
+.` for the `langfuse-v2-final` commit. User pushed `before-v2` and
+`langfuse-v2-final` to GitHub themselves.
+
+**Part B started: `assistant/observability.py` rewritten for Langfuse v3.**
+Full rationale is in the module's own docstring (kept there deliberately,
+not duplicated here, since it's the actual migration-diff artifact meant to
+be shown). Summary of the two real structural changes: (1) the v2
+`sys.modules` legacy-LangChain-import shim (`_install_langchain_legacy_shim`)
+is gone entirely — verified live that `from langfuse.langchain import
+CallbackHandler` imports cleanly against this project's real installed
+`langchain==1.3.12` with no shim needed; (2) session/tags/trace-name
+propagation moved from v2's awkward split (constructor-bound tags/trace_name
+vs. per-call metadata session_id) to v3's uniform `propagate_attributes()`
+context manager, set identically per call at all three call sites via a new
+`observability.tracing_context(thread_id)` wrapping the `ainvoke()`/
+`astream_events()` call in `main.py`, `voice_daemon.py`, and `server.py`'s
+`_stream_turn()`. `agent.py`'s `make_thread_config()` still centralizes the
+identity-less callback handler itself; only the per-call attributes moved to
+the call sites. `tests/test_observability.py` rewritten to match (13 tests).
+
+**Real bug caught live: `client.score()` renamed to `client.create_score()`
+in v3 — not a typo, a genuine API rename.** First live test through the real
+graph raised `AttributeError: 'Langfuse' object has no attribute 'score'`
+from `score_gate_outcome()`. Confirmed directly (`hasattr(client, 'score')`
+→ False; `dir(client)` shows `create_score`/`score_current_span`/
+`score_current_trace`, no `score`). Root cause of the miss: an earlier API
+survey during this same migration had already printed `create_score`'s
+signature under a `--- score ---` label with "no score" on the very next
+line — correctly showing the rename — but it was misread at the time as
+confirming `.score()` still existed. Fixed in `score_gate_outcome()`; the
+docstring now documents the mistake honestly rather than hiding it.
+
+**Both the fix and Task #11 (prompts.py) live-verified against the real
+account, not just re-run silently** — the first re-verification attempt was
+a false negative: a throwaway script placed under the job's tmp directory
+(outside the repo) called `load_dotenv()` with no explicit path, and
+python-dotenv's default `find_dotenv()` walks up from the *script's own
+directory*, not `cwd` — it never found this project's `.env`, so
+`observability.get_client()` silently returned `None` and `score_gate_outcome`
+took its defensive no-client early-return. No exception fired, which looked
+like success but proved nothing. Caught by explicitly printing the client
+object; fixed by passing `.env`'s real path to `load_dotenv()`. Re-run for
+real: `client configured: True`, gate approved, then fetched the trace back
+directly — `client:cli` tag present, `gate_outcome` boolean score attached
+(`value=1.0`, `comment='send_test_notification'`) on the correct trace.
+`prompts.get_prompt("supervisor-system-prompt", ...)` re-verified the same
+way: a live fetch returned `is_fallback: False` (a real hosted prompt, not
+the fallback text) and its output matched the raw SDK `.compile()` call
+byte-for-byte — confirming no logic changes were needed in `prompts.py`,
+since `get_prompt`/`create_prompt` are unchanged between v2 and v3.
+
+Full suite: 178/178 pass; `ruff check` clean.
+
+**Not yet done (Part B remaining):** SSE streaming-cancellation risk under
+v3's OTEL-backed spans; migrating the Part A.5 spike's v2-specific
+trace-linking (`fa_service.py`'s `client.trace()`/
+`.span(parent_observation_id=)`/`CallbackHandler(stateful_client=...)`,
+`supervisor.py`'s `handler.runs` lookup) to real OTEL `traceparent`
+propagation — this is currently a known, broken gap: the spike code still
+constructs v3's `CallbackHandler` with a `stateful_client` kwarg that no
+longer exists on it, since the class import itself changed; full
+CLI/voice/dashboard regression; the `langfuse-v3-final` branch itself, once
+the above is done.
+
+## 87. OTEL auto-instrumentation duplicate-span demo, built and live-verified (2026-07-18)
+
+**The actual "why v3 matters, concretely" artifact for Task 12/PLAN.md Part
+B step 3.** Installed `opentelemetry-instrumentation-anthropic` (demo-only,
+NOT added to requirements.txt/pyproject.toml — this project never turns on
+raw-SDK auto-instrumentation in real usage, it's here purely to demonstrate
+what happens if it ever were). Pip flagged a dependency conflict on install
+(`opentelemetry-sdk` bumped 1.37→1.44, vs. two exporter packages pinned to
+1.37) — checked directly rather than ignored: both packages still import
+cleanly and the full 178-test suite still passes after the bump, so left as
+is.
+
+Wrote two standalone scripts, `scripts/otel_dedup_demo_before.py` and
+`scripts/otel_dedup_demo_after.py`, each meant to run as its own fresh
+process — OTEL's `TracerProvider` is a process-wide singleton that can't be
+reconfigured after first construction, so "toggle a filter mid-process" was
+never going to produce a clean before/after read; two isolated runs do.
+
+**Before (default Langfuse span filter, no override):** turned on
+`AnthropicInstrumentor().instrument()` in the same process as this project's
+existing `langfuse.langchain.CallbackHandler`, then made one real
+`ChatAnthropic.ainvoke()` call — the same call shape `supervisor.py`'s real
+graph makes. Fetched the resulting trace back via `client.api.observations.
+get_many()`: **2 observations** for one underlying API call — `ChatAnthropic`
+(the LangChain callback's own generation, `parent=None`) with `anthropic.chat`
+(the OTEL auto-instrumentor's own generation) nested as its child. Confirmed
+this isn't an edge case needing a special flag to reproduce: Langfuse v3's
+OWN default span filter already allowlists `opentelemetry.instrumentation.
+anthropic` by name as a "known LLM instrumentation scope" (langfuse.com/docs/
+observability/sdk/advanced-features, fetched live) — the duplicate exports by
+default. Inspected the duplicate observation directly: `metadata.scope.name
+== "opentelemetry.instrumentation.anthropic"`, confirming the exact scope
+name to block, not guessed.
+
+**After (fixed):** same setup, fresh process, `Langfuse(blocked_
+instrumentation_scopes=["opentelemetry.instrumentation.anthropic"])`.
+Fetched the resulting trace: **1 observation** — only `ChatAnthropic`
+survives, the nested `anthropic.chat` duplicate is gone.
+
+**A real version mismatch caught before it caused a silent bug:** the
+current Langfuse docs describe a newer `should_export_span`/
+`is_default_export_span`/`langfuse.span_filter` mechanism as the
+"recommended" replacement, with `blocked_instrumentation_scopes` marked
+deprecated in its favor. Used it first, per the langfuse skill's
+"documentation first, never from memory" rule — it failed immediately
+(`ModuleNotFoundError: No module named 'langfuse.span_filter'`). Checked
+directly rather than assumed: `inspect.signature(Langfuse.__init__)` and
+`pkgutil.iter_modules()` against this project's real installed
+`langfuse==3.15.0` confirm `should_export_span` doesn't exist yet — that API
+only ships starting in Langfuse Python SDK 4.x (`pip index versions langfuse`
+shows 4.14.0 as latest, 3.15.0 as this project's pin). Since this project's
+migration target is v3, not v4, `blocked_instrumentation_scopes` is the
+correct, current-for-this-version mechanism, not a deprecated shortcut used
+out of laziness — documented as such in both demo scripts' docstrings so a
+future session doesn't "fix" it into a form that doesn't exist here.
+
+Both scripts re-run twice each (once from the job's throwaway location while
+developing, once from their final `scripts/` location) — same 2-vs-1
+observation counts both times, `ruff check` clean.
+
+Full suite: 178/178 pass (re-confirmed after the `opentelemetry-sdk` bump).
+
+## 88. SSE streaming-cancellation risk on `server.py`, verified live against v3's OTEL-backed spans (2026-07-18)
+
+**Task 13/PLAN.md Part B step 4.** The worry: `_stream_turn`'s existing,
+live-verified contract (`task.cancel()` via `/chat/stop` leaves the LangGraph
+checkpointer clean) says nothing about the Langfuse CALLBACK's own state —
+a cancelled task mid-`astream_events()` may never fire `on_llm_end`/
+`on_chain_end`, which for a v3 OTEL-backed span could in principle leave it
+un-ended/unflushed (stuck "in progress" in the UI) rather than v2's more
+forgiving trace model.
+
+Tested twice, not just reasoned about: (1) a direct script cancelling
+`graph.astream_events()` via an externally-called `task.cancel()` (not a
+self-raised `CancelledError` inside the loop — that would've been a fake
+reproduction, since real `/chat/stop` interrupts whatever await point the
+task is actually suspended at); (2) the real thing — started the actual
+`uvicorn assistant.server:app` process, created a real thread via `POST
+/threads`, fired a real streaming `POST /chat` for a long response via curl,
+and called `POST /chat/stop` ~1.2s later while tokens were still arriving.
+Got back `{"stopped": true}`, connection closed with zero output — exactly
+`_stream_turn`'s documented contract.
+
+**Both tests: identical result.** Fetched the resulting trace via
+`client.api.observations.get_many()`: the `LangGraph`/`supervisor`/`model`
+CHAIN-type observations all got a real `end_time` and `level=ERROR` —
+cleanly ended, NOT stuck open. **This satisfies Part B step 4's actual
+done-when criterion** ("confirm Langfuse shows the trace cleanly ended...
+not stuck 'in progress'").
+
+**Real secondary finding, documented honestly rather than glossed over:** no
+`GENERATION`-type observation appears AT ALL for the specific `ChatAnthropic`
+call that was actively mid-stream when cancelled — only the higher-level
+CHAIN spans (which LangGraph's own structured exception propagation closes
+correctly) survive. The generation-level record — including that partial
+call's token/cost data — is silently dropped, not merely delayed or marked
+errored. Root cause understood, not just observed: `on_llm_start` already
+fired (chunks were streaming), but a span only reaches Langfuse's exporter
+on `span.end()`/`on_llm_end`, and cancellation propagates through the async
+generator before that specific inner span's own end-of-life callback runs —
+even though the OUTER chain spans, structured with their own try/except/
+finally boundaries in LangGraph's execution graph, do get their error path
+triggered.
+
+**Judged an accepted gap, not a fix-it-now bug:** cost/token tracking's
+source of truth for this project is LangSmith's `/cost` panel — Langfuse
+is explicitly additive (observability.py's own docstring), never
+authoritative here. Losing one cancelled call's granular Langfuse-only
+telemetry has no user-visible or functional effect; a fix would mean
+patching into LangChain's callback-manager internals or Langfuse's
+`CallbackHandler` for one edge case, which is exactly the kind of fragile,
+special-cased bandaid this project's conventions warn against. Left
+unfixed, documented here for anyone reading this before assuming
+cancellation is invisible to Langfuse the way it already is to the
+checkpointer.
+
+## 89. Part A.5 spike migrated to real OTEL `traceparent` propagation — Task 14/PLAN.md Part B step 5, and Part A.5's own final step (2026-07-18)
+
+**The actual "why v3 matters" payoff of this whole migration.** The spike's
+Step 4 (STEPS.md, that spike) linked `fa_service.py`'s traces under the
+supervisor's using v2-specific plumbing: `client.trace(id=...)`/
+`.span(parent_observation_id=...)` on the caller side (read off
+`handler.runs`, keyed on `parent_run_id` after a real concurrency bug fix),
+`CallbackHandler(stateful_client=parent_span)` on the FA side. Confirmed
+broken before touching anything: v3's `CallbackHandler` (imported from
+`langfuse.langchain`, not the old base class) has no `stateful_client`
+constructor kwarg at all, and `observability.langfuse_run_config()` (the
+other thing `_tracing_config()` called) was deleted in the v3 rewrite
+(STEPS.md 86) — this code hadn't run since.
+
+**Replaced with real W3C Trace Context propagation — no Langfuse-specific
+ids anywhere.** Confirmed live during Part B's earlier steps (STEPS.md 86)
+that Langfuse traces now ARE OpenTelemetry traces (same trace_id, real OTEL
+spans) — so cross-process linking is just standard context propagation,
+the same mechanism any two OTEL-instrumented services use:
+
+- `supervisor.py`'s `research_agent_proxy()`: `opentelemetry.propagate.
+  inject()` into a plain headers dict, sent on the httpx call to
+  `fa_service.py`. A pure read of whatever OTEL span is ambient in that
+  coroutine (the LangChain CallbackHandler's own span for the currently-
+  executing LangGraph node, via the same contextvars mechanism
+  `propagate_attributes()` already relies on) — no shared mutable state,
+  no concurrency-scoped lookup needed, unlike the `.runs` dict it replaces.
+- `fa_service.py`: `_extract_parent_context()` (`propagate.extract()`)
+  replaces `_tracing_config()` entirely. Both endpoints now take the raw
+  `Request` (for headers) alongside the Pydantic body, `context.attach()`
+  the extracted context before running the agent (`context.detach()` in a
+  `finally`, matching this project's existing cleanup discipline), and use
+  `observability.tracing_context(thread_id)` + `observability.
+  langfuse_callbacks()` — the SAME v3 call-site pattern every other
+  process (`main.py`/`voice_daemon.py`/`server.py`) already uses, not a
+  special case. `ResearchRequest.langfuse_trace_id`/
+  `langfuse_parent_observation_id` deleted — nothing needs them anymore,
+  the linking travels as a standard `traceparent` header instead.
+
+**Live-verified end to end, walking the actual parent chain, not just "no
+exception."** Started `fa_service.py` as its own real `uvicorn` process
+(port 8100), flipped `supervisor.RESEARCH_AGENT_VIA_HTTP = True`, and drove
+one real graph turn ("search the web for who won the most recent Nobel
+Prize in Physics") through the real supervisor → handoff → HTTP-proxied
+research_agent path. Fetched the resulting trace: **ONE trace, tagged with
+BOTH `client:cli` AND `client:research-fa`** — direct proof two separate
+processes contributed observations to the same trace. Walked the
+`parent_observation_id` chain by hand: the supervisor-side `research_agent`
+AGENT span (id `ccfb423...`, parent = the root `LangGraph` span) has a
+SECOND `research_agent` AGENT span nested directly under it (id
+`9ab5afcc...`, `parent_observation_id = ccfb423...`) — that's the FA
+process's own agent execution, correctly attributed as a child across the
+process boundary with zero Langfuse-specific ids involved. Everything the
+FA process actually did — its own `model`/`ChatAnthropic` GENERATION spans,
+`tools`/`tavily_search` TOOL spans across two real search-and-reconsider
+loops — nests three levels deeper still, all real usage/cost data present
+(the exact frozen-schema bug v2 had, re-confirmed still fixed here, STEPS.md
+81/86). Also smoke-tested the no-header fallback path directly (`curl
+POST /research` with no `traceparent`, bypassing the supervisor entirely):
+200 OK, no crash — the graceful "no active span, open a new root trace"
+fallback the code this replaces already documented.
+
+Full suite: 178/178 pass; `ruff check` clean on both modified files.
+`RESEARCH_AGENT_VIA_HTTP` stays `False` by default (unchanged — still
+spike-scoped, not a runtime toggle).
+
+## 90. Part B full regression (Task 15) — all three real call sites, `ruff check .` project-wide, and a real missed-pin bug caught (2026-07-18)
+
+**CLI (`main.py`) and dashboard (`server.py`):** both already driven live,
+repeatedly, over the course of this Part B session (STEPS.md 86/87/88/89) —
+real gated-tool turns, real streaming, real cancellation, real distributed
+handoffs. No separate pass needed; already regression-tested by construction.
+
+**Voice (`voice_daemon.py`):** its tracing block (`make_thread_config` →
+`observability.tracing_context(thread_id)` → `ainvoke` → interrupt/resume
+loop → `score_gate_outcome`) is structurally identical, line for line in
+shape, to `main.py`'s own — both call the exact same shared
+`observability.py` functions already live-verified above; voice differs
+only in the two hardware I/O boundary calls (`transcribe`/`speak`) and its
+`voice_approvable` decline-by-default branch, neither of which touches
+tracing. Deliberately did NOT import `voice_daemon.py` directly to drive a
+synthetic test — it pulls in `rumps`/`pynput`/`PyObjCTools` (real macOS
+GUI/Input-Monitoring-TCC dependencies) that risk hanging or needing
+permissions in a non-interactive session, and CLAUDE.md's own standing
+convention is that interactive entry points like this get verified by hand,
+not test files (the same reasoning Phase 10 applied when voice accuracy was
+accepted as-is, STEPS.md 78). `observability.configure_client("voice")` at
+module import time (line 105) confirmed present and unchanged.
+
+**Real bug caught here, not upstream:** `requirements.txt`/`pyproject.toml`
+still pinned `langfuse>=2.0,<3.0` — a leftover from Part A that nothing in
+Part B had touched, even though the installed, tested, live-verified
+version this entire Part B session ran against is `3.15.0`. A fresh
+`pip install -r requirements.txt` on a clean machine would have silently
+reinstalled EOL v2 and broken everything just migrated. Fixed both pins to
+`>=3.0,<4.0` (not `>=3.0` unbounded — v4 ships a differently-shaped
+span-filter API confirmed NOT present in this project's target version,
+STEPS.md 87), confirmed the currently-installed `3.15.0` satisfies the new
+specifier.
+
+Full suite: 178/178 pass; `ruff check .` (whole project, not just changed
+files) clean. `git status`: 9 modified files (`PLAN.md`, `STEPS.md`,
+`assistant/{agent,fa_service,main,observability,server,supervisor,
+voice_daemon}.py`, `tests/test_observability.py`) plus 2 new demo scripts
+(`scripts/otel_dedup_demo_{before,after}.py`) — the actual v2→v3 migration
+diff, ready for review as Part B step 7 / the `langfuse-v3-final` branch.
+
+## 91. `/code-review max` on the full Part B diff — 15 findings, all fixed live (2026-07-18)
+
+Ran the max-effort review myself (10 finder angles + 3 verifiers + 1 sweep,
+run in parallel via background agents), since `/ultrareview`'s billed cloud
+version can't be launched from inside a session. Findings ranged from a
+live-reproduced silent host-misrouting bug down to test-hygiene gaps.
+User's instruction after reviewing the report: "fix the code" — all 15
+applied, not just the correctness subset.
+
+**1. Real bug, live-reproduced: `LANGFUSE_HOST` priority silently
+overridden by the installed v3 SDK.** `_get_client_internal()` computed
+`host` prioritizing `LANGFUSE_HOST` over `LANGFUSE_BASE_URL`, then passed
+it as `host=`. Read the actual installed `langfuse==3.15.0` source
+(`_client/client.py`): `_base_url` resolves as `base_url or
+os.environ.get(LANGFUSE_BASE_URL) or host or
+os.environ.get(LANGFUSE_HOST, default)` — `LANGFUSE_BASE_URL` wins over a
+passed `host=` kwarg. Reproduced directly: both env vars set to different
+values, the client's real `_base_url` came back as the WRONG one. Fixed by
+passing the resolved value as `base_url=` instead of `host=` (checked
+first in that precedence chain) — re-verified live, `LANGFUSE_HOST` now
+correctly wins regardless of `LANGFUSE_BASE_URL`.
+
+**2. `score_gate_outcome()` background tasks inherited a closing/borrowed
+OTEL context.** All three call sites fired `asyncio.create_task(
+observability.score_gate_outcome(...))` from *inside* the enclosing
+`tracing_context()` `with` block. Added `observability.
+fire_score_gate_outcome()`, a small helper using `asyncio.create_task(...,
+context=contextvars.Context())` to give the task a genuinely independent
+context — centralizes the fix in one place instead of repeating
+`context=contextvars.Context()` at 4 call sites (`main.py`,
+`voice_daemon.py` ×2, `server.py`).
+
+**3. `/research`'s missing exception handling, mirrored from
+`/research/stream`.** Added the same `except Exception` shape, raising
+`HTTPException(502, ...)` instead of an unstructured 500 (a JSON endpoint,
+not SSE, so an HTTP error status is the right shape here, not an error
+frame).
+
+**4. `_get_handler()` missing try/except**, matching `_get_client_internal()`'s
+guarded construction — added `try/except Exception: _handler = None`.
+
+**5. Undeclared `opentelemetry-api`/`opentelemetry-sdk` dependency** — added
+explicit pins (`>=1.30.0`, matching the installed `1.44.0`) to both
+`requirements.txt` and `pyproject.toml`, same precedent as the earlier
+`httpx` fix.
+
+**6. Stale "must run before" ordering comments** in `fa_service.py`,
+`main.py`, `voice_daemon.py`, `server.py` — all four still asserted a v2
+constructor-binding constraint `configure_client()`'s own docstring says no
+longer applies in v3. Reworded all four to describe it as historical, not
+current.
+
+**7/8. OTEL propagation centralized in `observability.py`, and
+`fa_service.py`'s per-endpoint duplication eliminated together.** Added
+`observability.inject_trace_headers()` (the caller side, replacing
+`supervisor.py`'s inline `propagate.inject()`) and `observability.
+attached_parent_context(headers, thread_id)` — one context manager doing
+extract+attach+`tracing_context()`+detach as an indivisible unit, replacing
+what used to be `fa_service.py`'s own `_extract_parent_context()` plus
+hand-written attach/detach duplicated across both `/research` and
+`/research/stream`. `supervisor.py`'s `from opentelemetry import
+propagate` import and `fa_service.py`'s `otel_context`/`propagate` imports
+both removed entirely — `observability.py` is now the only file in the
+project importing `opentelemetry` directly. Re-verified live end to end
+after the refactor: started `fa_service.py` as its own process again,
+drove one real distributed graph turn, fetched the trace back — same
+result as STEPS.md 89 (two nested `research_agent` spans, correct
+`parent_observation_id` chain, `client:cli`+`client:research-fa` tags both
+present).
+
+**9/14. Consolidated the two OTEL dedup demo scripts into one, and fixed
+their model choice.** `scripts/otel_dedup_demo_before.py`/`_after.py`
+(near-duplicates) replaced by a single `scripts/otel_dedup_demo.py
+--before`/`--after`, run as two separate process invocations (OTEL's
+`TracerProvider` is still process-wide — that constraint justifies two
+*invocations*, not two duplicated file bodies). Also switched the model
+from `claude-sonnet-5` to `claude-haiku-4-5` (CLAUDE.md's Cost section:
+"Default to Haiku where Sonnet-level reasoning isn't needed" — the demo
+tests span counts, not model quality). Re-verified live: both modes still
+reproduce the exact same 2-observations-before / 1-observation-after
+result.
+
+**10/11/12. `tests/test_observability.py` rewritten for real coverage.**
+Added a real assertion test (`test_tracing_context_propagates_real_
+session_tags_and_trace_name`) reading back `opentelemetry.context.
+get_value("langfuse.propagated.<key>")` inside the `with` block — verified
+directly against the installed langfuse source that this is genuinely
+inspectable, not assumed. Added a client/handler shared-connection test —
+**first draft asserted `handler.client is client` and failed**: read
+langfuse's own `get_client()` source and found `_create_client_from_
+instance()` constructs a FRESH `Langfuse` wrapper object every time, so v3
+never guarantees identity the way v2 did. Second draft asserted
+`._otel_tracer is` — **also failed when run as part of the full suite**
+(passed in isolation): langfuse's process-wide, public-key-keyed instance
+registry, once multiple distinct projects' worth of throwaway clients
+accumulate across a whole pytest session, deliberately returns a disabled/
+no-op tracer per its own documented multi-project safety behavior, not a
+bug in this project's code. Settled on `_base_url` equality — externally
+observable, immune to that registry noise, and still verifies the real
+thing that matters (both wrapper objects point at the same project).
+Replaced the old head-and-tail `_reset_state()` convention's fragility
+(dirty state if a test failed before its own trailing reset) with
+per-test `try/finally` — deliberately NOT a pytest `autouse` fixture, since
+that would have made this the only file under `tests/` not runnable with
+plain `python` (16 of 18 files still have a `__main__` runner block, this
+project's consistent convention). Also added direct coverage for the three
+NEW public functions this fix pass introduced
+(`fire_score_gate_outcome`/`inject_trace_headers`/`attached_parent_
+context`). 23 tests total (up from 13), passing both via `pytest` and
+`python tests/test_observability.py` directly, confirmed stable across 3
+repeated full-suite runs (not just once).
+
+**13. `tests/test_prompts.py` reset the wrong (dead) attribute name** —
+`_handler`/`_handler_attempted` instead of the real v3 gating globals
+`_client`/`_client_attempted`. Fixed both occurrences.
+
+**15. `score_gate_outcome()`'s broad `except Exception` upgraded from
+`logger.warning` to `logger.error`** — the branch it guards means a real
+API-shape break (the same class of bug as the `score()`->`create_score()`
+rename), not the expected "no trace indexed yet" case (which already
+returns earlier via its own explicit warning). Still never raises into the
+caller, per this function's own documented contract.
+
+**Full regression after all 15 fixes:** 183/183 tests pass (up from 178 —
+5 new tests, all real, none padding); `ruff check .` (whole project)
+clean; the live distributed-tracing round trip re-verified end to end
+against the real account after the centralization refactor, not just
+unit-tested.
