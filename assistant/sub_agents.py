@@ -1,10 +1,27 @@
 """Worker sub-agents: coding, research, life-admin.
 
 Each is a standalone `create_agent(...)` graph, compiled WITHOUT its own
-checkpointer — checkpointing is owned by the outer supervisor graph (see
-supervisor.py) and inherited automatically via nested checkpoint_ns when
-these are embedded as outer-graph nodes (verified directly against a real
-checkpoint file: STEPS.md 24).
+checkpointer. Under the pre-rewrite Command-handoff architecture, checkpoint_ns
+nesting came from being embedded as outer-graph nodes (STEPS.md 24). Under
+the agents-as-tools rewrite (see supervisor.py's module docstring), these
+graphs are instead invoked directly from a tool function via a bare
+`ainvoke()` — staying checkpointer-less here is now the OTHER half of why
+interrupt()/Command(resume=...) still works correctly through that nested
+call (verified by a real spike before the rewrite): giving a specialist its
+own checkpointer would let it try to independently resolve an interrupt
+raised inside it, instead of letting the resume-tracking bubble up to and
+resolve against the OUTER graph's checkpointer, which is what the verified
+mechanism actually relies on.
+
+Each specialist call is now also a fresh, ISOLATED conversation (built by
+supervisor.py's tool wrappers from just the current instruction plus
+deliberately-forwarded context — see `_context_prefix_messages()` there),
+not a view onto the outer graph's shared history. This structurally
+eliminates the cross-turn context-leakage bug class STEPS.md 48 found (an
+earlier, unrelated top-level turn's supervisor tool-use leaking into a
+specialist's own context) — there is no shared history left to leak from,
+so the `SubAgentWindowMiddleware` this file used to carry solely to bound
+that leakage is gone rather than kept as now-redundant defense.
 
 Extended thinking is enabled (thinking={"type": "adaptive"}) on every model
 here and in supervisor.py, paired with `ThinkingBlockRepairMiddleware` in
@@ -18,19 +35,49 @@ risk. The original Phase 1-era fix disabled thinking project-wide to remove
 the bug class entirely; superseded at Phase 10's resume checkpoint by the
 repair middleware, verified live against the real bug and the real API
 (STEPS.md 73/74) rather than assumed safe.
+
+**Upfront confirmation (superseded per-tool-only gating for the CLOSED set of
+actions in supervisor.GATED_ACTIONS):** every specialist graph here uses
+`GatedAgentState` as its `state_schema` — `langchain.agents.AgentState` plus
+one extra field, `pre_approved_actions`. supervisor.py's
+`request_gated_action_confirmation` tool lets the supervisor ask for
+confirmation BEFORE delegating, based on its own read of the request; once
+approved, the specific action name is threaded into the specialist's own
+isolated conversation via this field, and each gated tool
+(interrupts.send_test_notification, write_tools.py's writes, mac_tools.py's
+gated tools) checks it via `InjectedState` — skipping its own `interrupt()`
+call only when ITS OWN action name is in the set, calling `interrupt()`
+exactly as before otherwise. This is a deliberate, accepted weakening of the
+previous TOCTOU guarantee (what the supervisor shows upfront is its own
+understanding of the request, not necessarily byte-identical to what the
+specialist ends up constructing) — discussed and explicitly authorized, not
+a silent regression; see supervisor.py's own module docstring for the full
+tradeoff and why it's bounded to a closed, enumerated list of actions rather
+than a general "the model decides" mechanism. Verified live (real spike)
+before wiring into real tools: a custom `state_schema` extending
+`AgentState` correctly threads a set through `InjectedState`, both for the
+pre-approved case (tool proceeds, no interrupt) and the not-pre-approved
+case (tool still calls `interrupt()` exactly as it always did) — the second
+case is the defense-in-depth backstop: even if the supervisor's own
+reasoning fails to ask upfront, or a specialist decides on a gated action
+the supervisor never anticipated, that action is STILL individually gated
+at the point it actually happens. Nothing here removes any existing
+`interrupt()` call — it only adds a way to skip it when explicitly
+pre-cleared.
 """
 
 from __future__ import annotations
 
+from typing import NotRequired
+
 from dotenv import load_dotenv
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
 from assistant import prompts
-from assistant.compaction import is_compaction_summary, is_genuine_human_turn
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
 from assistant.tools import execute_shell_command, read_file, web_search, write_file
@@ -40,63 +87,14 @@ from assistant.write_tools import build_write_tools
 load_dotenv()
 
 
-class SubAgentWindowMiddleware(AgentMiddleware):
-    """Scopes what a sub-agent's own model call sees, closing STEPS.md 48's
-    context-leakage bug: every sub-agent was previously invoked with the
-    outer graph's ENTIRE shared message history (not a view scoped to its
-    own tools), so a sub-agent could see an EARLIER, UNRELATED top-level
-    turn's supervisor using a transfer_to_* tool it doesn't have, and
-    imitate the naming pattern (reproduced 1-in-3 in isolation with a single
-    planted example from a prior turn).
+class GatedAgentState(AgentState):
+    """`langchain.agents.AgentState` plus one extra field — see this
+    module's docstring for the full why. `NotRequired` so a specialist
+    invoked with no `pre_approved_actions` key at all (the common case:
+    most requests involve no gated action) doesn't need every caller to
+    remember to pass an empty set explicitly."""
 
-    Window = everything since the CURRENT top-level turn started (the most
-    recent genuine user message, compaction.py's is_genuine_human_turn) —
-    NOT "since this specific agent's own handoff," which a first version of
-    this middleware used and which live end-to-end verification caught as
-    wrong: it cut off the original request and an earlier specialist's
-    findings on a multi-hop chain (research_agent -> coding_agent), leaving
-    the second specialist with no idea what it was supposed to do. Turn-
-    boundary windowing excludes leakage from PAST, unrelated turns (the
-    actual STEPS.md 48 bug) while preserving full context WITHIN the
-    current multi-hop chain, since the Phase 6 routing bridge between
-    specialists is deliberately NOT a genuine-turn boundary.
-
-    Filters ONLY what this model call receives, via wrap_model_call — NOT a
-    state-mutating before_model return. Verified via a real spike (STEPS.md,
-    this phase) that wrap_model_call leaves the outer graph's persisted/
-    checkpointed state untouched; a state-mutating approach here would
-    instead corrupt the ONE shared history every other node also reads
-    from, since GraphState.messages is shared verbatim across every
-    sub-agent (supervisor.py's own "no manual state-transform shim" design).
-
-    Turn-boundary windowing is always pairing-safe (compaction.py's own
-    _find_keep_boundary relies on the same property): a genuine HumanMessage
-    never appears mid AIMessage/ToolMessage sequence, so splitting there
-    never orphans a tool_use block — unlike the first version of this
-    middleware, which anchored on a specific ToolMessage and, when it cut
-    that message loose from the AIMessage that issued its tool_use, produced
-    exactly that corruption (caught live: "unexpected tool_use_id found in
-    tool_result blocks" — the same class of bug as STEPS.md 36, from a new
-    source).
-    """
-
-    async def awrap_model_call(self, request, handler):  # noqa: ANN001, ANN201
-        """Async only — this codebase runs graph.ainvoke() exclusively
-        (CLAUDE.md load-bearing decision: MCP-loaded tools only support
-        async invocation), same reason NoParallelHandoffs in supervisor.py
-        implements awrap_model_call rather than the sync variant. Caught by
-        a real NotImplementedError on first live end-to-end run through the
-        actual graph — LangChain's middleware base class does not fall back
-        from a sync-only wrap_model_call in an async context."""
-        messages = request.messages
-        window_start = 0
-        for i, m in enumerate(messages):
-            if is_genuine_human_turn(m):
-                window_start = i
-        windowed = messages[window_start:]
-        if window_start > 0 and messages and is_compaction_summary(messages[0]):
-            windowed = [messages[0], *windowed]
-        return await handler(request.override(messages=windowed))
+    pre_approved_actions: NotRequired[set[str]]
 
 
 # --- Coding sub-agent --------------------------------------------------
@@ -134,7 +132,8 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
         model=model,
         tools=tools,
         system_prompt=CODING_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware(), ThinkingBlockRepairMiddleware()],
+        middleware=[ThinkingBlockRepairMiddleware()],
+        state_schema=GatedAgentState,
         name="coding_agent",
     )
 
@@ -167,7 +166,8 @@ def build_research_agent() -> CompiledStateGraph:
         model=model,
         tools=[web_search],
         system_prompt=RESEARCH_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware(), ThinkingBlockRepairMiddleware()],
+        middleware=[ThinkingBlockRepairMiddleware()],
+        state_schema=GatedAgentState,
         name="research_agent",
     )
 
@@ -284,7 +284,8 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
         model=model,
         tools=_select_life_admin_tools(mcp_tools),
         system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware(), NoParallelWrites(), ThinkingBlockRepairMiddleware()],
+        middleware=[NoParallelWrites(), ThinkingBlockRepairMiddleware()],
+        state_schema=GatedAgentState,
         name="life_admin_agent",
     )
 
@@ -390,6 +391,7 @@ def build_mac_control_agent() -> CompiledStateGraph:
         model=model,
         tools=MAC_CONTROL_TOOLS,
         system_prompt=MAC_CONTROL_SYSTEM_PROMPT,
-        middleware=[SubAgentWindowMiddleware(), NoParallelMacWrites(), ThinkingBlockRepairMiddleware()],
+        middleware=[NoParallelMacWrites(), ThinkingBlockRepairMiddleware()],
+        state_schema=GatedAgentState,
         name="mac_control_agent",
     )

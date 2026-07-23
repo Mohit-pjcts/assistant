@@ -62,11 +62,6 @@ KEEP_TOKENS = 15_000
 # live agent reasoning.
 SUMMARIZER_MODEL_NAME = "claude-haiku-4-5"
 
-# Matches supervisor.py's own marker key for the Phase 6 routing-bridge
-# HumanMessage — duplicated here (not imported) to avoid a supervisor.py <->
-# compaction.py import cycle; both modules independently need to recognize
-# it as "not a genuine user turn boundary."
-_BRIDGE_MARKER_KEY = "phase6_routing_bridge"
 _SUMMARY_MARKER_KEY = "phase7_compaction_summary"
 _RECALLED_FACTS_MARKER_KEY = "phase7_recalled_facts"
 
@@ -87,19 +82,18 @@ _SUMMARY_PROMPT_FALLBACK = (
 
 def is_genuine_human_turn(message: AnyMessage) -> bool:
     """A real user-turn boundary — not a synthetic HumanMessage the graph
-    itself inserts (the Phase 6 routing bridge, marking a mid-turn re-entry
-    into the supervisor after a specialist finishes; or Phase 7 Part B's
-    recalled-facts injection, memory_extraction.py's recall_memory_node).
-    Exported: also used by sub_agents.py's SubAgentWindowMiddleware to
-    window each specialist's own model calls to the CURRENT top-level turn
-    — the same boundary this module uses for compaction, since both are
-    instances of "never split what belongs to one turn," just applied to
-    different problems (bounding growth over calendar time here; bounding
-    cross-turn context leakage there — STEPS.md 48)."""
+    itself inserts — Phase 7 Part B's recalled-facts injection
+    (memory_extraction.py's recall_memory_node). Also used by
+    memory_extraction.py's own turn-boundary logic and, pre-rewrite, by
+    sub_agents.py's now-removed SubAgentWindowMiddleware (supervisor.py's
+    agents-as-tools rewrite made cross-turn windowing unnecessary — see
+    that module's docstring). The Phase 6 routing-bridge marker this
+    function used to also exclude no longer exists: that mechanism was
+    removed along with the Command-handoff loop-back it supported."""
     if not isinstance(message, HumanMessage):
         return False
     kwargs = getattr(message, "additional_kwargs", {})
-    return not (kwargs.get(_BRIDGE_MARKER_KEY) or kwargs.get(_RECALLED_FACTS_MARKER_KEY))
+    return not kwargs.get(_RECALLED_FACTS_MARKER_KEY)
 
 
 def is_compaction_summary(message: AnyMessage) -> bool:
@@ -118,6 +112,16 @@ def tag_recalled_facts(message: HumanMessage) -> None:
     the raw marker key, so memory_extraction.py doesn't need to know the
     literal dict shape."""
     message.additional_kwargs[_RECALLED_FACTS_MARKER_KEY] = True
+
+
+def is_recalled_facts_message(message: AnyMessage) -> bool:
+    """The read-side counterpart to tag_recalled_facts. Added for the
+    agents-as-tools rewrite of supervisor.py: since each specialist call is
+    now an isolated, fresh ainvoke() rather than a shared-state graph node,
+    it no longer sees recalled facts for free — supervisor.py's specialist
+    tool wrappers use this to find and forward the current turn's recalled-
+    facts message explicitly into each sub-agent call."""
+    return bool(getattr(message, "additional_kwargs", {}).get(_RECALLED_FACTS_MARKER_KEY))
 
 
 def _find_keep_boundary(messages: list[AnyMessage]) -> int:

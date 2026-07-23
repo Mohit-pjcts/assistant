@@ -138,7 +138,9 @@ async def _run(start_new: bool) -> None:
                 # per-call session/tags/trace-name propagation —
                 # observability.py's module docstring has the full why this
                 # replaced v2's config-dict-based metadata approach.
-                with observability.tracing_context(thread_id):
+                with observability.tracing_context(thread_id) as span:
+                    if span is not None:
+                        span.update(input=user_input)
                     result = await graph.ainvoke(
                         {"messages": [("user", user_input)]},
                         config=config,
@@ -162,7 +164,9 @@ async def _run(start_new: bool) -> None:
                         action = payload.get("action") if isinstance(payload, dict) else None
                         observability.fire_score_gate_outcome(thread_id, approved, action)
 
-                final_message = result["messages"][-1]
+                    final_message = result["messages"][-1]
+                    if span is not None:
+                        span.update(output=_render_content(final_message.content))
                 print(f"\nAssistant: {_render_content(final_message.content)}")
                 await thread_store.touch_thread(thread_id)
 

@@ -31,22 +31,11 @@ from assistant.memory_extraction import (
 )
 
 
-def _transfer_tool_message(agent_name: str) -> ToolMessage:
-    return ToolMessage(
-        content=f"Transferred to {agent_name}.",
-        name=f"transfer_to_{agent_name}",
-        tool_call_id=f"call_{agent_name}",
-    )
-
-
 def test_current_turn_user_text_is_source_restricted() -> None:
     """(A): the entire trust boundary. Must include ONLY genuine user
     HumanMessage text from the CURRENT turn — never tool content, AI
-    content, or a past turn's user text, and never the routing-bridge or
-    recalled-facts synthetic messages, which are also technically
-    HumanMessages."""
-    from assistant.supervisor import _make_routing_bridge
-
+    content, a past turn's user text, or the recalled-facts synthetic
+    message, which is also technically a HumanMessage."""
     recalled = HumanMessage(content="[Known facts about the user: irrelevant]")
     recalled.additional_kwargs["phase7_recalled_facts"] = True
 
@@ -55,10 +44,8 @@ def test_current_turn_user_text_is_source_restricted() -> None:
         AIMessage(content="an old answer"),
         HumanMessage(content="I'm vegetarian and I prefer terse answers"),  # current turn
         recalled,
-        _transfer_tool_message("research_agent"),
         ToolMessage(content="secret tool content that must never appear", name="tavily_search", tool_call_id="x"),
         AIMessage(content="an AI response that must never appear"),
-        _make_routing_bridge(),
     ]
     text = _current_turn_user_text(messages)
     assert text == "I'm vegetarian and I prefer terse answers"
@@ -68,27 +55,24 @@ def test_current_turn_user_text_is_source_restricted() -> None:
     assert "Known facts" not in text
 
 
-def test_most_recent_tool_result_excludes_handoff_markers() -> None:
-    """(D)'s only source of tool content must be real, data-bearing tool
-    results — never a transfer_to_* handoff marker, which carries no user
-    data at all."""
+def test_most_recent_tool_result_returns_the_latest_this_turn() -> None:
+    """(D)'s only source of tool content. Post-rewrite (agents-as-tools,
+    supervisor.py), every ToolMessage this turn is real, data-bearing
+    content — a specialist call's own final text answer, not a bare
+    transfer_to_* handoff marker (that mechanism no longer exists) — so
+    this just confirms the MOST RECENT one wins."""
     messages = [
         HumanMessage(content="remember my flight number from that email"),
-        _transfer_tool_message("life_admin_agent"),
-        ToolMessage(content="Flight AA123, departs 9am", name="search_emails", tool_call_id="x"),
-        _transfer_tool_message("coding_agent"),  # a LATER handoff marker — must not be picked
+        ToolMessage(content="Searched, found one match", name="life_admin_agent", tool_call_id="a"),
+        ToolMessage(content="Flight AA123, departs 9am", name="life_admin_agent", tool_call_id="b"),
     ]
     result = _most_recent_tool_result_this_turn(messages)
     assert result is not None
-    assert result.name == "search_emails"
     assert "AA123" in result.content
 
 
 def test_most_recent_tool_result_returns_none_when_nothing_real_exists() -> None:
-    messages = [
-        HumanMessage(content="remember X from that email"),
-        _transfer_tool_message("life_admin_agent"),
-    ]
+    messages = [HumanMessage(content="remember X from that email")]
     assert _most_recent_tool_result_this_turn(messages) is None
 
 
@@ -206,7 +190,6 @@ async def test_real_citation_is_attached_with_provenance(monkeypatch) -> None:
 
             messages = [
                 HumanMessage(content="remember the flight number from that email"),
-                _transfer_tool_message("life_admin_agent"),
                 ToolMessage(content="Flight AA123, departs 9am", name="search_emails", tool_call_id="x"),
             ]
             result = await graph.ainvoke({"messages": messages}, config=config)
@@ -262,8 +245,8 @@ class _FakeMonkeypatch:
 if __name__ == "__main__":
     test_current_turn_user_text_is_source_restricted()
     print("OK: test_current_turn_user_text_is_source_restricted")
-    test_most_recent_tool_result_excludes_handoff_markers()
-    print("OK: test_most_recent_tool_result_excludes_handoff_markers")
+    test_most_recent_tool_result_returns_the_latest_this_turn()
+    print("OK: test_most_recent_tool_result_returns_the_latest_this_turn")
     test_most_recent_tool_result_returns_none_when_nothing_real_exists()
     print("OK: test_most_recent_tool_result_returns_none_when_nothing_real_exists")
     test_cap_proposed_facts_enforces_structural_limit()

@@ -143,13 +143,20 @@ def _current_turn_user_text(messages: list[AnyMessage]) -> str:
 def _most_recent_tool_result_this_turn(messages: list[AnyMessage]) -> ToolMessage | None:
     """(D)'s ONLY source of tool content — found independently of and after
     extraction, never from the extraction model's own (unverifiable) claim
-    about what a tool result said, since that model never saw one."""
+    about what a tool result said, since that model never saw one.
+
+    Under the agents-as-tools rewrite (supervisor.py), the most recent
+    ToolMessage this turn is typically a specialist call itself (e.g.
+    "coding_agent"), whose content is that specialist's own final text
+    answer — a cleaner citation source than the pre-rewrite architecture's
+    raw nested tool output, which the now-removed `transfer_to_*` exclusion
+    used to have to filter around."""
     turn_start = 0
     for i, m in enumerate(messages):
         if is_genuine_human_turn(m):
             turn_start = i
     for m in reversed(messages[turn_start:]):
-        if isinstance(m, ToolMessage) and not (m.name or "").startswith("transfer_to_"):
+        if isinstance(m, ToolMessage):
             return m
     return None
 

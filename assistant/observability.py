@@ -187,7 +187,7 @@ def langfuse_callbacks() -> list[Any]:
 
 
 @contextmanager
-def tracing_context(thread_id: str) -> Iterator[None]:
+def tracing_context(thread_id: str) -> Iterator[Any]:
     """Wrap a graph invocation (`ainvoke()`/`astream_events()`) in this to
     get v3's per-call session_id/tags/trace_name propagation — the direct
     replacement for v2's `langfuse_run_config()`-returned metadata dict,
@@ -197,19 +197,60 @@ def tracing_context(thread_id: str) -> Iterator[None]:
     `voice_daemon.py`, `server.py`) uses this identically:
 
     ```python
-    with observability.tracing_context(thread_id):
+    with observability.tracing_context(thread_id) as span:
+        if span is not None:
+            span.update(input=user_input)
         result = await graph.ainvoke(..., config=config)
+        while "__interrupt__" in result:
+            ...
+            result = await graph.ainvoke(Command(resume=approved), config=config)
+        if span is not None:
+            span.update(output=final_text)
     ```
 
-    No-ops cleanly (plain `yield`, no Langfuse call at all) when Langfuse
+    Also opens an explicit `start_as_current_observation()` span (name =
+    TRACE_NAME) around the whole scope, YIELDING it — this is what makes a
+    gated action's resume loop nest as ONE tree instead of two. A gated
+    tool's `interrupt()` forces the caller to make a SEPARATE top-level
+    `ainvoke()` call to resume (LangGraph cannot resume mid-call — control
+    must return to the human first), and the LangChain CallbackHandler
+    gives each top-level `ainvoke()`/`astream_events()` call its own root
+    run. Without an explicit ambient parent span, that's genuinely two
+    sibling root spans in the same trace — confirmed live by pulling a real
+    interrupt/resume trace's raw observations via the Langfuse API and
+    finding exactly that shape. Langfuse's own docs name this exact
+    scenario and give `start_as_current_observation` as the fix.
+
+    **Why callers must update the YIELDED SPAN OBJECT, never
+    `client.update_current_trace()`:** live-caught, not assumed — this
+    module's first version of the input/output fix used
+    `update_current_trace()`, which reads whatever the SDK currently
+    considers "the current observation." That silently breaks the moment a
+    real LangChain call happens inside this scope: a minimal spike (two
+    `update_current_trace()` calls around one plain `ChatAnthropic.ainvoke()`,
+    no LangGraph involved) showed `get_current_observation_id()` drifting
+    to the model call's own (by-then-closed) span after it returns, instead
+    of restoring to this function's wrapping span — so the SECOND
+    `update_current_trace()` call (output, always issued after real model/
+    tool work happens) silently updates nothing, while the FIRST one
+    (input, called before any nested work) still worked, which is exactly
+    the "input showed up, output stayed empty" symptom a user reported
+    live. Calling `.update()` directly on the span OBJECT this function
+    yields sidesteps that "current observation" drift entirely — confirmed
+    with the same spike, updating a held reference instead, both before AND
+    after the nested model call.
+
+    No-ops cleanly (yields `None`, no Langfuse call at all) when Langfuse
     isn't configured — verified this doesn't require a configured client
-    at all to be a safe no-op."""
-    if _get_client_internal() is None:
-        yield
+    at all to be a safe no-op; every caller checks `is not None` first."""
+    client = _get_client_internal()
+    if client is None:
+        yield None
         return
     tags = [f"client:{_client_name}"] if _client_name else None
     with propagate_attributes(session_id=thread_id, tags=tags, trace_name=TRACE_NAME):
-        yield
+        with client.start_as_current_observation(as_type="span", name=TRACE_NAME) as span:
+            yield span
 
 
 def inject_trace_headers() -> dict[str, str]:
@@ -254,6 +295,65 @@ def attached_parent_context(headers: Mapping[str, str], thread_id: str) -> Itera
     try:
         with tracing_context(thread_id):
             yield
+    finally:
+        otel_context.detach(token)
+
+
+@contextmanager
+def resumed_tracing_context(headers: Mapping[str, str], thread_id: str) -> Iterator[Any]:
+    """server.py's `/resume`-only counterpart to `attached_parent_context()`
+    — reattaches the SAME trace a `/chat` call's turn suspended under, as a
+    real child span named "resume" (not a second "agent-turn" — that was
+    this function's first version, which produced a real but confusing
+    duplicate root-looking label one level deep; caught checking the actual
+    resulting trace after the first cross-request test).
+
+    YIELDS that span (or `None` if Langfuse isn't configured) — callers
+    must call `.update(output=...)` on it directly once the resumed turn's
+    real final answer is known, the SAME reason `tracing_context()`'s own
+    docstring gives for why a captured object, not
+    `client.update_current_trace()`, is what actually sticks after real
+    LangChain work happens in between. This is also, concretely, why this
+    function opens a span at all rather than staying a bare context-attach
+    like its first version: without one, there is no reliable object left
+    to call `.update()` on for the resume's own output once `/resume`'s own
+    `astream_events()` call has run — `update_current_trace()`'s "current
+    observation" would have already drifted by then, same failure mode.
+
+    **Known, disclosed limitation, not fixable from this side:** the
+    TRACE-level `output` (what the Sessions list shows) still won't reflect
+    a resumed turn's answer, only THIS "resume" span's own output. Root
+    cause confirmed by reading the SDK's own `LangfuseSpan.update()`
+    source: it starts with `if not self._otel_span.is_recording(): return
+    self` — a plain OTEL rule, not a Langfuse quirk. `/chat`'s own
+    `agent-turn` span already ended (its HTTP response already returned)
+    by the time `/resume` runs, so it is no longer "recording" and no
+    update can reach it — not from a held reference (never had one across
+    the request boundary anyway), not via `update_current_trace()`
+    (already shown unreliable once ANY nested call happens, see
+    `tracing_context()`), not by any means: an ended OTEL span cannot be
+    reopened. The real final answer is still fully visible — one click
+    into the trace, on this "resume" span — just not mirrored onto the
+    trace's own top-level Output field for this specific path. Closing this
+    fully would need NOT returning `/chat`'s HTTP response until the whole
+    turn resolves, defeating the entire point of surfacing the interrupt to
+    the client immediately; not attempted here.
+
+    No-ops the same way `tracing_context()` does when Langfuse isn't
+    configured — the attach/detach still happens either way (cheap, and
+    correctness-neutral with no active span), matching this module's
+    existing defensive posture elsewhere."""
+    ctx = propagate.extract(dict(headers))
+    token = otel_context.attach(ctx)
+    try:
+        client = _get_client_internal()
+        if client is None:
+            yield None
+            return
+        tags = [f"client:{_client_name}"] if _client_name else None
+        with propagate_attributes(session_id=thread_id, tags=tags, trace_name=TRACE_NAME):
+            with client.start_as_current_observation(as_type="span", name="resume") as span:
+                yield span
     finally:
         otel_context.detach(token)
 

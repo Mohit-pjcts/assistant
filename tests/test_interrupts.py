@@ -24,7 +24,14 @@ class State(TypedDict):
 
 
 def _act_node(state: State) -> dict:
-    result = send_test_notification.invoke({"message": "test notification"})
+    # A minimal, correctly-shaped GatedAgentState stand-in — this test
+    # graph's own State (just {"result": ...}) doesn't match
+    # send_test_notification's expected InjectedState shape, so a literal
+    # dict is passed instead of the graph's real state. No
+    # "pre_approved_actions" key, so `state.get("pre_approved_actions")`
+    # safely resolves to None/empty, exercising the normal
+    # (not-pre-approved) interrupt path these tests verify.
+    result = send_test_notification.invoke({"message": "test notification", "state": {"messages": []}})
     return {"result": result}
 
 

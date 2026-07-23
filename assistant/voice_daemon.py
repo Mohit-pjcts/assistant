@@ -274,7 +274,9 @@ class VoiceDaemon:
             # session/tags/trace-name propagation — observability.py's
             # module docstring has the full why this replaced v2's
             # config-dict-based metadata approach.
-            with observability.tracing_context(thread_id):
+            with observability.tracing_context(thread_id) as span:
+                if span is not None:
+                    span.update(input=text)
                 result = await self._graph.ainvoke(
                     {"messages": [("user", text)]},
                     config=config,
@@ -308,6 +310,9 @@ class VoiceDaemon:
                     )
                     result = await self._graph.ainvoke(Command(resume=approved), config=config)
                     observability.fire_score_gate_outcome(thread_id, approved, action)
+
+                if span is not None:
+                    span.update(output=_render_content(result["messages"][-1].content))
 
             reply = _render_content(result["messages"][-1].content)
             logger.info("assistant: %s", reply)

@@ -231,6 +231,8 @@ async def _stream_turn(
     thread_id: str,
     input_or_command: Any,
     gate_outcome: tuple[bool, str | None] | None = None,
+    *,
+    is_resume: bool = False,
 ) -> AsyncIterator[bytes]:
     """Stream one turn (a fresh message OR a Command(resume=...)) as SSE
     frames: zero or more `{"type": "token", "text": ...}` deltas, followed
@@ -257,6 +259,18 @@ async def _stream_turn(
     because `NoParallelWrites`/`NoParallelHandoffs`/`NoParallelMacWrites`
     already guarantee at most one gated call is ever pending at once.
 
+    `is_resume` (passed by the `/resume` endpoint only): consumes any stored
+    `app.state.pending_trace_headers[thread_id]` — the W3C traceparent
+    captured from the span active when THIS thread's turn last suspended on
+    interrupt() — and reattaches it via `observability.attached_parent_
+    context()` instead of opening a fresh `tracing_context()` root. This is
+    what makes a gated action's `/chat` → (human looks at the card for
+    however long) → `/resume` round trip nest as one tree in Langfuse
+    instead of two sibling roots, mirroring the fix already verified for
+    main.py's/voice_daemon.py's single-process while-loop case — the
+    dashboard needs its own mechanism because `/chat` and `/resume` are
+    separate HTTP requests with no shared Python scope to wrap.
+
     Registers itself in `app.state.active_tasks[thread_id]` so `/chat/stop`
     can cancel it — verified live that an external `task.cancel()` here
     leaves the checkpointer in a clean state (the in-flight graph step
@@ -280,7 +294,38 @@ async def _stream_turn(
         # replaced v2's config-dict-based metadata approach. Scoped tightly
         # around the streaming/state-read work, not the DB touch below,
         # since that isn't a traced operation.
-        with observability.tracing_context(thread_id):
+        #
+        # `/resume` only: reattach the traceparent captured when this
+        # thread's turn last suspended, instead of opening a fresh root —
+        # see this function's own docstring for the full why.
+        # `resumed_tracing_context()`, not `attached_parent_context()` —
+        # the latter is fa_service.py's cross-PROCESS helper and
+        # deliberately opens its own nested span for the FA's contribution;
+        # reusing it here for a same-process resume produced a real but
+        # purely cosmetic redundant "agent-turn" span one level deeper than
+        # the original (caught live checking the actual resulting trace).
+        # Falls back to a fresh tracing_context() if nothing was stored
+        # (Langfuse wasn't configured when the interrupt fired, or this is
+        # somehow the first call on this thread), same as any defensive
+        # lookup miss.
+        stored_headers = app.state.pending_trace_headers.pop(thread_id, None) if is_resume else None
+        tracing_scope = (
+            observability.resumed_tracing_context(stored_headers, thread_id)
+            if stored_headers
+            else observability.tracing_context(thread_id)
+        )
+        with tracing_scope as span:
+            # Trace-level input/output — see tracing_context()'s docstring
+            # for the real regression this fixes and why it must be set on
+            # the yielded SPAN OBJECT, never via client.update_current_trace()
+            # (silently drops the update once a real LangChain call happens
+            # in between, live-caught). Only set input on a genuinely fresh
+            # turn, never on /resume — a resume's own input_or_command is a
+            # bare Command(resume=...), not the user's real message, and
+            # would overwrite the trace's real input with that if set
+            # unconditionally here.
+            if span is not None and not is_resume:
+                span.update(input=input_or_command)
             async for event in graph.astream_events(input_or_command, config=config, version="v2"):
                 if event.get("event") == "on_chat_model_stream":
                     text = _extract_token_text(event["data"]["chunk"].content)
@@ -308,12 +353,21 @@ async def _stream_turn(
             state = await graph.aget_state(config)
             pending = [i for t in state.tasks for i in t.interrupts]
             if pending:
+                # Captured from INSIDE tracing_scope, so this is the span
+                # this turn actually suspended under — a later /resume picks
+                # it up via app.state.pending_trace_headers above. Naturally
+                # self-refreshes on each further interrupt within the same
+                # multi-gated-action turn; no explicit clearing needed on
+                # the completed-turn path below, since that path is only
+                # ever reached once nothing is left pending.
+                app.state.pending_trace_headers[thread_id] = observability.inject_trace_headers()
                 yield _sse_event({"type": "interrupt", "payload": pending[0].value})
             else:
                 final_message = state.values["messages"][-1]
-                yield _sse_event(
-                    {"type": "message", "content": _render_content(final_message.content)}
-                )
+                final_content = _render_content(final_message.content)
+                if span is not None:
+                    span.update(output=final_content)
+                yield _sse_event({"type": "message", "content": final_content})
                 if gate_outcome is not None:
                     approved, action = gate_outcome
                     observability.fire_score_gate_outcome(thread_id, approved, action)
@@ -419,6 +473,19 @@ async def lifespan(app: FastAPI):
         # /chat/stop can find and cancel it. A plain dict is safe here —
         # this server is single-process (uvicorn, no worker pool).
         app.state.active_tasks = {}
+        # Cross-request trace linking for gated actions: /chat and /resume
+        # are separate HTTP requests, potentially minutes apart while a
+        # human looks at the confirmation card — unlike main.py/voice_daemon
+        # .py's single Python while-loop, there's no one function scope to
+        # wrap both calls in. `_stream_turn` stores the W3C traceparent for
+        # the span active when a turn suspends on interrupt(), keyed by
+        # thread_id; `/resume` reattaches it (observability.
+        # attached_parent_context(), the same technique fa_service.py
+        # already uses for its own cross-process trace nesting) so the
+        # resume's trace becomes a real child of the original call's span
+        # instead of a new sibling root. A plain dict, same reasoning as
+        # active_tasks above.
+        app.state.pending_trace_headers = {}
         yield
 
 
@@ -481,6 +548,7 @@ async def resume(request: ResumeRequest) -> StreamingResponse:
             thread_id,
             Command(resume=request.approved),
             gate_outcome=(request.approved, action),
+            is_resume=True,
         ),
         media_type="text/event-stream",
     )

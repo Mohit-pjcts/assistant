@@ -26,28 +26,33 @@ beforeEach(() => {
 
 describe("HistoryPanel", () => {
   it("shows every message, including tool/system rows and empty-content turns the chat view hides", async () => {
+    // Fixture matches the agents-as-tools architecture (supervisor.py):
+    // a specialist call now surfaces as a single ToolMessage named after
+    // the specialist (its own summarized reply), not a separate
+    // transfer_to_* handoff row plus a second assistant row for the
+    // specialist itself — that mechanism was removed.
     mockedFetchHistory.mockResolvedValue([
       { role: "user", content: "hello", synthetic: false, name: null },
       { role: "assistant", content: "", synthetic: false, name: "supervisor" },
       {
         role: "tool",
-        content: "Transferred to coding_agent.",
+        content: "done",
         synthetic: false,
-        name: "transfer_to_coding_agent",
+        name: "coding_agent",
       },
-      { role: "assistant", content: "done", synthetic: false, name: "coding_agent" },
+      { role: "assistant", content: "All set.", synthetic: false, name: "supervisor" },
     ]);
 
     render(<HistoryPanel />);
 
     expect(await screen.findByText("hello")).toBeInTheDocument();
-    expect(await screen.findByText("Transferred to coding_agent.")).toBeInTheDocument();
     expect(await screen.findByText("done")).toBeInTheDocument();
+    expect(await screen.findByText("All set.")).toBeInTheDocument();
     // The empty-content assistant turn still gets a row (unlike ChatPanel).
     expect(screen.getByText("(empty)")).toBeInTheDocument();
     // The tool's actual name is surfaced as a label, not just the "tool" role.
-    expect(screen.getByText("transfer_to_coding_agent")).toBeInTheDocument();
-    expect(screen.getByText("coding_agent")).toBeInTheDocument();
+    expect(screen.getAllByText("coding_agent")).toHaveLength(1);
+    expect(screen.getAllByText("supervisor")).toHaveLength(2);
     expect(screen.getAllByTestId("history-row")).toHaveLength(4);
   });
 
@@ -56,7 +61,7 @@ describe("HistoryPanel", () => {
       { role: "user", content: "real question", synthetic: false, name: null },
       {
         role: "user",
-        content: "[Routing note, not from the user] The specialist above has finished...",
+        content: "[Known facts about the user, for background context only — ...]",
         synthetic: true,
         name: null,
       },
@@ -66,7 +71,7 @@ describe("HistoryPanel", () => {
 
     expect(await screen.findByText("real question")).toBeInTheDocument();
     // Shown, not hidden — this is the key difference from ChatPanel.
-    expect(await screen.findByText(/Routing note, not from the user/)).toBeInTheDocument();
+    expect(await screen.findByText(/Known facts about the user/)).toBeInTheDocument();
     expect(screen.getByText("internal")).toBeInTheDocument();
   });
 

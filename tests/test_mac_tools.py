@@ -112,7 +112,10 @@ def test_create_shortcut_opens_blank_editor_with_no_prefill() -> None:
 
 def _build_isolated_graph(checkpointer, name: str):
     def node(state: State) -> dict:
-        return {"result": mac_tools.run_shortcut.invoke({"name": name})}
+        # A minimal, correctly-shaped GatedAgentState stand-in — this test
+        # graph's own State (just {"result": ...}) doesn't match
+        # run_shortcut's expected InjectedState shape.
+        return {"result": mac_tools.run_shortcut.invoke({"name": name, "state": {"messages": []}})}
 
     builder = StateGraph(State)
     builder.add_node("act", node)
@@ -203,8 +206,11 @@ def test_iso_datetime_argv_bad_timezone_raises_not_swallowed() -> None:
 
 def _build_tool_graph(checkpointer, tool_name: str, tool_args: dict):
     def node(state: State) -> dict:
+        # A minimal, correctly-shaped GatedAgentState stand-in — this test
+        # graph's own State (just {"result": ...}) doesn't match the
+        # calendar tools' expected InjectedState shape.
         target = getattr(mac_tools, tool_name)
-        return {"result": target.invoke(tool_args)}
+        return {"result": target.invoke({**tool_args, "state": {"messages": []}})}
 
     builder = StateGraph(State)
     builder.add_node("act", node)
@@ -386,7 +392,9 @@ def test_calendar_update_event_approved_preserves_unspecified_fields() -> None:
 
 def test_calendar_update_event_requires_timezone_when_changing_start() -> None:
     with _capture_subprocess_calls_with_calendar_get():
-        result = mac_tools.calendar_update_event.invoke({"event_id": "E1", "start": "2026-08-02T09:00:00"})
+        result = mac_tools.calendar_update_event.invoke(
+            {"event_id": "E1", "start": "2026-08-02T09:00:00", "state": {"messages": []}}
+        )
     assert "timezone is required" in result
 
 
@@ -395,7 +403,7 @@ def test_calendar_update_event_no_fields_reports_nothing_to_update() -> None:
     without it in principle), but this only fires once fields are validated
     as empty — verified against the real read-back tool directly."""
     with _capture_subprocess_calls_with_calendar_get() as calls:
-        result = mac_tools.calendar_update_event.invoke({"event_id": "E1"})
+        result = mac_tools.calendar_update_event.invoke({"event_id": "E1", "state": {"messages": []}})
     assert result == "Nothing to update — no fields were provided."
     assert all(argv[2] != mac_tools._CALENDAR_UPDATE_EVENT for argv in calls)
 

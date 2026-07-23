@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
@@ -89,12 +89,15 @@ logger = logging.getLogger(__name__)
 
 
 class _AgentState(TypedDict):
-    """Mirrors supervisor.GraphState's shape (messages: Annotated[list[AnyMessage],
-    add_messages]) — duplicated rather than imported to avoid a circular import
-    (supervisor -> sub_agents -> write_tools -> supervisor). create_agent's own
-    AgentState has this same shape; see sub_agents.py's module docstring."""
+    """Mirrors sub_agents.GatedAgentState's shape — duplicated rather than
+    imported to avoid a circular import (supervisor -> sub_agents ->
+    write_tools -> supervisor). `pre_approved_actions` backs the upfront-
+    confirmation mechanism (supervisor.py's `request_gated_action_confirmation`
+    / GATED_ACTIONS — see sub_agents.py's module docstring) every gated tool
+    below checks before falling back to its own interrupt()."""
 
     messages: Annotated[list[AnyMessage], add_messages]
+    pre_approved_actions: NotRequired[set[str]]
 
 
 # Structural cap on gated write-tool calls per top-level turn — mirrors
@@ -294,7 +297,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 "body_format": "plain",
                 "voice_approvable": False,
             }
-            approved = interrupt(payload)
+            if "send_email" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await send_email_raw.ainvoke(
@@ -342,7 +348,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 "remove_label_ids": remove_label_ids or [],
                 "voice_approvable": False,
             }
-            approved = interrupt(payload)
+            if "modify_gmail_labels" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await modify_email_raw.ainvoke(
@@ -405,7 +414,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 "description": description,
                 "voice_approvable": False,
             }
-            approved = interrupt(payload)
+            if "create_calendar_event" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await create_event_raw.ainvoke(
@@ -490,7 +502,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 "changes": changes,
                 "voice_approvable": False,
             }
-            approved = interrupt(payload)
+            if "update_calendar_event" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             args: dict[str, Any] = {"calendarId": calendar_id, "eventId": event_id}
@@ -551,7 +566,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                     f"Delete the calendar event '{event['title']}' on {event['start']}?"
                 ),
             }
-            approved = interrupt(payload)
+            if "delete_calendar_event" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await delete_event_raw.ainvoke({"calendarId": calendar_id, "eventId": event_id})
@@ -601,7 +619,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 "resulting_action": resulting_action,
                 "voice_approvable": False,
             }
-            approved = interrupt(payload)
+            if "create_gmail_filter" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             action: dict[str, Any] = {}
@@ -649,7 +670,10 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 # avoid. See STEPS.md 64.
                 "voice_approvable": False,
             }
-            approved = interrupt(payload)
+            if "delete_gmail_filter" in (state.get("pre_approved_actions") or set()):
+                approved = True
+            else:
+                approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await delete_filter_raw.ainvoke({"filterId": filter_id})

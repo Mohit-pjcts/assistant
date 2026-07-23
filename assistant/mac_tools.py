@@ -60,10 +60,27 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime
+from typing import Annotated, NotRequired, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from langchain_core.messages import AnyMessage
 from langchain_core.tools import tool
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
+
+
+class _AgentState(TypedDict):
+    """Mirrors sub_agents.GatedAgentState's relevant shape — duplicated
+    rather than imported to avoid a circular import, same rationale as
+    write_tools.py's and interrupts.py's own local `_AgentState`. Used by
+    this module's three gated tools to check for upfront pre-approval
+    (supervisor.py's `request_gated_action_confirmation` /
+    GATED_ACTIONS — see sub_agents.py's module docstring)."""
+
+    messages: Annotated[list[AnyMessage], add_messages]
+    pre_approved_actions: NotRequired[set[str]]
+
 
 _TIMEOUT_SECONDS = 15
 
@@ -571,10 +588,15 @@ def calendar_create_event(
     calendar_name: str,
     location: str = "",
     notes: str = "",
+    *,
+    state: Annotated[_AgentState, InjectedState],
 ) -> str:
     """Create an event on Apple Calendar (Calendar.app — NOT Google
     Calendar). Requires the user's explicit confirmation showing the exact
-    event details before creating.
+    event details before creating, UNLESS the supervisor already got
+    upfront confirmation for "calendar_create_event" this turn
+    (supervisor.py's `request_gated_action_confirmation` / GATED_ACTIONS —
+    see sub_agents.py's module docstring).
 
     Args:
         title: Event title.
@@ -596,21 +618,22 @@ def calendar_create_event(
     except (ValueError, ZoneInfoNotFoundError) as exc:
         return f"Error: could not parse start/end/timezone: {exc}"
 
-    approved = interrupt(
-        {
-            "action": "calendar_create_event",
-            "calendar_name": calendar_name,
-            "title": title,
-            "start": start,
-            "end": end,
-            "timezone": timezone,
-            "location": location,
-            "description": notes,
-            "voice_approvable": False,
-        }
-    )
-    if not approved:
-        return "Cancelled — user did not confirm."
+    if "calendar_create_event" not in (state.get("pre_approved_actions") or set()):
+        approved = interrupt(
+            {
+                "action": "calendar_create_event",
+                "calendar_name": calendar_name,
+                "title": title,
+                "start": start,
+                "end": end,
+                "timezone": timezone,
+                "location": location,
+                "description": notes,
+                "voice_approvable": False,
+            }
+        )
+        if not approved:
+            return "Cancelled — user did not confirm."
 
     result = _run_osascript(
         _CALENDAR_CREATE_EVENT,
@@ -630,11 +653,16 @@ def calendar_update_event(
     timezone: str | None = None,
     location: str | None = None,
     notes: str | None = None,
+    *,
+    state: Annotated[_AgentState, InjectedState],
 ) -> str:
     """Update an existing Apple Calendar event by id (from
     calendar_list_events). Requires the user's explicit confirmation showing
     BOTH the event's real current content (read back first — an event id
-    alone isn't identifiable) and the exact requested changes. Only pass the
+    alone isn't identifiable) and the exact requested changes, UNLESS the
+    supervisor already got upfront confirmation for "calendar_update_event"
+    this turn (supervisor.py's `request_gated_action_confirmation` /
+    GATED_ACTIONS — see sub_agents.py's module docstring). Only pass the
     fields you want to change; all others stay as they are.
 
     Args:
@@ -668,24 +696,25 @@ def calendar_update_event(
     if not changes:
         return "Nothing to update — no fields were provided."
 
-    approved = interrupt(
-        {
-            "action": "calendar_update_event",
-            "event_id": event_id,
-            "current": {
-                "title": current["title"],
-                "start": current["start"],
-                "end": current["end"],
-                "calendar": current["calendar"],
-                "location": current["location"],
-                "description": current["description"],
-            },
-            "changes": changes,
-            "voice_approvable": False,
-        }
-    )
-    if not approved:
-        return "Cancelled — user did not confirm."
+    if "calendar_update_event" not in (state.get("pre_approved_actions") or set()):
+        approved = interrupt(
+            {
+                "action": "calendar_update_event",
+                "event_id": event_id,
+                "current": {
+                    "title": current["title"],
+                    "start": current["start"],
+                    "end": current["end"],
+                    "calendar": current["calendar"],
+                    "location": current["location"],
+                    "description": current["description"],
+                },
+                "changes": changes,
+                "voice_approvable": False,
+            }
+        )
+        if not approved:
+            return "Cancelled — user did not confirm."
 
     final_title = title if title is not None else current["title"]
     final_location = location if location is not None else current["location"]
@@ -779,24 +808,28 @@ def create_shortcut() -> str:
 
 
 @tool
-def run_shortcut(name: str) -> str:
+def run_shortcut(name: str, *, state: Annotated[_AgentState, InjectedState]) -> str:
     """Run a named macOS Shortcut. Always asks for confirmation first — a
     Shortcut's actual behavior isn't visible to this tool, so every name is
-    gated the same way regardless of what it sounds like it does.
+    gated the same way regardless of what it sounds like it does — UNLESS
+    the supervisor already got upfront confirmation for "run_shortcut" this
+    turn (supervisor.py's `request_gated_action_confirmation` /
+    GATED_ACTIONS — see sub_agents.py's module docstring).
 
     Args:
         name: The exact name of the Shortcut to run, as it appears in the
             Shortcuts app.
     """
-    approved = interrupt(
-        {
-            "action": "run_shortcut",
-            "name": name,
-            "spoken_prompt": f"Permission to run the '{name}' shortcut?",
-        }
-    )
-    if not approved:
-        return "Cancelled — user did not confirm."
+    if "run_shortcut" not in (state.get("pre_approved_actions") or set()):
+        approved = interrupt(
+            {
+                "action": "run_shortcut",
+                "name": name,
+                "spoken_prompt": f"Permission to run the '{name}' shortcut?",
+            }
+        )
+        if not approved:
+            return "Cancelled — user did not confirm."
 
     try:
         result = subprocess.run(

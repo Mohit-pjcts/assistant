@@ -1,19 +1,22 @@
-"""Tests for assistant.compaction and assistant.sub_agents.SubAgentWindowMiddleware
-— Phase 7 Part A (short-term compaction + the bundled Phase 6 context-leakage
-fix, STEPS.md 48).
+"""Tests for assistant.compaction — Phase 7 Part A (short-term compaction).
 
 Runnable directly, matching tests/test_supervisor.py's convention: the
-deterministic boundary-finding/windowing logic is unit-tested here without a
-live API call; the two live-model behaviors this module depends on —
-compaction actually firing and shrinking a real thread, and a specialist no
-longer imitating a planted transfer_to_* example once windowed — were
-verified against the real model in throwaway spike scripts and are recorded
-in STEPS.md, not re-proven here on every run (same rationale as
-test_supervisor.py's live-verification split).
-"""
+deterministic boundary-finding logic is unit-tested here without a live API
+call; the live-model behavior this module depends on (compaction actually
+firing and shrinking a real thread) was verified against the real model in
+throwaway spike scripts and is recorded in STEPS.md, not re-proven here on
+every run.
 
-import asyncio
-from types import SimpleNamespace
+The old `SubAgentWindowMiddleware` tests that used to live here moved to
+tests/test_supervisor.py as `_context_prefix_messages()` tests — under the
+agents-as-tools rewrite (supervisor.py), forwarding context into a specialist
+call is that module's job now, not a sub_agents.py middleware (see
+sub_agents.py's module docstring for why the middleware was removed rather
+than kept as redundant defense). The old Phase 6 routing-bridge marker this
+module's `is_genuine_human_turn` used to also exclude no longer exists —
+that mechanism was removed along with the Command-handoff loop-back it
+supported.
+"""
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -24,26 +27,27 @@ from assistant.compaction import (
     compact_history_node,
     is_compaction_summary,
     is_genuine_human_turn,
+    is_recalled_facts_message,
+    tag_recalled_facts,
 )
-from assistant.sub_agents import SubAgentWindowMiddleware
-from assistant.supervisor import _make_routing_bridge
 
 
-def _transfer_tool_message(agent_name: str) -> ToolMessage:
-    return ToolMessage(
-        content=f"Transferred to {agent_name}.",
-        name=f"transfer_to_{agent_name}",
-        tool_call_id=f"call_{agent_name}",
-    )
-
-
-def test_is_genuine_human_turn_excludes_routing_bridge() -> None:
-    """The Phase 6 routing bridge is a HumanMessage too — compaction must
-    not treat it as a real turn boundary, or it could split a multi-hop
-    turn's own mid-turn re-entry into "kept" vs "summarized" halves,
-    orphaning tool_use blocks the same way STEPS.md 36's original bug did."""
-    assert not is_genuine_human_turn(_make_routing_bridge())
+def test_is_genuine_human_turn_excludes_recalled_facts_message() -> None:
+    """Phase 7 Part B's recalled-facts injection is a HumanMessage too —
+    compaction (and, post-rewrite, supervisor.py's turn-boundary lookups)
+    must not treat it as a real turn boundary."""
+    recalled = HumanMessage(content="[Known facts about the user: ...]")
+    tag_recalled_facts(recalled)
+    assert not is_genuine_human_turn(recalled)
     assert is_genuine_human_turn(HumanMessage(content="a real user message"))
+
+
+def test_is_recalled_facts_message_detects_tagged_message_only() -> None:
+    tagged = HumanMessage(content="[Known facts about the user: ...]")
+    tag_recalled_facts(tagged)
+    untagged = HumanMessage(content="a normal message")
+    assert is_recalled_facts_message(tagged)
+    assert not is_recalled_facts_message(untagged)
 
 
 def test_is_compaction_summary_detects_tagged_message_only() -> None:
@@ -105,125 +109,11 @@ def test_compact_history_node_noop_when_nothing_safe_to_summarize() -> None:
     assert result == {}
 
 
-def _fake_model_request(messages: list) -> SimpleNamespace:
-    def override(**overrides):
-        merged = SimpleNamespace(messages=messages)
-        merged.__dict__.update(overrides)
-        return merged
-
-    return SimpleNamespace(messages=messages, override=override)
-
-
-def _handoff_call_pair(agent_name: str) -> list:
-    """The realistic AIMessage(tool_use) + ToolMessage(tool_result) pair a
-    supervisor handoff actually produces (supervisor.py's _make_handoff_tool)
-    — needed so windowing tests exercise the real tool_use/tool_result
-    pairing constraint, not a simplified fixture that hides it."""
-    call_id = f"call_{agent_name}"
-    return [
-        AIMessage(
-            content="",
-            tool_calls=[{"name": f"transfer_to_{agent_name}", "args": {}, "id": call_id}],
-        ),
-        ToolMessage(
-            content=f"Transferred to {agent_name}.",
-            name=f"transfer_to_{agent_name}",
-            tool_call_id=call_id,
-        ),
-    ]
-
-
-def test_sub_agent_window_middleware_excludes_past_turn_but_keeps_current_turn() -> None:
-    """Regression test for STEPS.md 48's context-leakage bug: a specialist
-    must not see an EARLIER, UNRELATED top-level turn's supervisor using a
-    transfer_to_* tool it doesn't have — this is the actual mechanism that
-    caused research_agent to hallucinate a transfer_to_coding_agent call
-    after seeing one planted example from a prior turn (reproduced 1-in-3
-    in isolation).
-
-    Also a regression test for the over-correction a first version of this
-    middleware introduced, caught by live end-to-end verification: it
-    windowed to "since THIS agent's own handoff" specifically, which cut off
-    the original request and an earlier specialist's findings on a genuine
-    multi-hop chain within the SAME turn (research_agent -> coding_agent),
-    leaving the second specialist with no idea what to do. Turn-boundary
-    windowing must exclude the former while preserving the latter."""
-    messages = [
-        HumanMessage(content="an earlier, unrelated request"),
-        *_handoff_call_pair("coding_agent"),  # planted leakage source — PAST turn
-        AIMessage(content="coding_agent's answer to the old request"),
-        HumanMessage(content="a brand new request"),  # <- current turn starts here
-        *_handoff_call_pair("research_agent"),
-        AIMessage(content="research_agent's findings, needed by the next specialist"),
-        *_handoff_call_pair("coding_agent"),  # second specialist, SAME turn — legitimate
-    ]
-    middleware = SubAgentWindowMiddleware()
-    request = _fake_model_request(messages)
-
-    captured = {}
-
-    async def handler(req):
-        captured["messages"] = req.messages
-        return None
-
-    asyncio.run(middleware.awrap_model_call(request, handler))
-
-    windowed = captured["messages"]
-    assert windowed == messages[4:], (
-        "window must start at the current turn's HumanMessage, keeping "
-        "everything from the current multi-hop chain"
-    )
-    assert isinstance(windowed[0], HumanMessage), "must not orphan any tool_result"
-    assert "research_agent's findings" in str(windowed[3].content), (
-        "the prior specialist's findings within THIS turn must stay visible "
-        "to the next specialist in the chain"
-    )
-    assert not any(
-        "old request" in str(m.content) for m in windowed if hasattr(m, "content")
-    ), "content from the earlier, unrelated turn must not leak in"
-
-
-def test_sub_agent_window_middleware_preserves_compaction_summary() -> None:
-    """A specialist handed a sub-task deep into an already-compacted thread
-    must still see the running summary at index 0 — otherwise it loses all
-    awareness of the wider conversation just because it wasn't the one
-    running earlier turns."""
-    summary = HumanMessage(
-        content="[Summary of earlier conversation: user is planning a trip.]",
-        additional_kwargs={"phase7_compaction_summary": True},
-    )
-    messages = [
-        summary,
-        AIMessage(content="continuing after compaction"),
-        HumanMessage(content="book the flight"),
-        *_handoff_call_pair("life_admin_agent"),
-    ]
-    middleware = SubAgentWindowMiddleware()
-    request = _fake_model_request(messages)
-
-    captured = {}
-
-    async def handler(req):
-        captured["messages"] = req.messages
-        return None
-
-    asyncio.run(middleware.awrap_model_call(request, handler))
-
-    windowed = captured["messages"]
-    assert windowed[0] is summary
-    assert windowed[1:] == messages[2:], "must window to the turn boundary, then re-prepend the summary"
-    tool_use_ids = {
-        c["id"] if isinstance(c, dict) else c.id
-        for m in windowed
-        for c in (getattr(m, "tool_calls", None) or [])
-    }
-    tool_result_ids = {m.tool_call_id for m in windowed if isinstance(m, ToolMessage)}
-    assert tool_result_ids <= tool_use_ids, "must not orphan any tool_result"
-
-
 if __name__ == "__main__":
-    test_is_genuine_human_turn_excludes_routing_bridge()
-    print("OK: test_is_genuine_human_turn_excludes_routing_bridge")
+    test_is_genuine_human_turn_excludes_recalled_facts_message()
+    print("OK: test_is_genuine_human_turn_excludes_recalled_facts_message")
+    test_is_recalled_facts_message_detects_tagged_message_only()
+    print("OK: test_is_recalled_facts_message_detects_tagged_message_only")
     test_is_compaction_summary_detects_tagged_message_only()
     print("OK: test_is_compaction_summary_detects_tagged_message_only")
     test_find_keep_boundary_never_splits_mid_turn()
@@ -234,8 +124,4 @@ if __name__ == "__main__":
     print("OK: test_compact_history_node_is_noop_under_trigger")
     test_compact_history_node_noop_when_nothing_safe_to_summarize()
     print("OK: test_compact_history_node_noop_when_nothing_safe_to_summarize")
-    test_sub_agent_window_middleware_excludes_past_turn_but_keeps_current_turn()
-    print("OK: test_sub_agent_window_middleware_excludes_past_turn_but_keeps_current_turn")
-    test_sub_agent_window_middleware_preserves_compaction_summary()
-    print("OK: test_sub_agent_window_middleware_preserves_compaction_summary")
-    print("\n8 tests passed")
+    print("\n7 tests passed")
