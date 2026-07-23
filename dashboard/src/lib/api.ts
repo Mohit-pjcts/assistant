@@ -39,6 +39,23 @@ export type InterruptPayload = Record<string, unknown> & {
 export type ChatTurnResult =
   { type: "message"; content: string } | { type: "interrupt"; payload: InterruptPayload };
 
+// A validated A2UI component-tree surface (Phase 17, PLAN.md) — forwarded
+// verbatim from assistant/a2ui.py's render_ui tool the same way
+// InterruptPayload is: an open record per component, since different
+// component types carry different fields. Ephemeral by design (this
+// session's Part A decision): rendered live for the turn that produced it,
+// never fetched back from /history — render_ui's own text summary is what
+// persists there instead.
+export interface A2UIComponent extends Record<string, unknown> {
+  id?: string;
+  component?: string;
+}
+
+export interface A2UISurface {
+  surfaceId: string;
+  components: A2UIComponent[];
+}
+
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
@@ -68,6 +85,7 @@ async function streamSSE(
   path: string,
   body: unknown,
   onToken: (text: string) => void,
+  onA2UI: (surface: A2UISurface) => void = () => {},
 ): Promise<ChatTurnResult> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
@@ -95,11 +113,14 @@ async function streamSSE(
       if (!line.startsWith("data: ")) continue;
       const event = JSON.parse(line.slice("data: ".length)) as
         | { type: "token"; text: string }
+        | { type: "a2ui"; surface: A2UISurface }
         | { type: "message"; content: string }
         | { type: "interrupt"; payload: InterruptPayload }
         | { type: "error"; detail: string };
       if (event.type === "token") {
         onToken(event.text);
+      } else if (event.type === "a2ui") {
+        onA2UI(event.surface);
       } else if (event.type === "error") {
         throw new Error(`${path} stream error: ${event.detail}`);
       } else {
@@ -121,15 +142,32 @@ async function streamSSE(
 export async function sendChat(
   message: string,
   onToken: (text: string) => void = () => {},
+  onA2UI: (surface: A2UISurface) => void = () => {},
 ): Promise<ChatTurnResult> {
-  return streamSSE("/chat", { message }, onToken);
+  return streamSSE("/chat", { message }, onToken, onA2UI);
 }
 
 export async function resumeChat(
   approved: boolean,
   onToken: (text: string) => void = () => {},
+  onA2UI: (surface: A2UISurface) => void = () => {},
 ): Promise<ChatTurnResult> {
-  return streamSSE("/resume", { approved }, onToken);
+  return streamSSE("/resume", { approved }, onToken, onA2UI);
+}
+
+// Phase 17 Part B: what an A2UIRenderer's Button reports (POST /a2ui/action)
+// when the user submits an interactive surface. Streams through the exact
+// same SSE contract as sendChat/resumeChat — server.py's a2ui_action
+// endpoint treats this as an ordinary new user turn, so it can resolve to
+// a message OR another interrupt, same as any other turn.
+export async function sendA2UIAction(
+  surfaceId: string,
+  name: string,
+  context: Record<string, unknown>,
+  onToken: (text: string) => void = () => {},
+  onA2UI: (surface: A2UISurface) => void = () => {},
+): Promise<ChatTurnResult> {
+  return streamSSE("/a2ui/action", { surface_id: surfaceId, name, context }, onToken, onA2UI);
 }
 
 // Cancels whatever turn is currently streaming for the active thread, if

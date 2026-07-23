@@ -21,6 +21,7 @@ vi.mock("@/lib/api", async () => {
     sendChat: vi.fn(),
     resumeChat: vi.fn(),
     stopChat: vi.fn(),
+    sendA2UIAction: vi.fn(),
   };
 });
 
@@ -28,6 +29,7 @@ const mockedFetchHistory = vi.mocked(api.fetchHistory);
 const mockedSendChat = vi.mocked(api.sendChat);
 const mockedResumeChat = vi.mocked(api.resumeChat);
 const mockedStopChat = vi.mocked(api.stopChat);
+const mockedSendA2UIAction = vi.mocked(api.sendA2UIAction);
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -80,7 +82,7 @@ describe("ChatPanel", () => {
 
     expect(await screen.findByText("pong")).toBeInTheDocument();
     expect(screen.getByText("ping")).toBeInTheDocument();
-    expect(mockedSendChat).toHaveBeenCalledWith("ping", expect.any(Function));
+    expect(mockedSendChat).toHaveBeenCalledWith("ping", expect.any(Function), expect.any(Function));
   });
 
   it("shows a live streaming bubble that updates as tokens arrive, then finalizes into a real message", async () => {
@@ -154,6 +156,99 @@ describe("ChatPanel", () => {
     expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
   });
 
+  it("renders an A2UI surface delivered via onA2UI inline with the assistant's reply", async () => {
+    // Phase 17 (PLAN.md): server.py forwards render_ui's validated surface
+    // as a non-terminal `{"type": "a2ui", ...}` frame — api.ts surfaces it
+    // to callers via the onA2UI callback (the 3rd sendChat/resumeChat arg,
+    // mirroring onToken). Verifies ChatPanel actually mounts it, not just
+    // that the callback wiring type-checks.
+    const user = userEvent.setup();
+    mockedSendChat.mockImplementation(async (_message, _onToken, onA2UI) => {
+      onA2UI?.({
+        surfaceId: "s1",
+        components: [{ id: "root", component: "Text", text: "3 meetings today" }],
+      });
+      return { type: "message", content: "Here's your day." };
+    });
+
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(
+      screen.getByPlaceholderText(/message the assistant/i),
+      "what's my day look like",
+    );
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(await screen.findByText("Here's your day.")).toBeInTheDocument();
+    expect(await screen.findByText("3 meetings today")).toBeInTheDocument();
+    expect(screen.getByTestId("a2ui-surface")).toBeInTheDocument();
+  });
+
+  it("keeps an A2UI surface visible while a gate is pending mid-turn, without duplicating it after resume", async () => {
+    mockedSendChat.mockImplementation(async (_message, _onToken, onA2UI) => {
+      onA2UI?.({
+        surfaceId: "s1",
+        components: [{ id: "root", component: "Text", text: "proposed event card" }],
+      });
+      return {
+        type: "interrupt",
+        payload: { action: "send_test_notification", message: "hi", spoken_prompt: "Permission?" },
+      };
+    });
+    mockedResumeChat.mockResolvedValue({ type: "message", content: "Done." });
+
+    const user = userEvent.setup();
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "book it");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await screen.findByTestId("interrupt-gate");
+    expect(screen.getByText("proposed event card")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /approve/i }));
+
+    expect(await screen.findByText("Done.")).toBeInTheDocument();
+    expect(screen.getAllByText("proposed event card")).toHaveLength(1);
+  });
+
+  it("submitting an interactive A2UI form calls sendA2UIAction and renders the reply", async () => {
+    // Phase 17 Part B: A2UIRenderer's onAction -> ChatPanel's
+    // handleA2UIAction -> api.ts's sendA2UIAction -> POST /a2ui/action —
+    // verifies the FULL wiring, not just that each piece type-checks.
+    const user = userEvent.setup();
+    mockedSendChat.mockImplementation(async (_message, _onToken, onA2UI) => {
+      onA2UI?.({
+        surfaceId: "rsvp-1",
+        components: [
+          { id: "root", component: "Column", children: ["name", "go"] },
+          { id: "name", component: "TextField", label: "Guest name", path: "/name" },
+          { id: "go", component: "Button", text: "RSVP", action: { name: "rsvp" } },
+        ],
+      });
+      return { type: "message", content: "Here's the form." };
+    });
+    mockedSendA2UIAction.mockResolvedValue({ type: "message", content: "Got it, thanks!" });
+
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "rsvp form please");
+    await user.click(screen.getByRole("button", { name: /^send$/i }));
+
+    await screen.findByText("Here's the form.");
+    await user.type(screen.getByLabelText("Guest name"), "Ada Lovelace");
+    await user.click(screen.getByRole("button", { name: "RSVP" }));
+
+    expect(mockedSendA2UIAction).toHaveBeenCalledWith(
+      "rsvp-1",
+      "rsvp",
+      { "/name": "Ada Lovelace" },
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(await screen.findByText("Got it, thanks!")).toBeInTheDocument();
+  });
+
   it("shows the interrupt gate for a generic gated tool and resolves on approve", async () => {
     const user = userEvent.setup();
     mockedSendChat.mockResolvedValue({
@@ -178,7 +273,7 @@ describe("ChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /approve/i }));
 
-    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function));
+    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function), expect.any(Function));
     expect(await screen.findByText("Notification sent.")).toBeInTheDocument();
     expect(screen.queryByTestId("interrupt-gate")).not.toBeInTheDocument();
   });
@@ -216,7 +311,11 @@ describe("ChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /decline/i }));
 
-    expect(mockedResumeChat).toHaveBeenCalledWith(false, expect.any(Function));
+    expect(mockedResumeChat).toHaveBeenCalledWith(
+      false,
+      expect.any(Function),
+      expect.any(Function),
+    );
     expect(await screen.findByText("Not saved.")).toBeInTheDocument();
   });
 
@@ -258,7 +357,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText(/Bcc:/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /approve/i }));
-    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function));
+    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function), expect.any(Function));
   });
 
   it("renders a create_gmail_filter interrupt's forward target as a loud, distinct warning", async () => {
@@ -283,7 +382,11 @@ describe("ChatPanel", () => {
     expect(forwardWarning.textContent).toContain("attacker@evil.com");
 
     await user.click(screen.getByRole("button", { name: /decline/i }));
-    expect(mockedResumeChat).toHaveBeenCalledWith(false, expect.any(Function));
+    expect(mockedResumeChat).toHaveBeenCalledWith(
+      false,
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
 
   it("does not render the forward warning when create_gmail_filter has no forward action", async () => {

@@ -151,6 +151,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
 from assistant import observability, prompts
+from assistant.a2ui import build_render_ui_tool
 from assistant.compaction import (
     compact_history_node,
     is_compaction_summary,
@@ -261,6 +262,17 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "the user directly when the missing piece is a genuine preference or "
     "decision only they can make (which meeting time they want, who to "
     "invite, and similar).\n\n"
+    "When the dashboard is the client and your answer has structured, "
+    "comparative, or list-shaped content (a set of calendar events, a "
+    "comparison, a short list of options) that would be awkward as plain "
+    "prose, call render_ui to present it as a rich card/list alongside your "
+    "reply — not for every answer, only when it genuinely helps. render_ui "
+    "can also render a small interactive form (TextField/CheckBox/"
+    "ChoicePicker/Button) when you need the user to supply a few specific "
+    "values rather than typing free text back — submitting it arrives as a "
+    "normal new message from them, which you handle like any other "
+    "request. Either way render_ui never itself performs an action or "
+    "substitutes for a confirmation gate.\n\n"
     "Before delegating a request that clearly involves one of these "
     "specific actions — " + ", ".join(sorted(GATED_ACTIONS)) + " — call "
     "request_gated_action_confirmation FIRST, describing in `summary` "
@@ -597,6 +609,7 @@ def build_supervisor(
     )
     tools = [
         _make_confirmation_tool(),
+        build_render_ui_tool(),
         _make_specialist_tool(
             "coding_agent", _CODING_TOOL_DESCRIPTION, partial(_invoke_agent_graph, coding_agent_graph)
         ),

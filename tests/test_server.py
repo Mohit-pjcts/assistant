@@ -25,9 +25,25 @@ _tmpdir = tempfile.mkdtemp(prefix="assistant_test_server_")
 # imported, which happens at this module's top level, so the directory has
 # to outlive any single function's scope. Cleaned up via atexit instead.
 atexit.register(shutil.rmtree, _tmpdir, ignore_errors=True)
-os.environ["ASSISTANT_CONVERSATION_DB_PATH"] = os.path.join(_tmpdir, "conversation_memory.sqlite")
-os.environ["ASSISTANT_MEMORY_DB_PATH"] = os.path.join(_tmpdir, "long_term_memory.sqlite")
-os.environ["ASSISTANT_THREADS_DB_PATH"] = os.path.join(_tmpdir, "threads.sqlite")
+# setdefault, not unconditional assignment (test_a2ui.py surfaced this
+# live, Phase 17): `assistant.server` is a singleton module — whichever
+# test file's import statement reaches it FIRST during pytest's collection
+# (alphabetical across all test_*.py files, not just this one) is the ONE
+# import that actually happens; its env-var values are what every DB-path
+# constant `assistant.server`/`memory_store` bind internally at that
+# moment, permanently, for the whole test session. A later file
+# unconditionally overwriting os.environ here would desync from that
+# already-frozen binding — setdefault instead means whichever tmpdir wins
+# the real first import is the SAME one every file's own os.environ reads
+# see afterward, regardless of collection order.
+os.environ.setdefault("ASSISTANT_CONVERSATION_DB_PATH", os.path.join(_tmpdir, "conversation_memory.sqlite"))
+os.environ.setdefault("ASSISTANT_MEMORY_DB_PATH", os.path.join(_tmpdir, "long_term_memory.sqlite"))
+os.environ.setdefault("ASSISTANT_THREADS_DB_PATH", os.path.join(_tmpdir, "threads.sqlite"))
+# Bound here, not re-read from os.environ inside the test function itself —
+# same reasoning, belt-and-suspenders: this constant is fixed at the exact
+# instant this module resolved the (possibly-already-set) env var, so nothing
+# imported afterward can retroactively desync it from what actually got used.
+_MEMORY_DB_PATH = os.environ["ASSISTANT_MEMORY_DB_PATH"]
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -255,9 +271,7 @@ async def test_memory_facts_list_and_delete() -> None:
         assert empty.status_code == 200
         assert empty.json()["facts"] == []
 
-        fact_id = await memory_store.save_fact(
-            "test fact for test_server", None, db_path=os.environ["ASSISTANT_MEMORY_DB_PATH"]
-        )
+        fact_id = await memory_store.save_fact("test fact for test_server", None, db_path=_MEMORY_DB_PATH)
 
         listed = client.get("/memory/facts")
         assert listed.status_code == 200

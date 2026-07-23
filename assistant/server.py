@@ -235,8 +235,10 @@ async def _stream_turn(
     is_resume: bool = False,
 ) -> AsyncIterator[bytes]:
     """Stream one turn (a fresh message OR a Command(resume=...)) as SSE
-    frames: zero or more `{"type": "token", "text": ...}` deltas, followed
-    by exactly one terminal frame — `{"type": "interrupt", "payload": ...}`
+    frames: zero or more `{"type": "token", "text": ...}` deltas and zero or
+    more `{"type": "a2ui", "surface": ...}` frames (Phase 17 — ephemeral,
+    render-only, never terminal), followed by exactly one terminal frame —
+    `{"type": "interrupt", "payload": ...}`
     or `{"type": "message", "content": ...}`.
 
     `gate_outcome` (STEPS.md 82, evaluations pillar): when this call is a
@@ -349,6 +351,18 @@ async def _stream_turn(
                     text = event["data"].get("text", "")
                     if text:
                         yield _sse_event({"type": "token", "text": text})
+                elif event.get("event") == "on_custom_event" and event.get("name") == "a2ui_surface":
+                    # Phase 17 (PLAN.md): assistant/a2ui.py's render_ui tool
+                    # dispatches a validated A2UI component tree the same
+                    # way — re-uses the identical custom-event mechanism
+                    # research_fa_token proved above, just a distinct event
+                    # name. Ephemeral by design (this session's Part A
+                    # decision): forwarded live to whichever client is
+                    # streaming this turn, never persisted to the
+                    # checkpointer — render_ui's own return value (a short
+                    # text summary) is what ends up in the real message
+                    # history and survives reload/History, not this frame.
+                    yield _sse_event({"type": "a2ui", "surface": event["data"]})
 
             state = await graph.aget_state(config)
             pending = [i for t in state.tasks for i in t.interrupts]
@@ -401,6 +415,20 @@ class ResumeRequest(BaseModel):
 
 
 class StopRequest(BaseModel):
+    thread_id: str | None = None
+
+
+class A2UIActionRequest(BaseModel):
+    """Phase 17 Part B: what an interactive A2UI Button reports back —
+    assistant/a2ui.py's module docstring has the full design. `context` is
+    whatever path -> value pairs the renderer collected from that surface's
+    TextField/CheckBox/ChoicePicker components at submit time; an open dict
+    since the fields are surface-specific, same reasoning InterruptPayload
+    (api.ts) is an open record."""
+
+    surface_id: str
+    name: str
+    context: dict[str, Any] = {}
     thread_id: str | None = None
 
 
@@ -551,6 +579,36 @@ async def resume(request: ResumeRequest) -> StreamingResponse:
             is_resume=True,
         ),
         media_type="text/event-stream",
+    )
+
+
+@app.post("/a2ui/action")
+async def a2ui_action(request: A2UIActionRequest) -> StreamingResponse:
+    """Phase 17 Part B: an interactive A2UI surface's Button reports back
+    here — see assistant/a2ui.py's module docstring for the full security
+    reasoning. Built as a PLAIN `("user", ...)` turn, the exact same shape
+    /chat uses for a typed message (not a tool result, not a synthetic
+    graph-inserted marker) — deliberately: the user genuinely typed/picked
+    these values on their own screen and clicked submit, which is at least
+    as trustworthy as free-text chat input, and treating it identically
+    means every existing turn-boundary mechanism (write caps, upfront-
+    confirmation windows, compaction, memory-extraction scoping — all keyed
+    off `is_genuine_human_turn`) handles it correctly for free, with zero
+    special-casing. Whatever the agent decides to do in response — including
+    any real side effect — still goes through the exact same gated tools and
+    interrupt() this turn would hit from a typed chat message; this endpoint
+    creates no new path to a side effect, only a new way to start an
+    ordinary turn.
+    """
+    thread_id = await _resolve_thread_id(request.thread_id)
+    message = (
+        f"[UI interaction] The user submitted the {request.name!r} action on the "
+        f"rendered UI surface {request.surface_id!r}, with these values: "
+        f"{json.dumps(request.context)}"
+    )
+    input_ = {"messages": [("user", message)]}
+    return StreamingResponse(
+        _stream_turn(app.state.graph, thread_id, input_), media_type="text/event-stream"
     )
 
 
