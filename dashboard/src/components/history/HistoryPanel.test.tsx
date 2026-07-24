@@ -101,4 +101,33 @@ describe("HistoryPanel", () => {
 
     expect(await screen.findByText(/network down/)).toBeInTheDocument();
   });
+
+  // Phase 18 (PLAN.md): a render_ui call's persisted surface(s) now come
+  // back on /history's own message row (server.py, assistant/a2ui.py's
+  // A2UI_SURFACE_KEY) — this panel re-renders them inline, right on that
+  // row, matching its own full-fidelity philosophy (unlike ChatPanel,
+  // which groups them onto the turn's closing bubble instead).
+  it("re-renders a persisted A2UI surface inline on the tool row that produced it", async () => {
+    mockedFetchHistory.mockResolvedValue([
+      { role: "user", content: "show me today", synthetic: false, name: null },
+      {
+        role: "tool",
+        content: "[UI presented: 1 component(s) (Text) — hello from history]",
+        synthetic: false,
+        name: "render_ui",
+        surfaces: [
+          {
+            surfaceId: "history-surface-1",
+            components: [{ id: "root", component: "Text", text: "hello from history" }],
+          },
+        ],
+      },
+      { role: "assistant", content: "There you go.", synthetic: false, name: "supervisor" },
+    ]);
+
+    render(<HistoryPanel />);
+
+    expect(await screen.findByTestId("a2ui-surface")).toBeInTheDocument();
+    expect(screen.getByText("hello from history")).toBeInTheDocument();
+  });
 });

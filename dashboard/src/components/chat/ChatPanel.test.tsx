@@ -18,6 +18,7 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     fetchHistory: vi.fn(),
+    fetchThreads: vi.fn(),
     sendChat: vi.fn(),
     resumeChat: vi.fn(),
     stopChat: vi.fn(),
@@ -26,6 +27,14 @@ vi.mock("@/lib/api", async () => {
 });
 
 const mockedFetchHistory = vi.mocked(api.fetchHistory);
+// PLAN.md Phase 19: ChatPanel's mount effect now also calls fetchThreads()
+// (the external-update poll's baseline) — MUST be mocked like every other
+// api.ts call this file mocks, or these tests silently depend on a real
+// backend actually listening on 127.0.0.1:8000. Without a mock, a real
+// ECONNREFUSED goes through api.ts's fetchWithRetry (also Phase 19), which
+// retries for up to ~15s before giving up — exactly the kind of slow,
+// environment-dependent flake this project's test conventions avoid.
+const mockedFetchThreads = vi.mocked(api.fetchThreads);
 const mockedSendChat = vi.mocked(api.sendChat);
 const mockedResumeChat = vi.mocked(api.resumeChat);
 const mockedStopChat = vi.mocked(api.stopChat);
@@ -34,6 +43,10 @@ const mockedSendA2UIAction = vi.mocked(api.sendA2UIAction);
 beforeEach(() => {
   vi.resetAllMocks();
   mockedFetchHistory.mockResolvedValue([]);
+  mockedFetchThreads.mockResolvedValue({
+    threads: [{ id: "test-thread", title: null, created_at: "x", last_active_at: "x" }],
+    activeThreadId: "test-thread",
+  });
 });
 
 describe("ChatPanel", () => {
@@ -70,6 +83,39 @@ describe("ChatPanel", () => {
     expect(screen.queryByText(/Routing note, not from the user/)).not.toBeInTheDocument();
   });
 
+  // Phase 18 (PLAN.md): a render_ui call's persisted surface now comes back
+  // from /history on the ToolMessage row that produced it, not the
+  // assistant bubble — attachPersistedSurfaces must group it onto the
+  // turn's closing assistant message on load, matching what a live turn
+  // looks like (the tool row itself stays hidden, same as any other tool
+  // message here).
+  it("re-renders a persisted A2UI surface from history, grouped onto the closing assistant bubble", async () => {
+    mockedFetchHistory.mockResolvedValue([
+      { role: "user", content: "show me today", synthetic: false },
+      {
+        role: "tool",
+        content: "[UI presented: 1 component(s) (Text) — hello from history]",
+        synthetic: false,
+        name: "render_ui",
+        surfaces: [
+          {
+            surfaceId: "reload-surface-1",
+            components: [{ id: "root", component: "Text", text: "hello from history" }],
+          },
+        ],
+      },
+      { role: "assistant", content: "There you go.", synthetic: false },
+    ]);
+
+    render(<ChatPanel />);
+
+    expect(await screen.findByText("There you go.")).toBeInTheDocument();
+    expect(screen.getByTestId("a2ui-surface")).toBeInTheDocument();
+    expect(screen.getByText("hello from history")).toBeInTheDocument();
+    // The tool row itself never becomes a chat bubble.
+    expect(screen.queryByText(/UI presented/)).not.toBeInTheDocument();
+  });
+
   it("sends a message and renders the assistant's reply", async () => {
     const user = userEvent.setup();
     mockedSendChat.mockResolvedValue({ type: "message", content: "pong" });
@@ -82,7 +128,12 @@ describe("ChatPanel", () => {
 
     expect(await screen.findByText("pong")).toBeInTheDocument();
     expect(screen.getByText("ping")).toBeInTheDocument();
-    expect(mockedSendChat).toHaveBeenCalledWith("ping", expect.any(Function), expect.any(Function));
+    expect(mockedSendChat).toHaveBeenCalledWith(
+      "ping",
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
 
   it("shows a live streaming bubble that updates as tokens arrive, then finalizes into a real message", async () => {
@@ -245,6 +296,7 @@ describe("ChatPanel", () => {
       { "/name": "Ada Lovelace" },
       expect.any(Function),
       expect.any(Function),
+      expect.any(Function),
     );
     expect(await screen.findByText("Got it, thanks!")).toBeInTheDocument();
   });
@@ -273,7 +325,12 @@ describe("ChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: /approve/i }));
 
-    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function), expect.any(Function));
+    expect(mockedResumeChat).toHaveBeenCalledWith(
+      true,
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+    );
     expect(await screen.findByText("Notification sent.")).toBeInTheDocument();
     expect(screen.queryByTestId("interrupt-gate")).not.toBeInTheDocument();
   });
@@ -313,6 +370,7 @@ describe("ChatPanel", () => {
 
     expect(mockedResumeChat).toHaveBeenCalledWith(
       false,
+      expect.any(Function),
       expect.any(Function),
       expect.any(Function),
     );
@@ -357,7 +415,12 @@ describe("ChatPanel", () => {
     expect(screen.getByText(/Bcc:/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /approve/i }));
-    expect(mockedResumeChat).toHaveBeenCalledWith(true, expect.any(Function), expect.any(Function));
+    expect(mockedResumeChat).toHaveBeenCalledWith(
+      true,
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
 
   it("renders a create_gmail_filter interrupt's forward target as a loud, distinct warning", async () => {
@@ -384,6 +447,7 @@ describe("ChatPanel", () => {
     await user.click(screen.getByRole("button", { name: /decline/i }));
     expect(mockedResumeChat).toHaveBeenCalledWith(
       false,
+      expect.any(Function),
       expect.any(Function),
       expect.any(Function),
     );

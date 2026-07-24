@@ -72,6 +72,7 @@ from langsmith import Client as LangSmithClient  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from assistant import memory_store, observability, thread_store  # noqa: E402
+from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
@@ -235,10 +236,13 @@ async def _stream_turn(
     is_resume: bool = False,
 ) -> AsyncIterator[bytes]:
     """Stream one turn (a fresh message OR a Command(resume=...)) as SSE
-    frames: zero or more `{"type": "token", "text": ...}` deltas and zero or
+    frames: zero or more `{"type": "token", "text": ...}` deltas, zero or
     more `{"type": "a2ui", "surface": ...}` frames (Phase 17 — ephemeral,
-    render-only, never terminal), followed by exactly one terminal frame —
-    `{"type": "interrupt", "payload": ...}`
+    render-only, never terminal), and zero or more `{"type": "activity",
+    "phase": "tool_start"|"tool_end", "agent": ..., "tool": ...}` frames
+    (Phase 19 — supervisor/specialist tool-call activity, also ephemeral,
+    never terminal, never persisted), followed by exactly one terminal
+    frame — `{"type": "interrupt", "payload": ...}`
     or `{"type": "message", "content": ...}`.
 
     `gate_outcome` (STEPS.md 82, evaluations pillar): when this call is a
@@ -351,6 +355,19 @@ async def _stream_turn(
                     text = event["data"].get("text", "")
                     if text:
                         yield _sse_event({"type": "token", "text": text})
+                elif event.get("event") == "on_custom_event" and event.get("name") == "agent_activity":
+                    # PLAN.md Phase 19: supervisor.py's _AgentActivityRelay
+                    # (a specialist's own inner tool calls) and
+                    # call_specialist (the supervisor->specialist boundary
+                    # itself) both dispatch this via the identical
+                    # adispatch_custom_event mechanism research_fa_token/
+                    # a2ui_surface already proved crosses the nested-
+                    # ainvoke() specialist boundary. Purely additive,
+                    # non-terminal, like a2ui below — the dashboard's
+                    # right-rail activity graph/tool-call timeline/status
+                    # pill consume this; nothing here changes the terminal
+                    # frame or what /history persists.
+                    yield _sse_event({"type": "activity", **event["data"]})
                 elif event.get("event") == "on_custom_event" and event.get("name") == "a2ui_surface":
                     # Phase 17 (PLAN.md): assistant/a2ui.py's render_ui tool
                     # dispatches a validated A2UI component tree the same
@@ -710,6 +727,19 @@ async def history() -> dict[str, Any]:
                 # surfaces whatever is here rather than assuming only
                 # tools have one.
                 "name": getattr(m, "name", None),
+                # Phase 18 (PLAN.md): the FULL A2UI surface(s) this
+                # ToolMessage carries — either render_ui's own direct call,
+                # or a specialist-delegation tool forwarding what a
+                # sub-agent rendered during its own isolated run
+                # (supervisor.py's call_specialist / _invoke_agent_graph).
+                # Read straight back from additional_kwargs (assistant/
+                # a2ui.py's A2UI_SURFACE_KEY), never re-derived or
+                # re-summarized, same verbatim-relay posture this module's
+                # docstring already holds interrupt payloads to. Always a
+                # list (possibly empty/absent); the client decides what to
+                # do with it (ChatPanel groups it onto the turn's closing
+                # bubble, HistoryPanel shows it inline on this exact row).
+                "surfaces": getattr(m, "additional_kwargs", {}).get(A2UI_SURFACE_KEY) or [],
             }
             for m in messages
         ],
@@ -749,7 +779,20 @@ async def delete_memory_fact(fact_id: int) -> dict[str, Any]:
 async def cost() -> dict[str, Any]:
     """Token/cost tracking (PLAN.md Phase 9 step 6) — real LangSmith
     aggregates, not computed from local pricing tables. Three windows,
-    queried concurrently (each is an independent ~1s blocking call)."""
+    queried concurrently (each is an independent ~1s blocking call).
+
+    The returned `total_cost` is LangSmith's OWN estimate (its recorded
+    token counts × its maintained per-model price list) — not a pull from
+    Anthropic's real invoice. Live-diagnosed (PLAN.md Phase 19, 2026-07-24):
+    a window can legitimately read all-zero not because nothing ran, but
+    because LangSmith's account-level ingestion quota was exceeded
+    ("Monthly unique traces usage limit exceeded", a real 429 hit live
+    against this project's own account) — new traces stop landing entirely
+    until the plan is upgraded or the quota resets, while `get_run_stats`
+    itself keeps working correctly and reporting exactly what LangSmith
+    actually has. This function has no bug to fix for that case: it already
+    reflects LangSmith's true stored state; the gap is upstream, in what
+    LangSmith accepted."""
     client = app.state.langsmith_client
     if client is None:
         raise HTTPException(

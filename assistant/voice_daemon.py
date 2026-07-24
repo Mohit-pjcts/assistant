@@ -269,6 +269,30 @@ class VoiceDaemon:
             thread_id = await thread_store.get_active_thread_id()
             config = make_thread_config(thread_id)
 
+            # PLAN.md Phase 19: refuse to start a FRESH run on a thread that
+            # already has a gate pending from another client — e.g. the
+            # dashboard's own /chat suspended on interrupt() and is showing
+            # InterruptGate.tsx, waiting on a human answer. The `ainvoke()`
+            # below always passes a fresh message dict, never a
+            # `Command(resume=...)`; LangGraph treats that as a brand-new
+            # run regardless of what's pending (confirmed live), so calling
+            # it here would silently orphan the dashboard's pending
+            # interrupt instead of resolving it — this was the real,
+            # live-diagnosed cause of "the gate stops working after voice
+            # runs a turn." Checking `aget_state` first and declining is
+            # cheap (one extra read) and keeps voice from ever clobbering a
+            # gate another client is actively waiting on.
+            state = await self._graph.aget_state(config)
+            if any(t.interrupts for t in state.tasks):
+                logger.info(
+                    "thread %s has a pending confirmation — declining new voice turn", thread_id
+                )
+                await asyncio.to_thread(
+                    speak,
+                    "There's a confirmation waiting on this conversation — please handle that first.",
+                )
+                return
+
             # Phase 16 Part B (v3 migration): wraps the whole turn (initial
             # call + any resume loop below) in Langfuse v3's per-call
             # session/tags/trace-name propagation — observability.py's

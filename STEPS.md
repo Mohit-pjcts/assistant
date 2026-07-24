@@ -7192,3 +7192,471 @@ caller, per this function's own documented contract.
 clean; the live distributed-tracing round trip re-verified end to end
 against the real account after the centralization refactor, not just
 unit-tested.
+
+## 92. Phase 17 — A2UI generative UI integration, Parts A + B (2026-07-23)
+
+Lets agents present a rich, optionally interactive UI in the dashboard
+instead of plain text, using a constrained subset of Google's A2UI v0.9
+declarative component vocabulary (https://github.com/google/A2UI). Not a
+carry-over from Phase 16 — a new, self-contained phase opened and closed in
+one session; PLAN.md gained its Phase 17 entry as part of this same
+STEPS.md write-up.
+
+**Part A (display-only).** New `assistant/a2ui.py`: `validate_surface`
+checks a component tree (Text/Badge/Divider/Image/Column/Row/List/Card)
+against a strict per-type field allowlist (`COMPONENT_SCHEMA`) before
+anything reaches the client — every child reference must resolve to a
+known component id, exactly one component must be `id: "root"`, unknown
+fields on any component are rejected outright rather than silently
+ignored. Matches this project's "errors are data, not exceptions" rule:
+a rejected surface returns as a normal tool-result string
+(`"render_ui rejected this surface: ..."`), never raises into the graph.
+`render_ui` (the tool itself, supervisor-only — see Scope below) forwards
+a validated surface via `adispatch_custom_event("a2ui_surface", surface)`
+— reusing, not reimplementing, the exact channel Phase 16's Part A.5
+streaming relay (STEPS.md 84) already proved crosses an `astream_events()`
+boundary live. `server.py` picks up the `on_custom_event`/`a2ui_surface`
+event and relays it as a new non-terminal `{"type": "a2ui", "surface":
+...}` SSE frame, alongside the existing token/interrupt/done frame types.
+`A2UIRenderer.tsx` (registry-dispatch, `COMPONENT_RENDERERS` mapping
+component type to a render function — the same pattern `InterruptGate.tsx`
+already uses for its own per-action renderers) renders the tree inline in
+`ChatPanel`. `render_ui`'s own return value is a short deterministic text
+summary (`_summarize_surface` — component count/kinds plus up to 3
+Text/Badge previews) that persists to conversation history normally; the
+live rendered surface itself is deliberately ephemeral — a reload or a
+CLI/voice client only ever sees the text summary, never the component
+tree. Remote `Image` URLs are rejected (`data:` URIs only) — v1 has no
+allowlist for external image hosts, so this closes an easy
+tracking/exfiltration vector rather than build one. v1's vocabulary
+deliberately excludes Modal/Tabs/Video/AudioPlayer/Slider/DateTimeInput.
+
+**Part B (interactive): TextField/CheckBox/ChoicePicker/Button.** The
+actual security boundary for this half of the phase is `Button.action`:
+`_validate_component_fields` enforces `set(action) != {"name"}` as a hard
+rejection, meaning the field can hold EXACTLY `{"name": <non-empty
+string>}` and nothing else — no `functionCall`, no nested payload, no
+future-proofing "extra" key. This is deliberately not a "looks safe"
+heuristic; it's a closed-shape check, because `action` is the one field in
+the whole vocabulary that could otherwise carry an executable-shaped
+payload. Enforced twice — server-side in `a2ui.py` before a surface is
+ever forwarded, and defensively again client-side in `A2UIRenderer.tsx`'s
+`ButtonNode` (coerced, not trusted blindly, same posture
+`InterruptGate.tsx`'s own `str()`/`list()` guards take on untyped payload
+data). TextField/CheckBox/ChoicePicker write into a LOCAL, per-surface
+React `useState` data model keyed by each field's `path` — nothing leaves
+the browser until a Button fires. Clicking a Button POSTs to the new
+`/a2ui/action` endpoint (`server.py`) with the button's `name` and the
+surface's full local data model as `context`; the endpoint frames this as
+a PLAIN, non-synthetic user turn — same trust level as ordinary typed
+chat, same `is_genuine_human_turn` machinery every other turn-boundary
+feature in this project already depends on (memory extraction, gate
+scoring). No new side-effect path is created: whatever the agent decides
+to do in response to that turn still goes through the existing, unmodified
+`interrupt()`-gated tools in `write_tools.py`/`mac_tools.py`/
+`memory_extraction.py`. Live-verified, not just code-reviewed: submitted a
+small A2UI form whose reported values led the agent to attempt a memory
+write, and watched the real, unmodified memory-write confirmation gate
+fire correctly off that form-submission-originated turn — proof the
+interactive path doesn't bypass or shortcut the gate it flows into.
+
+**Scope, deliberate — not an oversight.** `render_ui` is wired onto the
+supervisor only (`supervisor.py`), not onto any of the four specialist
+sub-agents (`coding_agent`/`research_agent`/`life_admin_agent`/
+`mac_control_agent`). Reason: the `adispatch_custom_event` channel this
+phase depends on was only proven, live, at the supervisor's own graph
+level — Phase 16's Part A.5 de-risk script never exercised it across a
+NESTED specialist subgraph boundary (a sub-agent's own `astream_events()`
+run, one level down from the supervisor's). Extending `render_ui` to
+`life_admin_agent` in particular is the natural next step, since that's
+the sub-agent that actually holds structured Gmail/Calendar data — right
+now the supervisor can only reconstruct a card from whatever prose a
+sub-agent hands back up, which is backwards. Not opened as a phase yet;
+flagged in conversation 2026-07-24 as a candidate for a future phase, not
+started here.
+
+**Also fixed along the way:** a real cross-test-file DB-path race in
+`tests/test_server.py` that adding a second server-importing test module
+(`tests/test_a2ui.py`) surfaced — env vars are now set via `setdefault`
+(whichever test file's env value wins the first-import race is now what
+every consumer consistently uses) instead of the prior unconditional
+overwrite, which could desync from what `assistant.server` had already
+bound internally at import time.
+
+**Verification:** 204 backend tests pass (15 new, `tests/test_a2ui.py`),
+54 frontend tests pass (18 new, `A2UIRenderer.test.tsx` +
+`ChatPanel.test.tsx` additions); `tsc`/`ruff`/`prettier`/`build` all clean.
+
+## 93. Docs closeout: Phase 16 status flip to COMPLETE, Phase 17 logged (2026-07-24)
+
+Phase 17 (group 92 above) shipped 2026-07-23 without its usual
+CLAUDE.md-mandated logging pass — PLAN.md had no Phase 17 section and
+CLAUDE.md's Current Status block still pointed at Phase 16 as ACTIVE, even
+though Phase 16 Part B's own done-when checklist (PLAN.md) had already
+been fully met since STEPS.md 90/91 (2026-07-18). Caught and closed out in
+this session, at the user's explicit request ("close out the Phase 17
+docs first").
+
+Asked the user directly whether to also flip Phase 16 to COMPLETE as part
+of this pass, since PLAN.md's Part B done-when section had explicitly left
+that flip as "the user's call" and never made it — leaving Phase 16
+ACTIVE while writing up Phase 17 on top of it would have left Current
+Status self-contradictory (two phases both reading as current/in-progress).
+User confirmed: flip Phase 16 to COMPLETE too. Done: PLAN.md's Phase 16
+header changed from ACTIVE to COMPLETE (2026-07-24 flip date); CLAUDE.md's
+Current Status block's `ACTIVE: Phase 16` pointer replaced with
+`Complete: Phase 16` (moved into phase-number order alongside Phases
+1–15) and a new `Complete: Phase 17` entry; no phase is currently ACTIVE
+as of this entry — the sub-agent-extension idea raised in the
+conversation that prompted this closeout (STEPS.md 92's Scope note) was
+discussed but not opened as a phase, and needs its own scoping pass before
+work starts on it, per this project's "do not build ahead of the active
+phase" rule.
+
+## 94. Docs-integrity gap found retroactively: the agents-as-tools rewrite
+(commit e7ef61d, 2026-07-23) was never logged (discovered 2026-07-24)
+
+Found while scoping Phase 18 (extending `render_ui` to sub-agents, STEPS.md
+92's Scope note) — reading `supervisor.py`/`sub_agents.py` to understand the
+real current call path surfaced a whole architecture rewrite this build log
+never recorded. Same class of gap as STEPS.md 93 (Phase 17 shipping without
+its docs pass), but larger: an entire graph-architecture replacement, not
+just a missing status flip.
+
+**What happened, not previously logged anywhere:** commit `e7ef61d`
+("Phase 16 Part A.5/B finalization: OTEL traceparent propagation, streaming
+relay, abort-on-stop", 2026-07-23 12:40, immediately before the Phase 17
+commit the same afternoon) replaced the Phase 3-era Command-handoff routing
+architecture — each specialist a `StateGraph` node reached via a
+`transfer_to_*` tool returning `Command(graph=Command.PARENT)` — with an
+"agents-as-tools" design: each specialist is now a plain `@tool` function
+that calls `await specialist_graph.ainvoke(...)` directly on that
+specialist's own compiled graph. 945 lines changed in `supervisor.py`
+alone, 134 in `sub_agents.py`; the commit message describes none of it,
+covering only the OTEL/Langfuse-v3 work also in that commit.
+
+**Why the rewrite happened (reconstructed from supervisor.py's own module
+docstring, which DOES carry the full reasoning — the gap is STEPS.md/
+PLAN.md/CLAUDE.md never pointing to it, not that the reasoning is lost):**
+a real, live-observed Langfuse trace showed every graph node — including
+`extract_memory` and a `coding_agent` attempt — as flat siblings of the
+root run, with `extract_memory` firing in PARALLEL with a specialist call
+because `Command.PARENT` only redirects the routing, it doesn't stop
+LangGraph from also firing whatever static edges the node it's inside
+still has. The fix is architectural: specialists stopped being routable
+graph nodes and became tools the supervisor calls directly, so a
+specialist's run is now a genuine nested child of the supervisor's own
+tool-call span — no more `route_after_specialist`, no more conditional
+edges, `build_graph()` collapsed to a plain unconditional five-node
+pipeline (`compact_history -> recall_memory -> supervisor ->
+extract_memory -> END`).
+
+**Verified before landing (per the docstring, not assumed):** whether
+`interrupt()`/`Command(resume=...)` still works when a specialist graph is
+invoked via a bare `ainvoke()` from inside a tool function (LangGraph's own
+docs call this shape NOT statically discoverable) was spiked empirically
+first — a minimal bare-StateGraph version, then the real
+create_agent-calling-create_agent shape this rewrite uses — before any
+real code changed. Both spikes confirmed the interrupt surfaces correctly
+and resume replays correctly, provided the INNER graph stays
+checkpointer-less (unchanged from the old architecture, now load-bearing
+for a different reason — see `sub_agents.py`'s module docstring).
+
+**Other real consequences of the rewrite, also newly surfaced here:**
+context is no longer implicitly shared — each specialist call is a fresh,
+isolated conversation built from just the current instruction plus
+`_context_prefix_messages()`'s deliberately-forwarded compaction summary/
+recalled-facts message, which structurally closes the STEPS.md 48
+cross-turn-leakage bug class rather than just bounding it
+(`SubAgentWindowMiddleware` removed as redundant); `write_tools.py`'s
+`MAX_WRITES_PER_TURN` now caps writes per specialist tool-call rather than
+per top-level turn (disclosed as an accepted, not silently dropped,
+narrowing in `supervisor.py`'s own docstring); the upfront
+`request_gated_action_confirmation` pre-approval mechanism
+(`GATED_ACTIONS`, `GatedAgentState.pre_approved_actions`) appears to have
+been introduced in this same rewrite.
+
+**Fixed as part of this entry:** `CLAUDE.md`'s Architecture diagram line
+for `supervisor.py` ("Command handoff routing") corrected to describe the
+current agents-as-tools design. Phase 3/6's Current Status bullets
+describing the original handoff routing were left as historical record
+(accurate for what those phases actually shipped at the time — this
+project's own convention for superseded decisions) rather than rewritten.
+PLAN.md's Phase 16 Part B section gained a pointer note to this entry.
+
+**Not done here, flagged for the user:** no CHECKPOINT/design discussion
+for this rewrite is recorded anywhere, unlike every other architectural
+change of this size in this project's history (e.g. the Phase 15
+active-thread-pointer decision, or Phase 7's memory security design) —
+worth asking directly whether that discussion happened out-of-band and
+just never made it into the log, since if not, this is the first
+undiscussed architectural change of this scale in the project.
+
+## 95. Phase 18 — extend render_ui to specialists, persist A2UI surfaces
+across reload (2026-07-24)
+
+The two follow-ons raised in the conversation that prompted STEPS.md 93's
+docs closeout, opened and built the same session at the user's explicit
+request ("implement both changes in phase 18").
+
+**Part 1 — render_ui extended to research_agent and life_admin_agent.**
+`sub_agents.py`'s `build_research_agent()`/`build_life_admin_agent()` now
+include `assistant.a2ui.build_render_ui_tool()` alongside their existing
+tools; both agents' system prompts (local fallbacks AND the Langfuse-hosted
+copies, re-synced via `scripts/sync_prompts_to_langfuse.py`) gained a
+render_ui paragraph. `supervisor.py`'s own prompt also gained a sentence
+telling it these two specialists carry render_ui too — without this, a
+live test run showed the supervisor REFUSING to delegate a render_ui-
+shaped request ("research_agent doesn't have access to the render_ui tool
+— only I do"), a real, live-observed finding: the supervisor has no
+visibility into a specialist's actual bound tool list, only the
+specialist's own delegation-tool description, so it will reasonably
+second-guess a request it has no way to verify. Fixed by telling it
+explicitly, then re-syncing; re-ran the test and it passed. This was ALSO
+the live discovery that the local fallback text alone isn't enough while
+Langfuse is configured — `prompts.get_prompt()` always prefers the
+remote "production" prompt when reachable (assistant/prompts.py), so an
+edited fallback silently does nothing at runtime until re-synced. Not a
+new finding in the abstract (the code's own comments already say "needs
+re-syncing"), but this is the first time in the log it was caught live
+rather than just noted as a future TODO.
+
+**The actual technical risk (a2ui.py's Phase 17 scope note, and last
+turn's answer to "can we integrate a2ui further") — resolved, live-
+verified, not just reasoned through.** Under the agents-as-tools
+architecture (STEPS.md 94) a specialist is invoked via a bare `await
+other_graph.ainvoke(...)` from inside the supervisor's OWN tool function —
+one level of nesting deeper than `research_fa_token`'s existing proof
+(STEPS.md 84), which dispatches `adispatch_custom_event` directly from a
+tool function, not from a FURTHER-nested graph's own ToolNode. New test
+`tests/test_a2ui.py::test_render_ui_available_on_delegated_specialist_and_
+persists` directs the supervisor to delegate to research_agent, which
+itself calls render_ui from inside its own isolated run — confirmed live
+against the real API and real graph: the `a2ui` SSE frame still surfaces
+through the OUTER graph's `astream_events()` (proving
+`adispatch_custom_event`'s contextvar-propagated `RunnableConfig` survives
+the extra nesting with no explicit config passed at any hop) AND the
+surface persists via `/history` (the second half, below). Passed on the
+first real run once the prompt/delegation issue above was fixed.
+
+**Part 2 — A2UI surfaces persist across reload,** closing the gap Phase 17
+deliberately left open (its docstring: "v1 doesn't persist the tree
+itself"). `render_ui` (a2ui.py) now returns a `Command` instead of a plain
+string — same pattern `request_gated_action_confirmation` already
+established — carrying the FULL validated surface in the returned
+ToolMessage's `additional_kwargs[A2UI_SURFACE_KEY]` (a new constant, a
+LIST of surfaces for a uniform shape everywhere), never sent back to the
+model (only `.content`, the existing text summary, is). `server.py`'s
+`/history` reads this key back directly and returns it as each message's
+own `surfaces` field.
+
+**A real second-order problem this surfaced, not obvious from Part 1
+alone:** a specialist's render_ui call only lands in the OUTER graph's
+checkpointed state if something forwards it there — the specialist's own
+message list (where the marker actually lives) is discarded the instant
+`_invoke_agent_graph` returns, since that graph is never embedded as an
+outer-graph node the way the supervisor's own graph is (unlike the
+supervisor's own direct render_ui calls, which already land in outer state
+for free, proven back in Phase 17). Fixed by changing `_invoke_agent_graph`'s
+return type from `str` to `tuple[str, list[dict]]`, scanning the specialist's own
+result messages for the marker; `_make_specialist_tool`'s `call_specialist`
+now also returns a `Command`, forwarding any collected surfaces onto ITS
+OWN ToolMessage's `additional_kwargs`, same key. Without this fix, a
+sub-agent-rendered surface would have rendered live via SSE (proven above)
+but silently vanished on the very next reload — worse than Phase 17's
+honest "always shows text-only," since it would have been correct only
+sometimes. `_invoke_research_agent_via_http` (the Phase 16 A.5 distributed-
+tracing spike path, off by default) updated to the same signature but
+always returns an empty surfaces list — documented as an accepted gap in
+its own docstring, not fixed: `fa_service.py` has no A2UI-aware SSE event
+at all, and wiring one for a demo path that isn't the default is real,
+separate scope.
+
+**Frontend.** `dashboard/src/lib/api.ts`'s `HistoryMessage` gained a
+`surfaces?: A2UISurface[]` field. `HistoryPanel.tsx` (full-fidelity view)
+renders them inline, right on the row that produced them, no `onAction`
+(a past turn's Button re-submitting would fire a genuinely new turn, not
+"view history"). `ChatPanel.tsx` gained `attachPersistedSurfaces()`, which
+replays the same accumulate-until-the-next-assistant-message logic the
+LIVE `pendingA2uiRef` → message hand-off already does, so a reload looks
+identical to the live turn that produced it — surfaces group onto the
+turn's closing bubble regardless of which underlying tool call (render_ui
+directly, or a specialist forwarding its own) produced them.
+
+**Tests, all real/live where the risk is real:** `tests/test_a2ui.py`
+gained the delegated-specialist test described above (real API, real
+graph — the actual proof this phase rested on); `tests/test_sub_agents.py`
+gained 4 cheap offline tests (render_ui bound onto both agents' compiled
+ToolNodes via `graph.get_graph().nodes["tools"].data.tools_by_name`, both
+prompts mention it). Existing suites needed zero changes — every
+`HistoryMessage`/`A2UISurface` field addition was additive and optional.
+Full regression: 209/209 backend tests pass (up from 204), 56/56 frontend
+tests pass (up from 54); `ruff check .` shows only the same 2 pre-existing,
+unrelated findings that predate this phase (confirmed via `git stash`,
+not introduced here); `tsc --noEmit`, `npm run build`, and
+`npm run format:check` all clean.
+
+**Not done, deliberately scoped out:** `coding_agent`/`mac_control_agent`
+did NOT get render_ui (their output isn't naturally card-shaped — code/
+files, action confirmations); PLAN.md/CLAUDE.md's phase-doc pass for this
+work happens in the same session it was built in, unlike Phase 17 —
+avoiding a repeat of the STEPS.md 93 gap this whole phase was partly
+prompted by.
+
+## 96. Phase 19 (candidate) — startup/cost/voice fixes + "Oni" dashboard
+redesign (2026-07-24)
+
+Four asks in one session: three real bugs and a UI redesign import via the
+`DesignSync` MCP tool (`claude.ai/design` project "Oni assistant UI
+design", file `Oni Dashboard - Final.dc.html`). User decisions locked
+up front (AskUserQuestion, then EnterPlanMode): keep the app's EXISTING
+color tokens (not the mock's hex palette) — layout/structure only; build
+the full right rail EXCEPT the Today/calendar card, wired to live data;
+show "Oni" as the display name (package stays `assistant`).
+
+**Part A — startup race, root-caused not guessed.** User report: every
+launch looks like a fresh empty chat, forcing a "new chat then switch
+back" workaround. Investigated (not assumed): Tauri's `src-tauri/src/
+lib.rs` shows the window right after `spawn_backend()` returns — a
+non-blocking `Command::spawn()` — with no readiness check, while
+`api.ts`'s `fetchThreads`/`fetchHistory` were one-shot `fetch()` calls with
+no retry; a cold-boot ECONNREFUSED was caught and silently settled into an
+empty state, and `ThreadSidebar`'s failed load meant `activeThreadId` never
+became real. Fixed on the frontend (the actual fix, not cosmetic):
+`api.ts` gained `fetchWithRetry()` (retries a THROWN network error only,
+up to ~15s at 500ms intervals; a resolved non-OK response is NOT
+retried — that's a real answer, not a startup race), applied to
+`fetchThreads`/`fetchHistory`/`fetchCost`. Belt-and-suspenders in
+`lib.rs`: `wait_for_backend()` polls a raw TCP connect to port 8000 for up
+to 10s inside `setup()` before the window appears, so a cold boot no
+longer even flashes empty.
+
+**Part B — cost panel showing 0, diagnosed live before touching any
+code, and the diagnosis changed the whole shape of the fix.** Queried the
+real LangSmith account directly (`client.get_run_stats`): `all_time`
+($12.88, 4960 root runs) and `week` ($2.04, 1535 runs — the EXACT numbers
+the user's own design mockup used, since they'd clearly looked at their
+real Cost tab while designing it) were both correct and non-zero;
+`today` was genuinely 0 because nothing had landed in LangSmith in the
+last 24h. Root cause, confirmed by an actual traced call live against the
+account: `"Too many requests: tenant exceeded usage limits: Monthly
+unique traces usage limit exceeded"` — a real 429 from LangSmith's own
+ingestion endpoint. The account hit its monthly trace quota (partly
+burned by the six leftover `phase6-*-repro` debug projects still sitting
+under it), and the timing lines up exactly: the last successfully-recorded
+trace anywhere in the account is 2026-07-18. **This has no code fix** —
+`_get_run_stats_sync`/`/cost` (`server.py`) already correctly reflect
+LangSmith's true stored state; the gap is upstream, in what LangSmith
+accepted. Documented this finding directly in `server.py`'s `/cost`
+docstring and rewrote `CostPanel.tsx`'s disclaimer to say precisely what
+the `$` figure is (LangSmith's own token-count × its price-list estimate,
+not a literal Anthropic invoice pull) and what an all-zero window with
+0 runs actually means. Flagged to the user: check the LangSmith plan's
+usage page — upgrade or wait for the monthly reset.
+
+**Part C — voice I/O breaking the interrupt gate + needing a manual
+refresh, root-caused via three parallel Explore investigations (Tauri
+race, cost, voice), each verified independently.** The voice daemon and
+dashboard default to the SAME active thread (`thread_store`). Voice's
+`_process_turn` (`voice_daemon.py`) always calls a FRESH
+`ainvoke({"messages": [...]})`, never `Command(resume=...)`, for its first
+call — LangGraph treats any non-`Command`/non-`None` input as a brand-new
+run regardless of a pending interrupt on that thread (confirmed via
+`_loop.py`'s `is_resuming` logic), so if the dashboard's own `/chat` had
+suspended on `interrupt()` and was showing `InterruptGate.tsx`, voice's
+next turn silently orphaned it instead of resolving it — the actual cause
+of "interrupt() stops working after voice runs." Separately, the
+dashboard's only view of thread state was whatever SSE stream IT itself
+had open — no channel existed for an external process's writes to
+surface, hence "need to refresh to see voice output." Fixed both:
+`voice_daemon.py`'s `_process_turn` now calls `graph.aget_state(config)`
+before its `ainvoke()` and declines (`"There's a confirmation waiting on
+this conversation — please handle that first."`) if any task has a
+pending interrupt, rather than silently clobbering it. `ChatPanel.tsx`
+gained a 4s idle poll (paused whenever `busy`/`pendingInterrupt`, so it
+never races a live SSE stream) against the already-existing `/threads`
+list, comparing the active thread's `last_active_at`
+(`thread_store.touch_thread`, already fired after every voice turn) against
+a baseline captured at last load; a change triggers a real `/history`
+refetch. Fixes the "need to refresh" symptom generally, not just for
+voice.
+
+**Part D — the "Oni" redesign.** D1 (backend): `agent_activity` SSE
+frames, reusing the exact `adispatch_custom_event` relay mechanism Phases
+16-18 already proved crosses the nested-`ainvoke()` specialist boundary
+(`research_fa_token`, `a2ui_surface`) — a new `_AgentActivityRelay`
+(`AsyncCallbackHandler`, `supervisor.py`) attached to each specialist's own
+isolated `ainvoke()` config reports that specialist's OWN inner tool
+calls (`tool_start`/`tool_end`), while `call_specialist` itself dispatches
+the outer "supervisor is calling specialist X" boundary with the same
+event shape — one uniform stream for both levels. `server.py`'s
+`_stream_turn` relays it as a new non-terminal `{"type": "activity", ...}`
+frame. **Live-verified the nested-boundary reliance rather than assuming
+it, matching how Phases 17/18 treated this exact risk**:
+`test_activity_frames_surface_across_the_delegated_specialist_boundary`
+(`tests/test_server.py`) delegates to `research_agent`, which calls the
+real `tavily_search` tool (learned live that the tool's actual registered
+name isn't `web_search`, the wrapper function name in `tools.py`), and
+asserts BOTH the outer (`agent: "supervisor", tool: "research_agent"`) and
+inner (`agent: "research_agent", tool: "tavily_search"`) tool_start/
+tool_end frames arrive. D2 (frontend): `App.tsx` restructured from a
+centered single column into the redesign's three-column shell — left
+`ThreadSidebar` (unchanged) · center chat/tabs · new right context rail —
+with `useAgentActivity()` (a stack-based hook: the deepest still-open
+in-flight event is always the most specific "what's running right now")
+lifted into `App` rather than `ChatPanel`, specifically so the rail
+survives a tab switch that unmounts `ChatPanel` (Base UI's `Tabs` unmounts
+inactive panels by default) — the callback closure passed down is the
+PARENT's own stable setState, not tied to the child's mount lifecycle.
+New components, current color tokens only (no new hex, per the user's
+explicit call — agents mapped onto the existing `--operator`/
+`--muted-foreground` tokens, not the mock's rust/purple palette):
+`AgentActivityGraph.tsx` (SVG supervisor+4-specialist graph, colors set
+via inline `style` with `var(--token)` rather than raw SVG presentation
+attributes, for reliable resolution in Tauri's webview), `ToolCallTimeline.tsx`,
+`StatusPill.tsx` (header pill), `CostSummaryCard.tsx` (compact 7-day
+reuse of `fetchCost`). Header title changed to "Oni" (package stays
+`assistant`, CLAUDE.md's explicit naming call untouched).
+
+**Live-verified in the real, already-running app, not just tests** — the
+user had `npm run tauri dev` open the whole time this was built (STEPS.md
+convention: check `ps aux` before assuming a port is free). A real hazard
+found and handled transparently: freeing port 8000 for a verification
+uvicorn instance killed the user's OWN live backend process; the
+replacement (same DB paths) came up and the live Tauri window recovered
+on its own — an accidental real-world confirmation that Part A's retry
+fix works, disclosed to the user rather than left implicit. Full
+verification via a Chrome tab against the same app (`localhost:1420`,
+Vite's own dev server, same real conversation history/threads): three-
+column layout, "Oni" title, dark AND light theme both clean, a real
+delegated turn (research_agent → tavily_search) correctly lighting up the
+graph and populating the timeline with both boundary levels in real time,
+Cost tab matching the Part B live diagnosis exactly ($0 today / $2.0364
+week / $12.8831 all-time).
+
+**A real test-isolation bug found and fixed along the way, not shipped
+silently:** `ChatPanel.test.tsx` never mocked `fetchThreads` — harmless
+before Part C added a `fetchThreads()` call to `ChatPanel`'s mount effect,
+but afterward every one of that file's tests silently depended on a real
+backend answering on 127.0.0.1:8000; without one, `fetchWithRetry` (Part
+A) would retry for up to ~15s per test. Caught by deliberately killing the
+test backend and re-running — confirmed the suite's tests were passing
+only because a real backend happened to be up, not because they were
+correctly isolated. Fixed by mocking `fetchThreads` the same way this
+file already mocks every other `api.ts` call, with a sane default
+resolved value in `beforeEach`. Re-verified with the backend down: 61/61
+frontend tests still pass in ~1.8s.
+
+**Tests:** 210/210 backend tests pass (1 new:
+`test_activity_frames_surface_across_the_delegated_specialist_boundary`),
+61/61 frontend tests pass (5 new: `useAgentActivity.test.ts`);
+`tsc --noEmit`, `npm run build`, `npm run format:check` all clean; `ruff
+check .` shows only the same 2 pre-existing, unrelated findings confirmed
+via `git stash` (identical to the ones Phase 18 already documented, not
+introduced here).
+
+**Not yet done:** PLAN.md's formal Phase 19 write-up and CLAUDE.md's
+Current Status flip — proposed to the user for approval per CLAUDE.md's
+own "status edits happen only with my approval" rule, not applied here.
+Commit boundaries also proposed, not taken — CLAUDE.md's Git rules:
+Claude never runs `git add`/`commit`/`push` on its own initiative.

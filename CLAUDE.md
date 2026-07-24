@@ -20,47 +20,10 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **ACTIVE: Phase 16** — Langfuse v2 integration (all three pillars), then
-  migration to v3 (started 2026-07-16). Demo/portfolio phase: additive to
-  LangSmith (Phase 3), which stays untouched (`/cost` keeps using it). Full
-  narrative in `PHASE16_LANGFUSE.md`; chronological detail in STEPS.md
-  79–82; this entry is a pointer, not the record.
-  **Observability/tracing:** `assistant/observability.py` wires a shared,
-  lazily-built `CallbackHandler` into `agent.make_thread_config()` (the one
-  place all three call sites — CLI, voice, dashboard SSE — pick it up for
-  free), no-op when Langfuse isn't configured. A real blocker (Langfuse
-  v2's actual final release, EOL since Sept 2025, cannot import at all
-  against this project's LangChain 1.x — unresolved upstream bug,
-  langfuse/langfuse#9758) was resolved with a verified `sys.modules`
-  compatibility shim restoring the exact legacy import paths v2 needs as
-  re-exports of their real `langchain_core` equivalents — the same
-  relationship pre-1.0 LangChain itself shipped, not a mock or a downgrade;
-  scoped Part-A-only, deleted at the Part B (v3) migration. Live-verified
-  against a real account using the official `langfuse/skills` GitHub skill
-  (installed to `~/.claude/skills/langfuse/` after reading it in full —
-  cleared the Phase 11 vetting bar), which surfaced and fixed real gaps
-  (trace naming/tags needed `configure_client()`, constructor-bound in v2;
-  `LANGFUSE_HOST` vs. the skill's own `LANGFUSE_BASE_URL` name caused real
-  401s) and confirmed one NOT fixed — v2's frozen usage-tracking schema
-  silently drops output-token/cost data under extended thinking/prompt
-  caching (unconditional in this project) — documented rather than
-  monkeypatched, and confirmed live to be fixed in v3.
-  **Prompt management:** 6 system/summary prompts migrated to Langfuse
-  (`assistant/prompts.py`, `scripts/sync_prompts_to_langfuse.py`), each
-  with its original text kept as a mandatory local fallback.
-  `memory_extraction.py`'s `_EXTRACTION_PROMPT` deliberately excluded — its
-  source-restriction guarantee is structural, not instruction-based, and
-  CLAUDE.md's "do not weaken without discussion" standing note on that
-  module applies.
-  **Evaluations:** confirmation-gate approve/decline outcomes logged as
-  Langfuse scores (`observability.score_gate_outcome()`), fired as a
-  background task at all three resume points. A real trace-misattribution
-  race (Langfuse indexes a session's traces out of creation order) was
-  found live and fixed with a time-bounded lookup.
-  174/174 tests pass. Still open: voice and dashboard call sites haven't
-  individually been driven live for tracing (only CLI has); Part B not
-  started — see PLAN.md's Phase 16 section before doing any further work
-  here.
+- **No phase currently ACTIVE.** Phase 19 (startup/cost/voice fixes +
+  "Oni" dashboard redesign, STEPS.md 96) is the most recently completed
+  phase, opened, built, and documented in one session (2026-07-24) — no
+  next phase opened or scoped yet.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -169,6 +132,189 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   collision fix, the voice trigger, thread switching, rename, and delete —
   confirmed live (real launchd daemon, real Tauri window), not just
   tests (STEPS.md groups 67–68).
+- Complete: Phase 16 — Langfuse integration: v2 wired in first (all three
+  pillars — tracing, prompt management, evaluations), then migrated to v3
+  (status flip approved 2026-07-24 — STEPS.md 93). Demo/portfolio phase,
+  additive to LangSmith (Phase 3), which stays untouched (`/cost` keeps
+  using it). Full narrative in `PHASE16_LANGFUSE.md`; chronological detail
+  in STEPS.md 79–91.
+  **Observability/tracing:** `assistant/observability.py` wires
+  `tracing_context()` into all three call sites (CLI, voice, dashboard SSE)
+  via `agent.make_thread_config()`, no-op when Langfuse isn't configured.
+  v2's real EOL/import blocker (langfuse/langfuse#9758, cannot import
+  against this project's LangChain 1.x) was resolved with a verified
+  `sys.modules` compatibility shim, scoped Part-A-only and deleted at the
+  v3 migration. v3 (Part B) replaced the shim with v3's uniform
+  `propagate_attributes()`/`tracing_context()` model; fixed the OTEL
+  auto-instrumentation duplicate-span problem
+  (`blocked_instrumentation_scopes`); confirmed the SSE-cancellation path
+  leaves Langfuse in a clean state (one documented, accepted gap: the
+  specific mid-cancel GENERATION span never exports — no functional
+  impact, LangSmith remains cost/token source of truth); confirmed live
+  that v3 fixes v2's frozen-schema output-token/cost bug.
+  **Prompt management:** 6 system/summary prompts migrated
+  (`assistant/prompts.py`, `scripts/sync_prompts_to_langfuse.py`), each
+  with a mandatory local fallback; `memory_extraction.py`'s
+  `_EXTRACTION_PROMPT` deliberately excluded (structural
+  source-restriction guarantee, not instruction-based).
+  **Evaluations:** confirmation-gate approve/decline outcomes logged as
+  Langfuse scores (`observability.score_gate_outcome()`), fired as a
+  background task at all three resume points.
+  **Distributed tracing spike (Part A.5, mentor-directed):** peeled
+  `research_agent` into its own HTTP service (`assistant/fa_service.py`),
+  reproduced a real cross-process trace-nesting break, fixed it first the
+  v2 way then replaced that with real OTEL `traceparent` propagation
+  (`observability.inject_trace_headers()`/`attached_parent_context()`).
+  Streaming relay + real abort-on-stop built on `adispatch_custom_event`
+  (the channel Phase 17's A2UI surfaces reuse) and live-verified both
+  directions. A `/code-review max` pass on the full Part B diff found and
+  fixed 15 issues. 183/183 tests pass; `ruff check .` clean.
+  **Also in Part B's finalization commit, not logged until STEPS.md 94
+  (found retroactively 2026-07-24):** `supervisor.py`/`sub_agents.py`
+  rewritten from Command-handoff routing (specialists as `StateGraph`
+  nodes reached via `Command(graph=Command.PARENT)`) to an agents-as-tools
+  design (each specialist a plain `@tool` calling `ainvoke()` on its own
+  compiled graph) — fixes a real flat-trace/parallel-firing bug this
+  surfaced in Langfuse, verified live via spike before landing. See
+  STEPS.md 94 for the full reconstruction; this is now the current
+  architecture (Architecture diagram above).
+- Complete: Phase 17 — A2UI generative UI integration (2026-07-23):
+  agents can present rich, optionally interactive UI in the dashboard
+  instead of plain text, using a constrained subset of Google's A2UI v0.9
+  component vocabulary. Chronological detail in STEPS.md 92.
+  **Part A (display-only):** `assistant/a2ui.py`'s `render_ui` tool
+  validates a component tree (Text/Badge/Divider/Image/Column/Row/List/
+  Card) against a strict allowlist, then forwards it through the same
+  `adispatch_custom_event` channel Phase 16's streaming relay already
+  proved out; `server.py` relays it as a new non-terminal `{type: a2ui,
+  ...}` SSE frame; `A2UIRenderer.tsx` (registry-dispatch, mirroring
+  `InterruptGate.tsx`'s pattern) renders it inline in `ChatPanel`.
+  `render_ui`'s own text summary persists to history; the live render
+  itself is ephemeral by design.
+  **Part B (interactive):** adds TextField/CheckBox/ChoicePicker/Button.
+  `Button.action` is structurally locked to exactly `{name: <str>}` — no
+  `functionCall`, no nested payload — enforced both server- and
+  client-side. A submission POSTs to `/a2ui/action`, framed as a PLAIN,
+  non-synthetic user turn (same trust level as typed chat, same
+  `is_genuine_human_turn` machinery every other turn-boundary feature
+  depends on). No new side-effect path: any real action the agent takes in
+  response still goes through the existing, unmodified `interrupt()`-gated
+  tools — verified live by watching the memory-write confirmation gate
+  fire correctly off a form submission.
+  **Scope, deliberate (v1 only — extended in Phase 18):** v1 is
+  supervisor-only — the custom-event channel is proven at the supervisor's
+  own graph level, not yet re-verified across a nested specialist subgraph
+  boundary. Remote `Image` URLs rejected (`data:` URIs only); Modal/Tabs/
+  Video/AudioPlayer/Slider/DateTimeInput excluded from v1's vocabulary.
+  204 backend tests pass (15 new), 54 frontend tests pass (18 new);
+  `tsc`/`ruff`/`prettier`/`build` all clean.
+- Complete: Phase 18 — extend render_ui to specialists; persist A2UI
+  surfaces across reload (2026-07-24, STEPS.md 95). The two follow-ons
+  from Phase 17's own deliberate v1 scope limits, built the same session
+  they were raised in, at the user's direct request.
+  **render_ui extended:** `research_agent` and `life_admin_agent`
+  (`sub_agents.py`) now carry `render_ui` too — NOT `coding_agent`/
+  `mac_control_agent` (output isn't card-shaped), same kind of deliberate
+  scope call Phase 17 made for "supervisor-only." The nested-boundary risk
+  Phase 17 left open was resolved with a REAL live test
+  (`test_render_ui_available_on_delegated_specialist_and_persists`,
+  `tests/test_a2ui.py`), not just reasoned through: a delegated
+  specialist's own render_ui call — one level of nesting deeper than
+  `research_fa_token`'s existing proof — still surfaces live via SSE.
+  Surfaced a real live bug along the way: the supervisor refused to
+  delegate a render_ui-shaped request at all (no visibility into a
+  specialist's actual bound tools) — fixed via a supervisor prompt update,
+  which also surfaced that `prompts.get_prompt()` prefers Langfuse's
+  remote "production" prompt over an edited local fallback whenever
+  reachable, so all six prompts needed re-syncing
+  (`scripts/sync_prompts_to_langfuse.py`) for the fix to actually take
+  effect.
+  **Persistence:** `render_ui` now returns a `Command` (matching
+  `request_gated_action_confirmation`'s pattern) carrying the full surface
+  in `additional_kwargs[A2UI_SURFACE_KEY]` (a2ui.py) — read back by
+  `server.py`'s `/history`. A second-order fix was needed for delegated
+  specialists specifically: their own render_ui ToolMessage lives only in
+  an isolated, discarded `ainvoke()` result, so `_invoke_agent_graph`/
+  `call_specialist` (`supervisor.py`) now forward any surfaces found there
+  onto the specialist-delegation tool's own ToolMessage. Without this fix
+  a sub-agent's surface would have rendered live and then silently
+  vanished on reload. The Phase 16 A.5 HTTP research path (off by default)
+  left as a documented, accepted gap — no A2UI relay exists in
+  `fa_service.py`, real separate scope for a non-default path.
+  **Frontend:** `HistoryMessage.surfaces` (api.ts); `HistoryPanel.tsx`
+  renders inline per-row; `ChatPanel.tsx`'s `attachPersistedSurfaces()`
+  replays the live `pendingA2uiRef` grouping logic so a reload looks
+  identical to the live turn.
+  209/209 backend tests pass (5 new), 56/56 frontend tests pass (2 new);
+  `tsc`/`ruff`/`prettier`/`build` all clean (2 pre-existing, unrelated
+  ruff findings confirmed via `git stash`, not introduced here).
+- Complete: Phase 19 — startup/cost/voice fixes + "Oni" dashboard redesign
+  (2026-07-24, STEPS.md 96). Four asks in one session: three real bugs
+  plus a UI redesign import via the `DesignSync` MCP tool (`claude.ai/
+  design` project "Oni assistant UI design",
+  `Oni Dashboard - Final.dc.html`). Two user decisions locked the
+  redesign's scope: keep the app's EXISTING color tokens (layout only from
+  the mock, not its hex palette), and build the full right context rail
+  except the Today/calendar card, wired to live data.
+  **Startup race:** every launch looked like a fresh empty chat because
+  Tauri showed its window before `uvicorn` was listening
+  (`src-tauri/src/lib.rs`'s non-blocking `spawn_backend()`) while
+  `api.ts`'s mount-time fetches had no retry. Fixed with `api.ts`'s new
+  `fetchWithRetry()` (retries a thrown network error only, ~15s window)
+  on `fetchThreads`/`fetchHistory`/`fetchCost`, plus a belt-and-suspenders
+  `wait_for_backend()` TCP-readiness poll in `lib.rs` before the window
+  appears.
+  **Cost panel showing 0:** diagnosed live before touching any code
+  (CLAUDE.md's verification discipline) — turned out to have NO code fix.
+  `all_time`/`week` were already correct; `today` was 0 because the
+  LangSmith account had hit its own monthly trace-ingestion quota
+  (confirmed via a real 429, "Monthly unique traces usage limit
+  exceeded") — nothing had landed since 2026-07-18.
+  `_get_run_stats_sync`/`/cost` (`server.py`) already correctly reflect
+  LangSmith's true state; documented the finding directly in the code and
+  rewrote `CostPanel.tsx`'s disclaimer to say precisely what the `$`
+  figure is (LangSmith's own token-count × its price-list estimate, never
+  a literal Anthropic invoice pull). Flagged as an account/billing
+  decision for the user (upgrade the plan, or wait for the monthly
+  reset), not something fixable in code.
+  **Voice breaking the interrupt gate:** voice and the dashboard share one
+  active thread; voice's `_process_turn` always started a FRESH
+  `ainvoke()` even when the dashboard had a pending `interrupt()` open,
+  silently orphaning it (confirmed via LangGraph's own `is_resuming`
+  logic). Fixed by having voice check `graph.aget_state(config)` first and
+  decline rather than clobber a pending gate. Separately, `ChatPanel.tsx`
+  gained a 4s idle poll (paused during any live SSE stream or pending
+  gate) against `/threads`' `last_active_at` marker, so an external write
+  surfaces without a manual refresh.
+  **"Oni" redesign:** a new `agent_activity` SSE frame
+  (`supervisor.py`/`server.py`) reuses the exact `adispatch_custom_event`
+  relay already proven (Phases 16–18) to cross the nested-`ainvoke()`
+  specialist boundary — `_AgentActivityRelay` reports a specialist's own
+  inner tool calls, `call_specialist` dispatches the outer
+  supervisor->specialist boundary, one uniform stream for both.
+  Live-verified the nested-boundary reliance with a real test
+  (`test_activity_frames_surface_across_the_delegated_specialist_boundary`),
+  not just reasoned through. `App.tsx` restructured into a three-column
+  shell (left `ThreadSidebar` · center chat/tabs · new right context
+  rail); a new `useAgentActivity()` hook lives in `App`, not `ChatPanel`,
+  so the rail survives a tab switch that unmounts `ChatPanel`. New
+  components (`AgentActivityGraph.tsx`, `ToolCallTimeline.tsx`,
+  `StatusPill.tsx`, `CostSummaryCard.tsx`) all on the app's EXISTING color
+  tokens, never the mock's own hex values. Header title changed to "Oni";
+  package name stays `assistant`.
+  **Live-verified in the real, already-running app**, not just tests — a
+  real hazard (freeing port 8000 for a verification backend killed the
+  user's own live backend process) was found and handled transparently;
+  the replacement came up and the live Tauri window recovered on its own,
+  an incidental confirmation of the startup-race fix. A real
+  test-isolation bug (`ChatPanel.test.tsx` never mocked `fetchThreads`,
+  silently depending on a live backend once Part C added a call to it)
+  was found by deliberately killing the test backend, not assumed safe,
+  and fixed.
+  210/210 backend tests pass (1 new), 61/61 frontend tests pass (5 new);
+  `tsc`/`ruff`/`prettier`/`build` all clean (2 pre-existing, unrelated
+  ruff findings confirmed via `git stash`, identical to Phase 18's own,
+  not introduced here).
 
 Roadmap history: renumbered 2026-07-13 (handoff-fix/memory/voice-upgrade/
 dashboard inserted ahead of the original polish phase). On 2026-07-14 Phase
@@ -180,7 +326,15 @@ clients; kept as its own phase rather than folded into 12. Phase 13
 completed 2026-07-15 (STEPS.md groups 69–70). Phase 14 completed
 2026-07-15 (STEPS.md groups 71–72). Phase 10 resumed 2026-07-15 now that
 the write-access/browser/UI arc (11–15) is complete, and its status flip to
-COMPLETE was approved by the user 2026-07-16. See PLAN.md.
+COMPLETE was approved by the user 2026-07-16. Phase 16 (Langfuse v2→v3)
+opened 2026-07-16, functionally complete by 2026-07-18 (STEPS.md 90–91);
+its status flip to COMPLETE was approved 2026-07-24 (STEPS.md 93), in the
+same pass that added Phase 17 (A2UI generative UI, built 2026-07-23,
+documented 2026-07-24). Phase 18 (render_ui extended to specialists +
+A2UI surface persistence) opened, built, and documented the same day,
+2026-07-24 (STEPS.md 95). Phase 19 (startup/cost/voice fixes + "Oni"
+dashboard redesign) opened, built, and documented the same day,
+2026-07-24 (STEPS.md 96). See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -192,7 +346,10 @@ assistant/
 ├── main.py               # CLI loop; owns checkpointer lifetime; fixed THREAD_ID
 ├── agent.py               # shared invocation-config helper (make_thread_config); graph
 │                             construction itself lives in supervisor.py/sub_agents.py (Phase 3)
-├── supervisor.py          # supervisor + outer StateGraph assembly; Command handoff routing
+├── supervisor.py          # supervisor + outer StateGraph assembly; agents-as-tools design —
+│                             each specialist is a @tool calling ainvoke() on its own compiled
+│                             graph directly (superseded the original Command-handoff routing
+│                             in Phase 16 Part B finalization, STEPS.md 94)
 ├── sub_agents.py          # coding/research/life-admin worker sub-agent graphs
 ├── tools.py               # Phase 1 hand-secured tools: web search (Tavily), file r/w, shell exec
 ├── mcp_tools.py           # Phase 2+ MCP-loaded tools (Gmail/Calendar), merged into TOOLS

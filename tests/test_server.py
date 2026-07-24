@@ -103,6 +103,68 @@ async def test_chat_streams_token_events_that_reassemble_into_the_final_message(
         assert streamed_text.strip() == events[-1]["content"].strip()
 
 
+async def test_activity_frames_surface_across_the_delegated_specialist_boundary() -> None:
+    """PLAN.md Phase 19's own live-verification requirement, mirroring how
+    Phase 18 proved render_ui crosses this exact nested-ainvoke() boundary
+    (test_a2ui.py's test_render_ui_available_on_delegated_specialist_and_
+    persists) rather than assuming the mechanism generalizes: directs the
+    supervisor to delegate to research_agent, which calls the REAL search
+    tool (`tavily_search` — the actual LangChain tool name `TavilySearch`
+    registers, not `tools.py`'s `web_search` wrapper function name). Must
+    surface BOTH levels as `activity` SSE frames — the outer
+    supervisor->research_agent boundary (call_specialist's own dispatch)
+    AND research_agent's OWN inner tavily_search call (_AgentActivityRelay,
+    attached to research_agent's isolated ainvoke() config) — proving
+    adispatch_custom_event's contextvar propagation survives this nested
+    call exactly the way research_fa_token/a2ui_surface already did, now
+    for tool-activity instead of tokens/rendered surfaces."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": (
+                    "Delegate this to research_agent: search the web for "
+                    "\"esbuild\" and tell me one fact about it."
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        events = _parse_sse(response.text)
+        activity_events = [e for e in events if e["type"] == "activity"]
+        assert activity_events, f"expected at least one activity frame, got {events}"
+
+        outer_starts = [
+            e
+            for e in activity_events
+            if e["phase"] == "tool_start" and e["agent"] == "supervisor" and e["tool"] == "research_agent"
+        ]
+        assert outer_starts, f"expected a supervisor->research_agent tool_start, got {activity_events}"
+        outer_ends = [
+            e
+            for e in activity_events
+            if e["phase"] == "tool_end" and e["agent"] == "supervisor" and e["tool"] == "research_agent"
+        ]
+        assert outer_ends, f"expected a supervisor->research_agent tool_end, got {activity_events}"
+
+        inner_starts = [
+            e
+            for e in activity_events
+            if e["phase"] == "tool_start" and e["agent"] == "research_agent" and e["tool"] == "tavily_search"
+        ]
+        assert inner_starts, (
+            f"expected research_agent's own inner web_search tool_start to surface "
+            f"across the nested ainvoke() boundary, got {activity_events}"
+        )
+        inner_ends = [
+            e
+            for e in activity_events
+            if e["phase"] == "tool_end" and e["agent"] == "research_agent" and e["tool"] == "tavily_search"
+        ]
+        assert inner_ends, f"expected research_agent's own inner web_search tool_end, got {activity_events}"
+
+        assert events[-1]["type"] == "message"
+
+
 async def test_stop_cancels_the_registered_task_for_its_thread() -> None:
     """Unit-level coverage of /chat/stop's own lookup+cancel logic.
 

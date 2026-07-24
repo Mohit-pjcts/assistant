@@ -8,27 +8,68 @@ import { InterruptGate } from "./InterruptGate";
 import { A2UIRenderer } from "./A2UIRenderer";
 import {
   fetchHistory,
+  fetchThreads,
   resumeChat,
   sendA2UIAction,
   sendChat,
   stopChat,
   type A2UISurface,
+  type AgentActivityEvent,
   type ChatTurnResult,
   type HistoryMessage,
   type InterruptPayload,
 } from "@/lib/api";
+
+// PLAN.md Phase 19: how often to check whether ANOTHER client (chiefly
+// voice I/O, which invokes the graph directly via its own ainvoke() —
+// voice_daemon.py's module docstring — completely outside this panel's own
+// SSE stream) has advanced this same thread. 4s is cheap (one /threads
+// fetch, already used by the sidebar) and fast enough that voice output
+// shows up without a manual reload, without polling aggressively enough to
+// matter for cost/rate limits.
+const EXTERNAL_UPDATE_POLL_MS = 4000;
 
 // Phase 17 (PLAN.md): a completed assistant turn may carry zero or more
 // A2UI surfaces it rendered along the way. Attached directly onto the
 // message object that lands in `messages` (rather than tracked in a
 // separate index-keyed map) so there's no risk of desyncing an index
 // against `messages`' own async/batched updates — the surfaces travel with
-// their message as one atomic unit. Ephemeral by design: never round-trips
-// through fetchHistory/`/history` (assistant/a2ui.py's module docstring),
-// so a page reload loses the rendered surface and keeps only render_ui's
-// persisted text summary, same as every other message.
+// their message as one atomic unit. As of Phase 18 (PLAN.md) this is no
+// longer ephemeral: attachPersistedSurfaces below reconstructs the same
+// shape from /history's own per-message `surfaces` field on reload, so a
+// page reload now re-renders the same UI instead of only render_ui's text
+// summary — see assistant/a2ui.py's module docstring for the persistence
+// design this mirrors.
 interface DisplayMessage extends HistoryMessage {
   a2uiSurfaces?: A2UISurface[];
+}
+
+// Phase 18 (PLAN.md): /history now returns each message's OWN persisted
+// surfaces (HistoryMessage.surfaces) on whichever raw message row actually
+// carried them — a ToolMessage, filtered out entirely by visibleMessages
+// below, same as any other tool row. To make a reload look like the live
+// turn that produced it (where every surface rendered during the WHOLE
+// turn lands on the one final assistant bubble, regardless of which
+// underlying tool call — render_ui directly, or a specialist forwarding
+// its own — produced it), accumulate surfaces across each raw row and
+// attach them to the next assistant-role message, mirroring applyResult's
+// live pendingA2uiRef->message hand-off below exactly, just replayed over
+// already-persisted history instead of a live stream.
+function attachPersistedSurfaces(raw: HistoryMessage[]): DisplayMessage[] {
+  const result: DisplayMessage[] = [];
+  let pending: A2UISurface[] = [];
+  for (const message of raw) {
+    if (message.surfaces?.length) {
+      pending = [...pending, ...message.surfaces];
+    }
+    if (message.role === "assistant") {
+      result.push(pending.length > 0 ? { ...message, a2uiSurfaces: pending } : message);
+      pending = [];
+    } else {
+      result.push(message);
+    }
+  }
+  return result;
 }
 
 // The dashboard's live chat panel — talks to assistant/server.py, which
@@ -43,7 +84,20 @@ interface DisplayMessage extends HistoryMessage {
 // `handleStreamError` can read the CURRENT accumulated text synchronously
 // without going through a setState-updater callback (which React Strict
 // Mode double-invokes; calling other setters from inside one is unsafe).
-export function ChatPanel() {
+interface ChatPanelProps {
+  // PLAN.md Phase 19: forwards every `activity` SSE frame (server.py's
+  // supervisor/specialist tool-call relay) up to App.tsx's shared
+  // useAgentActivity() hook, which lives in the PARENT rather than here —
+  // that's what lets the right rail keep showing the latest activity even
+  // across a tab switch that unmounts THIS component (Base UI's Tabs
+  // unmounts inactive panels by default): the callback closure this passes
+  // to sendChat/resumeChat is the parent's own stable setState, not
+  // anything tied to this component's own mount lifecycle, so events
+  // arriving after an unmount still land correctly.
+  onActivity?: (event: AgentActivityEvent) => void;
+}
+
+export function ChatPanel({ onActivity = () => {} }: ChatPanelProps) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [pendingInterrupt, setPendingInterrupt] = useState<InterruptPayload | null>(null);
@@ -68,12 +122,20 @@ export function ChatPanel() {
   // abruptly IS what a stop looks like from here (api.ts's streamSSE
   // docstring), so this flag is what distinguishes intent from failure.
   const stopRequestedRef = useRef(false);
+  // Baseline for the external-update poll below — the active thread's own
+  // `last_active_at` (thread_store's touch_thread marker) as of the last
+  // time THIS panel loaded history, whether that was the initial mount or
+  // a poll-triggered refresh. `null` until the initial fetch resolves.
+  const lastActiveAtRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetchHistory()
-      .then((history) => {
-        if (!cancelled) setMessages(history);
+    Promise.all([fetchHistory(), fetchThreads()])
+      .then(([history, threadsResult]) => {
+        if (cancelled) return;
+        setMessages(attachPersistedSurfaces(history));
+        const active = threadsResult.threads.find((t) => t.id === threadsResult.activeThreadId);
+        lastActiveAtRef.current = active?.last_active_at ?? null;
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -85,6 +147,33 @@ export function ChatPanel() {
       cancelled = true;
     };
   }, []);
+
+  // PLAN.md Phase 19: a live-refresh channel independent of whatever SSE
+  // stream THIS panel itself has open — the only way it previously learned
+  // about a turn was its own sendChat/resumeChat call, so a turn another
+  // process ran (voice I/O's own ainvoke(), same thread) never showed up
+  // here without a manual reload. Polls the same cheap /threads list the
+  // sidebar already fetches; re-fetches /history only when the active
+  // thread's last_active_at has moved past this panel's own baseline, and
+  // only while idle (never mid-stream/mid-gate — this must not race a live
+  // token stream or clobber a pending interrupt with a stale snapshot).
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (busy || pendingInterrupt) return;
+      fetchThreads()
+        .then(({ threads, activeThreadId }) => {
+          const active = threads.find((t) => t.id === activeThreadId);
+          if (!active || active.last_active_at === lastActiveAtRef.current) return;
+          lastActiveAtRef.current = active.last_active_at;
+          return fetchHistory().then((history) => setMessages(attachPersistedSurfaces(history)));
+        })
+        .catch(() => {
+          // Best-effort — a transient poll failure just retries next tick,
+          // same posture as the rest of this panel's non-fatal paths.
+        });
+    }, EXTERNAL_UPDATE_POLL_MS);
+    return () => clearInterval(interval);
+  }, [busy, pendingInterrupt]);
 
   useEffect(() => {
     // jsdom (component tests) has no scrollIntoView implementation.
@@ -156,7 +245,7 @@ export function ChatPanel() {
     setInput("");
     setBusy(true);
     try {
-      applyResult(await sendChat(text, appendToken, appendA2UI));
+      applyResult(await sendChat(text, appendToken, appendA2UI, onActivity));
     } catch (err) {
       handleStreamError(err);
     }
@@ -167,7 +256,7 @@ export function ChatPanel() {
     setPendingInterrupt(null);
     setError(null);
     try {
-      applyResult(await resumeChat(approved, appendToken, appendA2UI));
+      applyResult(await resumeChat(approved, appendToken, appendA2UI, onActivity));
     } catch (err) {
       handleStreamError(err);
     }
@@ -192,7 +281,9 @@ export function ChatPanel() {
     ]);
     setBusy(true);
     try {
-      applyResult(await sendA2UIAction(surfaceId, name, context, appendToken, appendA2UI));
+      applyResult(
+        await sendA2UIAction(surfaceId, name, context, appendToken, appendA2UI, onActivity),
+      );
     } catch (err) {
       handleStreamError(err);
     }

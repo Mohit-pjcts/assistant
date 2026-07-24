@@ -138,7 +138,7 @@ from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.callbacks import adispatch_custom_event
+from langchain_core.callbacks import AsyncCallbackHandler, adispatch_custom_event
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import convert_to_messages
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
@@ -151,7 +151,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
 from assistant import observability, prompts
-from assistant.a2ui import build_render_ui_tool
+from assistant.a2ui import A2UI_SURFACE_KEY, build_render_ui_tool
 from assistant.compaction import (
     compact_history_node,
     is_compaction_summary,
@@ -272,7 +272,14 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "values rather than typing free text back — submitting it arrives as a "
     "normal new message from them, which you handle like any other "
     "request. Either way render_ui never itself performs an action or "
-    "substitutes for a confirmation gate.\n\n"
+    "substitutes for a confirmation gate. research_agent and "
+    "life_admin_agent ALSO have their own render_ui tool — they are the "
+    "ones holding the actual structured data (search results, calendar "
+    "events, emails), so when you delegate to either of them, trust them "
+    "to render their own results directly if that's warranted, rather than "
+    "you reconstructing a card from their prose summary; don't refuse or "
+    "second-guess a request that asks you to delegate something render_ui-"
+    "shaped to one of them.\n\n"
     "Before delegating a request that clearly involves one of these "
     "specific actions — " + ", ".join(sorted(GATED_ACTIONS)) + " — call "
     "request_gated_action_confirmation FIRST, describing in `summary` "
@@ -291,6 +298,59 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
 SUPERVISOR_SYSTEM_PROMPT = prompts.get_prompt(
     "supervisor-system-prompt", SUPERVISOR_SYSTEM_PROMPT_FALLBACK
 )
+
+
+class _AgentActivityRelay(AsyncCallbackHandler):
+    """PLAN.md Phase 19: relays a specialist's OWN inner tool calls (web_search,
+    Gmail/Calendar MCP tools, mac_tools, shell) to the dashboard as
+    `agent_activity` custom events — reusing the exact `adispatch_custom_event`
+    mechanism Phases 16-18 already proved crosses this same nested-`ainvoke()`
+    boundary (`research_fa_token`, `a2ui_surface`; see this module's
+    docstring and `_invoke_agent_graph`'s own docstring for why a specialist's
+    inner activity isn't otherwise visible to the supervisor's own
+    `astream_events()`). Attached to each specialist's own `ainvoke()` config
+    in `_invoke_agent_graph` below, one instance per call, so every frame it
+    dispatches is already tagged with which specialist is running.
+
+    `call_specialist` (below) dispatches the OUTER boundary — "supervisor is
+    calling specialist X" — with the SAME event name/shape (`agent:
+    "supervisor"`, `tool: <specialist name>`), so the dashboard's activity
+    graph and tool-call timeline read one uniform stream for both the
+    supervisor->specialist hop and each specialist's own inner tool calls,
+    rather than two different shapes to reconcile."""
+
+    def __init__(self, agent_name: str) -> None:
+        self._agent_name = agent_name
+        self._tool_names: dict[str, str] = {}
+
+    async def on_tool_start(
+        self,
+        serialized: dict[str, Any],
+        input_str: str,
+        *,
+        run_id: Any,
+        **kwargs: Any,
+    ) -> None:
+        name = serialized.get("name", "tool") if isinstance(serialized, dict) else "tool"
+        self._tool_names[str(run_id)] = name
+        await adispatch_custom_event(
+            "agent_activity",
+            {"phase": "tool_start", "agent": self._agent_name, "tool": name},
+        )
+
+    async def on_tool_end(self, output: Any, *, run_id: Any, **kwargs: Any) -> None:
+        name = self._tool_names.pop(str(run_id), "tool")
+        await adispatch_custom_event(
+            "agent_activity",
+            {"phase": "tool_end", "agent": self._agent_name, "tool": name},
+        )
+
+    async def on_tool_error(self, error: BaseException, *, run_id: Any, **kwargs: Any) -> None:
+        name = self._tool_names.pop(str(run_id), "tool")
+        await adispatch_custom_event(
+            "agent_activity",
+            {"phase": "tool_end", "agent": self._agent_name, "tool": name},
+        )
 
 
 class NoParallelSpecialistCalls(AgentMiddleware):
@@ -434,27 +494,72 @@ def _make_confirmation_tool() -> BaseTool:
 
 
 async def _invoke_agent_graph(
-    agent_graph: CompiledStateGraph, messages: list[AnyMessage], pre_approved_actions: set[str]
-) -> str:
+    agent_graph: CompiledStateGraph,
+    agent_name: str,
+    messages: list[AnyMessage],
+    pre_approved_actions: set[str],
+) -> tuple[str, list[dict[str, Any]]]:
     """The in-process specialist path: a fresh, isolated `ainvoke()` per
     call — see this module's docstring for why the specialist graph must
     stay checkpointer-less (sub_agents.py) for interrupt()/resume to work
     correctly through this nested-call shape. `pre_approved_actions` feeds
     `GatedAgentState` (sub_agents.py) — the specialist's own gated tools
-    check it via InjectedState (see supervisor.py's module docstring)."""
+    check it via InjectedState (see supervisor.py's module docstring).
+
+    `agent_name` (PLAN.md Phase 19) tags a fresh `_AgentActivityRelay`
+    attached to THIS call's own config — the only way to observe this
+    specialist's inner tool calls (web_search, Gmail/Calendar MCP tools,
+    mac_tools, shell) from outside its own isolated graph, since this
+    `ainvoke()` has no checkpointer/callbacks of its own otherwise and its
+    message list is fully discarded once this function returns (same
+    reasoning as the A2UI-surface collection below, just for tool-activity
+    instead of rendered surfaces).
+
+    Phase 18 (PLAN.md): also returns any A2UI surfaces the specialist
+    rendered via its OWN render_ui call (a2ui.py's A2UI_SURFACE_KEY marker
+    on one of ITS internal ToolMessages). This matters specifically because
+    this graph is never embedded as an outer-graph node the way the
+    supervisor's own graph is — it's a throwaway isolated `ainvoke()` whose
+    full message list is discarded the moment this function returns, so
+    without collecting the marker here, a specialist's render_ui call would
+    still render live (adispatch_custom_event's contextvar propagation
+    doesn't care about checkpointing) but the surface would never reach the
+    OUTER graph's checkpointed state — meaning it would show up during the
+    live stream and then simply vanish on the next reload. `call_specialist`
+    below forwards whatever this returns onto the delegation ToolMessage's
+    own additional_kwargs, same key, so server.py's /history finds it there
+    exactly like it finds the supervisor's own direct render_ui calls."""
     result = await agent_graph.ainvoke(
-        {"messages": messages, "pre_approved_actions": pre_approved_actions}
+        {"messages": messages, "pre_approved_actions": pre_approved_actions},
+        config={"callbacks": [_AgentActivityRelay(agent_name)]},
     )
-    final = result["messages"][-1]
-    return final.content if isinstance(final.content, str) else str(final.content)
+    result_messages = result["messages"]
+    final = result_messages[-1]
+    content = final.content if isinstance(final.content, str) else str(final.content)
+    surfaces: list[dict[str, Any]] = []
+    for m in result_messages:
+        surfaces.extend(getattr(m, "additional_kwargs", {}).get(A2UI_SURFACE_KEY) or [])
+    return content, surfaces
 
 
 async def _invoke_research_agent_via_http(
     messages: list[AnyMessage], pre_approved_actions: set[str]
-) -> str:
+) -> tuple[str, list[dict[str, Any]]]:
     """`pre_approved_actions` accepted for a uniform call signature with
     `_invoke_agent_graph` (see `_make_specialist_tool`) but unused here —
     research_agent has no gated tools, GATED_ACTIONS owns none of them.
+
+    **Accepted gap, Phase 18 (PLAN.md): always returns an empty surfaces
+    list.** `fa_service.py`'s `/research/stream` endpoint only ever forwards
+    `type: "token"`/`"final"`/`"error"` payloads — it has no A2UI-aware
+    event at all, so a render_ui call made by research_agent WHILE running
+    under this HTTP path neither renders live (no custom-event relay for it,
+    unlike `research_fa_token`) nor persists (this function never sees the
+    FA's internal messages to extract a marker from). Not fixed here:
+    `RESEARCH_AGENT_VIA_HTTP` defaults to `False` and this whole path exists
+    for Phase 16 Part A.5's distributed-tracing spike, not normal use —
+    wiring a second custom-event type across the FA's SSE relay is real
+    scope, deferred unless the HTTP path becomes the default.
 
     Phase 16 Part A.5 (the mentor's distributed-tracing spike): replaces
     the in-process `research_agent` call with an HTTP call to
@@ -510,30 +615,33 @@ async def _invoke_research_agent_via_http(
                 elif event_type == "final":
                     final_messages_raw = payload.get("messages", [])
                 elif event_type == "error":
-                    return f"Research request failed: {payload.get('detail', 'unknown error')}"
+                    return f"Research request failed: {payload.get('detail', 'unknown error')}", []
     except httpx.HTTPError as exc:
         return (
             f"Research request failed: could not reach the research "
-            f"service ({type(exc).__name__})."
+            f"service ({type(exc).__name__}).",
+            [],
         )
 
     if final_messages_raw is None:
         return (
             "Research request did not complete (the research service "
-            "closed the connection without returning a result)."
+            "closed the connection without returning a result).",
+            [],
         )
 
     final_messages = convert_to_messages(final_messages_raw)
     if not final_messages:
-        return "Research request returned no result."
+        return "Research request returned no result.", []
     final = final_messages[-1]
-    return final.content if isinstance(final.content, str) else str(final.content)
+    content = final.content if isinstance(final.content, str) else str(final.content)
+    return content, []
 
 
 def _make_specialist_tool(
     tool_name: str,
     description: str,
-    invoke: Callable[[list[AnyMessage], set[str]], Awaitable[str]],
+    invoke: Callable[[list[AnyMessage], set[str]], Awaitable[tuple[str, list[dict[str, Any]]]]],
 ) -> BaseTool:
     """Build a tool that delegates to one specialist — the "agents as
     tools" replacement for the old `_make_handoff_tool`'s
@@ -553,15 +661,52 @@ def _make_specialist_tool(
     (`GatedAgentState.pre_approved_actions`), which is what lets its own
     gated tool skip a redundant second confirmation. `state` itself is
     NEVER passed to the specialist — only `seed` and `pre_approved`.
+
+    Returns a `Command`, not a plain string (Phase 18, PLAN.md) — `invoke`
+    now comes back with `(content, surfaces)`; any surfaces a delegated
+    specialist rendered via its OWN render_ui call get forwarded onto this
+    ToolMessage's `additional_kwargs[A2UI_SURFACE_KEY]`, the exact marker
+    server.py's /history already knows to read from render_ui's own direct
+    ToolMessages — see `_invoke_agent_graph`'s docstring for why this
+    forwarding step is necessary at all (the specialist's own message list
+    is otherwise discarded the moment `invoke` returns).
+
+    PLAN.md Phase 19: dispatches the OUTER "supervisor is calling
+    specialist X" boundary as an `agent_activity` custom event — same
+    event name/shape `_AgentActivityRelay` uses for a specialist's own
+    INNER tool calls (`agent: "supervisor"`, `tool: tool_name` here, vs.
+    `agent: tool_name` for that specialist's own leaf tools), so the
+    dashboard reads one uniform stream for both levels. Wrapped in
+    try/finally so a failed specialist call still emits its own "tool_end"
+    (the dashboard's status pill/graph must not get stuck "active" forever
+    on an error path).
     """
 
     @tool(tool_name, description=description)
     async def call_specialist(
-        request: str, state: Annotated[GraphState, InjectedState]
-    ) -> str:
+        request: str,
+        state: Annotated[GraphState, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> Command:
         seed = [*_context_prefix_messages(state), HumanMessage(content=request)]
         pre_approved = _pre_approved_actions_this_turn(state)
-        return await invoke(seed, pre_approved)
+        await adispatch_custom_event(
+            "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
+        )
+        try:
+            content, surfaces = await invoke(seed, pre_approved)
+        finally:
+            await adispatch_custom_event(
+                "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
+            )
+        kwargs = {A2UI_SURFACE_KEY: surfaces} if surfaces else {}
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(content=content, tool_call_id=tool_call_id, additional_kwargs=kwargs)
+                ]
+            }
+        )
 
     return call_specialist
 
@@ -605,24 +750,26 @@ def build_supervisor(
     research_invoke = (
         _invoke_research_agent_via_http
         if RESEARCH_AGENT_VIA_HTTP
-        else partial(_invoke_agent_graph, research_agent_graph)
+        else partial(_invoke_agent_graph, research_agent_graph, "research_agent")
     )
     tools = [
         _make_confirmation_tool(),
         build_render_ui_tool(),
         _make_specialist_tool(
-            "coding_agent", _CODING_TOOL_DESCRIPTION, partial(_invoke_agent_graph, coding_agent_graph)
+            "coding_agent",
+            _CODING_TOOL_DESCRIPTION,
+            partial(_invoke_agent_graph, coding_agent_graph, "coding_agent"),
         ),
         _make_specialist_tool("research_agent", _RESEARCH_TOOL_DESCRIPTION, research_invoke),
         _make_specialist_tool(
             "life_admin_agent",
             _LIFE_ADMIN_TOOL_DESCRIPTION,
-            partial(_invoke_agent_graph, life_admin_agent_graph),
+            partial(_invoke_agent_graph, life_admin_agent_graph, "life_admin_agent"),
         ),
         _make_specialist_tool(
             "mac_control_agent",
             _MAC_CONTROL_TOOL_DESCRIPTION,
-            partial(_invoke_agent_graph, mac_control_agent_graph),
+            partial(_invoke_agent_graph, mac_control_agent_graph, "mac_control_agent"),
         ),
     ]
     return create_agent(

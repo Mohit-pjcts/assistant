@@ -13,10 +13,11 @@
 // relocated/packaged .app bundle, which is an accepted limitation of the
 // chosen scope, not an oversight.
 
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
 const BACKEND_PORT: u16 = 8000;
@@ -132,6 +133,24 @@ fn spawn_voice_daemon() -> std::io::Result<Child> {
     Command::new(binary).current_dir(&root).spawn()
 }
 
+/// Block `setup()` (and therefore the main window's appearance — Tauri
+/// creates the configured window right after `setup()` returns) until the
+/// backend accepts a TCP connection, or `timeout` elapses. PLAN.md Phase 19:
+/// belt-and-suspenders for `api.ts`'s own `fetchWithRetry` — the frontend
+/// already retries past whatever this waits, so this doesn't need to be
+/// bulletproof, just enough to avoid the window flashing an empty chat
+/// during the ~1-2s uvicorn + langgraph import normally takes.
+fn wait_for_backend(port: u16, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!("[assistant] backend not ready after {timeout:?}, showing window anyway");
+}
+
 fn kill_managed_processes(app_handle: &tauri::AppHandle) {
     let Some(state) = app_handle.try_state::<ManagedProcesses>() else {
         return;
@@ -154,7 +173,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let backend = match spawn_backend() {
-                Ok(child) => Some(child),
+                Ok(child) => {
+                    wait_for_backend(BACKEND_PORT, Duration::from_secs(10));
+                    Some(child)
+                }
                 Err(err) => {
                     // Don't crash the app over a failed spawn — the
                     // dashboard's own panels already show a clear

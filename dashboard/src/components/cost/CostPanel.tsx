@@ -83,7 +83,11 @@ export function CostPanel() {
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
-          Real usage aggregates from LangSmith, not a local estimate.
+          LangSmith&apos;s own aggregate (its token counts × its maintained model price list) — not
+          a locally computed guess, but also not a literal Anthropic invoice pull. A window reading
+          $0 with 0 runs means LangSmith has recorded nothing in that window (e.g. its own
+          account-level rate/trace-quota limits silently pausing ingestion), not necessarily that
+          nothing ran (PLAN.md Phase 19).
         </p>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}

@@ -213,6 +213,60 @@ async def test_render_ui_tool_emits_an_a2ui_frame_and_a_persisted_text_summary()
         )
 
 
+async def test_render_ui_available_on_delegated_specialist_and_persists() -> None:
+    """Phase 18 (PLAN.md): render_ui is no longer supervisor-only —
+    research_agent and life_admin_agent carry it too. This is the real,
+    live verification that extension rested on (build_render_ui_tool's own
+    docstring cites this test, not just the mechanism reasoning): directs
+    the supervisor to delegate to research_agent, which itself calls
+    render_ui from INSIDE its own isolated ainvoke() — one level of nesting
+    deeper than research_fa_token's proof (STEPS.md 84/94). Must (1) still
+    surface live as an `a2ui` SSE frame through the OUTER graph's
+    astream_events(), proving adispatch_custom_event's contextvar
+    propagation survives a nested specialist ainvoke() with no explicit
+    config passed, and (2) survive into /history despite the specialist's
+    own message list otherwise being discarded the moment
+    _invoke_agent_graph returns (supervisor.py's call_specialist forwarding
+    onto its own ToolMessage's additional_kwargs, a2ui.py's
+    A2UI_SURFACE_KEY) — the actual point of this test, not just a repeat of
+    the supervisor-level one above."""
+    surface = {
+        "surfaceId": "delegated-surface-1",
+        "components": [
+            {"id": "root", "component": "Text", "text": "delegated a2ui test"},
+        ],
+    }
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": (
+                    "Delegate this exact instruction to research_agent, verbatim, and do "
+                    "not do a web search first: call the render_ui tool exactly once, "
+                    "passing exactly this JSON object as the `surface` argument, "
+                    f"unmodified: {json.dumps(surface)} Then reply with exactly: "
+                    "delegated ui rendered. Once research_agent returns, reply to me "
+                    "with exactly what it said, unchanged."
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        events = _parse_sse(response.text)
+
+        a2ui_events = [e for e in events if e["type"] == "a2ui"]
+        assert a2ui_events, f"expected at least one a2ui frame from the delegated call, got {events}"
+        assert a2ui_events[0]["surface"]["surfaceId"] == "delegated-surface-1"
+
+        assert events[-1]["type"] == "message"
+
+        history = client.get("/history")
+        messages = history.json()["messages"]
+        surfaces_found = [s for m in messages for s in (m.get("surfaces") or [])]
+        assert any(s.get("surfaceId") == "delegated-surface-1" for s in surfaces_found), (
+            f"expected the delegated surface to persist via /history, got {surfaces_found}"
+        )
+
+
 async def test_render_ui_rejects_an_invalid_surface_without_crashing_the_turn() -> None:
     """Errors are data, not exceptions (CLAUDE.md): an invalid surface must
     come back as a normal tool result the model can react to, never an

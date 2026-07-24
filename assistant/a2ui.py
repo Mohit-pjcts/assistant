@@ -9,15 +9,33 @@ A2UI v0.9 declarative component vocabulary (https://github.com/google/A2UI).
 forwards it to the dashboard for rendering via `adispatch_custom_event`
 (the same mechanism `supervisor.py`'s `research_agent_proxy` already uses to
 stream tokens across a process boundary — proven live to surface through
-`astream_events()`), and returns a short text summary the model keeps
-talking from. Every real side effect in this project (send email, calendar
-write, Mac control, memory write) still happens exclusively through the
-existing gated wrappers in `write_tools.py`/`mac_tools.py`/
-`memory_extraction.py`, each calling `interrupt()` itself and shown
-verbatim — none of that is touched or bypassed here. A future interactive
-extension (buttons/forms whose input feeds back to the agent) is still just
-an INPUT to the agent, resolved by the SAME unmodified gates; see PLAN.md's
-Phase 17 entry for the full reasoning, not repeated here.
+`astream_events()`), and returns a Command carrying a ToolMessage whose
+`.content` is a short text summary the model keeps talking from. Every real
+side effect in this project (send email, calendar write, Mac control,
+memory write) still happens exclusively through the existing gated
+wrappers in `write_tools.py`/`mac_tools.py`/`memory_extraction.py`, each
+calling `interrupt()` itself and shown verbatim — none of that is touched
+or bypassed here. The interactive extension below (buttons/forms whose
+input feeds back to the agent) is still just an INPUT to the agent,
+resolved by the SAME unmodified gates; see PLAN.md's Phase 17 entry for
+the full reasoning, not repeated here.
+
+**Persistence (Phase 18, PLAN.md).** Phase 17 made the live render
+ephemeral — a reload only ever saw `_summarize_surface`'s text. Phase 18
+additionally stashes the FULL validated surface in that same ToolMessage's
+`additional_kwargs[A2UI_SURFACE_KEY]` — a side channel the model itself
+never sees (only `.content` is sent back to the API, same reasoning as
+`supervisor.py`'s `_GATED_ACTION_APPROVED_KEY` marker), but which
+`server.py`'s `/history` reads back so a reload can re-render the same UI
+instead of only the text summary. The live SSE `adispatch_custom_event`
+path is unchanged and still the fast path during an active stream; this is
+purely an additional, independent way to retrieve the same tree later.
+
+**Scope (Phase 18, PLAN.md).** `render_ui` is no longer supervisor-only —
+`research_agent` and `life_admin_agent` also carry it (sub_agents.py),
+since they're the ones actually holding structured data worth rendering.
+See `build_render_ui_tool`'s own docstring below for the live verification
+this rested on before extending it.
 
 **Validation is defense-in-depth, not the security boundary above.**
 `validate_surface` rejects anything outside a small, explicitly enumerated
@@ -47,13 +65,24 @@ do about it still goes through the unmodified gated tools/interrupt()).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 from langchain_core.callbacks import adispatch_custom_event
-from langchain_core.tools import BaseTool, tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langgraph.types import Command
 
 MAX_COMPONENTS = 50
 MAX_SURFACE_CHARS = 20_000
+
+# additional_kwargs marker key on a ToolMessage, carrying a LIST of full
+# validated surfaces (not just _summarize_surface's text) — a plain list,
+# always, even where exactly one surface is involved, so render_ui's own
+# ToolMessage and supervisor.py's call_specialist forwarding (which may
+# collect several from one delegated specialist run) share one shape. See
+# this module's docstring, "Persistence (Phase 18)". server.py's /history
+# reads this directly.
+A2UI_SURFACE_KEY = "a2ui_surface"
 
 # Per-type field allowlist: {"required": {...}, "optional": {...}}. "id" and
 # "component" are implicitly allowed on every type. Any field not listed
@@ -224,9 +253,13 @@ def validate_surface(surface: Any) -> None:
 
 
 def _summarize_surface(surface: dict[str, Any]) -> str:
-    """The text that persists (History, reload, CLI/voice) when the live
-    render itself is ephemeral — see this module's docstring / PLAN.md's
-    Phase 17 entry for why v1 doesn't persist the tree itself."""
+    """The text the MODEL sees on its next turn (a ToolMessage's `.content`
+    — additional_kwargs, where the full tree also now rides per
+    A2UI_SURFACE_KEY below, is never sent back to the API). Keeping the
+    model's own view of what it just rendered short and deterministic
+    avoids re-feeding a large component tree into context on every
+    subsequent turn — see this module's docstring for the full split
+    between what the model sees and what a client can retrieve."""
     components = surface["components"]
     texts = [
         c["text"] for c in components if c.get("component") in ("Text", "Badge") and isinstance(c.get("text"), str)
@@ -240,14 +273,44 @@ def _summarize_surface(surface: dict[str, Any]) -> str:
 
 
 def build_render_ui_tool() -> BaseTool:
-    """The supervisor's UI-rendering tool. v1 is supervisor-only (not on any
-    specialist) — see PLAN.md's Phase 17 architecture note on why: the
-    custom-event channel this relies on is proven at the supervisor's own
-    graph level (Step 0 de-risk script), not yet re-verified across a nested
-    specialist subgraph boundary."""
+    """Builds a fresh `render_ui` tool instance — called once per agent that
+    carries it, same as every other per-agent tool factory in this project.
+
+    **Phase 17 (v1): supervisor-only.** The custom-event channel this tool
+    depends on (`adispatch_custom_event`) was only proven, live, at the
+    supervisor's own graph level.
+
+    **Phase 18: extended to `research_agent` and `life_admin_agent`**
+    (PLAN.md) — the two specialists that actually hold structured data worth
+    rendering (search results/comparisons; Gmail/Calendar reads), unlike the
+    supervisor, which only ever sees a specialist's own prose summary and
+    would have to reconstruct a card from it. Verified live before wiring
+    in for real (not assumed safe just because the code compiles): under
+    the agents-as-tools architecture (supervisor.py's module docstring,
+    STEPS.md 94) a specialist is invoked via a bare `await
+    other_graph.ainvoke(...)` from inside the supervisor's OWN tool
+    function — one level of nesting deeper than `research_fa_token`'s
+    proof (STEPS.md 84), which dispatches directly from a tool function,
+    not from a further-nested graph's own ToolNode. `adispatch_custom_event`
+    resolves the ambient run via a contextvar-propagated `RunnableConfig`
+    (`ensure_config()`), which LangChain's own `Runnable.ainvoke()` machinery
+    re-threads at every nested call boundary regardless of whether the
+    caller passes an explicit `config` — the same mechanism that already
+    lets `on_chat_model_stream` events from a specialist's OWN model calls
+    surface through the OUTER graph's `astream_events()` today (server.py's
+    `_stream_turn` doesn't filter by which node/run a token came from).
+    Confirmed with a real end-to-end test directing the supervisor to
+    delegate to research_agent, which then calls render_ui itself
+    (tests/test_a2ui.py) — not just reasoned from the mechanism. NOT
+    extended to `coding_agent` (output is code/files, not naturally
+    card-shaped) or `mac_control_agent` (mostly action confirmations) —
+    a deliberate scope decision, revisit if that stops holding."""
 
     @tool
-    async def render_ui(surface: dict[str, Any]) -> str:
+    async def render_ui(
+        surface: dict[str, Any],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ) -> Command:
         """Render a rich UI surface in the dashboard alongside your reply,
         for structured, comparative, or list-shaped content that would be
         awkward as prose (e.g. a set of calendar events, a comparison, a
@@ -303,21 +366,52 @@ def build_render_ui_tool() -> BaseTool:
         When the user fills this in and clicks RSVP, you will receive a new
         ordinary user message reporting the "rsvp" action and the value
         they typed under "/name" — respond to it exactly like any other
-        request (including, if it needs one, delegating to a specialist
-        whose own confirmation gate still applies as usual).
+        request (including, if it needs one, using whatever tool actually
+        performs the action, whose own confirmation gate still applies as
+        usual).
 
         This is otherwise DISPLAY ONLY. No component can perform an action
         by itself or substitute for a confirmation gate — a Button only
         ever reports data back to you as a new turn; if THAT turn needs a
-        side-effectful action, delegate to the normal specialist tool as
-        usual, and its own interrupt() gate still applies exactly as if
-        render_ui had never been called.
+        side-effectful action, use the normal gated tool for it as usual,
+        and its own interrupt() gate still applies exactly as if render_ui
+        had never been called.
         """
         try:
             validate_surface(surface)
         except ValueError as exc:
-            return f"render_ui rejected this surface: {exc}"
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=f"render_ui rejected this surface: {exc}",
+                            tool_call_id=tool_call_id,
+                        )
+                    ]
+                }
+            )
         await adispatch_custom_event("a2ui_surface", surface)
-        return _summarize_surface(surface)
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=_summarize_surface(surface),
+                        tool_call_id=tool_call_id,
+                        # The FULL validated tree, not just the text
+                        # summary above — additional_kwargs never reaches
+                        # the model (only .content does), so this rides
+                        # alongside purely for retrieval. Always a LIST
+                        # (of one, here) for a uniform shape with
+                        # supervisor.py's call_specialist, which forwards
+                        # possibly-several surfaces a delegated specialist
+                        # rendered during its own isolated run. server.py's
+                        # /history reads it back to let a reload re-render
+                        # the same surface(s) instead of only ever showing
+                        # the text summary (Phase 18, PLAN.md).
+                        additional_kwargs={A2UI_SURFACE_KEY: [surface]},
+                    )
+                ]
+            }
+        )
 
     return render_ui

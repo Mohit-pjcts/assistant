@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { A2UIRenderer } from "@/components/chat/A2UIRenderer";
 import { fetchHistory, type HistoryMessage } from "@/lib/api";
 
 // PLAN.md Phase 9 step 4 — the full-fidelity counterpart to the chat panel.
@@ -84,6 +85,16 @@ export function HistoryPanel() {
               <p className="whitespace-pre-wrap break-words">
                 {message.content || <span className="italic text-muted-foreground">(empty)</span>}
               </p>
+              {/* Phase 18 (PLAN.md): whatever A2UI surface(s) this
+                  ToolMessage persisted — re-render inline, right on this
+                  row, matching this panel's own full-fidelity philosophy.
+                  No onAction: a past turn's Button submitting again would
+                  re-fire a new turn, which isn't what "viewing history"
+                  means here — same reasoning A2UIRenderer's own docstring
+                  gives for omitting it. */}
+              {message.surfaces?.map((surface, surfaceIndex) => (
+                <A2UIRenderer key={surfaceIndex} surface={surface} />
+              ))}
             </div>
           ))}
         </div>

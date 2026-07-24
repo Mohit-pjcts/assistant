@@ -9,7 +9,14 @@ import asyncio
 from types import SimpleNamespace
 
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
-from assistant.sub_agents import MAC_CONTROL_SYSTEM_PROMPT, NoParallelMacWrites
+from assistant.sub_agents import (
+    LIFE_ADMIN_SYSTEM_PROMPT,
+    MAC_CONTROL_SYSTEM_PROMPT,
+    RESEARCH_SYSTEM_PROMPT,
+    NoParallelMacWrites,
+    build_life_admin_agent,
+    build_research_agent,
+)
 
 
 def test_no_parallel_mac_writes_forces_parallel_tool_calls_false() -> None:
@@ -79,6 +86,40 @@ def test_mac_control_system_prompt_tells_model_to_call_gated_tools_directly() ->
     assert "never ask the user to confirm in chat before calling it" in prompt
 
 
+def test_research_agent_carries_render_ui() -> None:
+    """Phase 18 (PLAN.md): render_ui is no longer supervisor-only —
+    research_agent is one of the two specialists it was extended to. Cheap,
+    offline structural check that the tool is actually bound onto the
+    compiled graph's ToolNode, mirroring
+    test_mac_control_tools_include_calendar_and_brave above; the real,
+    costed, live verification that the extension actually WORKS across a
+    nested specialist boundary is
+    tests/test_a2ui.py::test_render_ui_available_on_delegated_specialist_and_persists,
+    not repeated here."""
+    graph = build_research_agent()
+    tool_names = set(graph.get_graph().nodes["tools"].data.tools_by_name)
+    assert {"tavily_search", "render_ui"} <= tool_names
+
+
+def test_life_admin_agent_carries_render_ui() -> None:
+    """Same Phase 18 extension, the other specialist it was added to."""
+    graph = build_life_admin_agent([])
+    tool_names = set(graph.get_graph().nodes["tools"].data.tools_by_name)
+    assert "render_ui" in tool_names
+
+
+def test_research_system_prompt_mentions_render_ui() -> None:
+    """Phase 3's "whatever owns a tool must be DESCRIBED in its agent's
+    system prompt" lesson, same as test_mac_control_system_prompt_mentions_
+    new_capabilities above — a tool the model doesn't know it has is a tool
+    it will rarely think to use."""
+    assert "render_ui" in RESEARCH_SYSTEM_PROMPT
+
+
+def test_life_admin_system_prompt_mentions_render_ui() -> None:
+    assert "render_ui" in LIFE_ADMIN_SYSTEM_PROMPT
+
+
 if __name__ == "__main__":
     test_no_parallel_mac_writes_forces_parallel_tool_calls_false()
     print("OK: test_no_parallel_mac_writes_forces_parallel_tool_calls_false")
@@ -90,4 +131,12 @@ if __name__ == "__main__":
     print("OK: test_mac_control_system_prompt_mentions_new_capabilities")
     test_mac_control_system_prompt_tells_model_to_call_gated_tools_directly()
     print("OK: test_mac_control_system_prompt_tells_model_to_call_gated_tools_directly")
-    print("\n5 tests passed")
+    test_research_agent_carries_render_ui()
+    print("OK: test_research_agent_carries_render_ui")
+    test_life_admin_agent_carries_render_ui()
+    print("OK: test_life_admin_agent_carries_render_ui")
+    test_research_system_prompt_mentions_render_ui()
+    print("OK: test_research_system_prompt_mentions_render_ui")
+    test_life_admin_system_prompt_mentions_render_ui()
+    print("OK: test_life_admin_system_prompt_mentions_render_ui")
+    print("\n9 tests passed")

@@ -23,6 +23,15 @@ export interface HistoryMessage {
   // graph, which node produced it ("supervisor" / "coding_agent" / etc.);
   // null/absent otherwise.
   name?: string | null;
+  // Phase 18 (PLAN.md): the full A2UI surface(s) persisted on this
+  // message — either render_ui's own direct ToolMessage, or a
+  // specialist-delegation ToolMessage forwarding what a sub-agent rendered
+  // during its own isolated run (server.py's /history, assistant/a2ui.py's
+  // A2UI_SURFACE_KEY). Empty/absent on every message that carries none.
+  // HistoryPanel renders these inline on that row; ChatPanel groups them
+  // onto the turn's closing assistant bubble to match what a live turn
+  // looks like (see ChatPanel's own history-loading code).
+  surfaces?: A2UISurface[];
 }
 
 // The raw payload a gated tool constructed via LangGraph's interrupt() —
@@ -42,10 +51,11 @@ export type ChatTurnResult =
 // A validated A2UI component-tree surface (Phase 17, PLAN.md) — forwarded
 // verbatim from assistant/a2ui.py's render_ui tool the same way
 // InterruptPayload is: an open record per component, since different
-// component types carry different fields. Ephemeral by design (this
-// session's Part A decision): rendered live for the turn that produced it,
-// never fetched back from /history — render_ui's own text summary is what
-// persists there instead.
+// component types carry different fields. Rendered live via the SSE `a2ui`
+// frame for the turn that produced it; as of Phase 18 (PLAN.md) the same
+// tree also comes back from /history (HistoryMessage.surface above), so a
+// reload can re-render it instead of only ever showing render_ui's text
+// summary.
 export interface A2UIComponent extends Record<string, unknown> {
   id?: string;
   component?: string;
@@ -54,6 +64,42 @@ export interface A2UIComponent extends Record<string, unknown> {
 export interface A2UISurface {
   surfaceId: string;
   components: A2UIComponent[];
+}
+
+// PLAN.md Phase 19: server.py's `activity` SSE frame — supervisor.py's
+// _AgentActivityRelay (a specialist's own inner tool calls) and
+// call_specialist (the supervisor->specialist boundary itself) both
+// dispatch this via the same adispatch_custom_event mechanism a2ui/
+// research_fa_token already use. Ephemeral, non-terminal, never persisted —
+// purely a live "what's running right now" signal for the dashboard's
+// right-rail activity graph, tool-call timeline, and header status pill.
+export interface AgentActivityEvent {
+  phase: "tool_start" | "tool_end";
+  agent: string;
+  tool: string;
+}
+
+// Startup-time GETs (fetchThreads/fetchHistory/fetchCost) race a real bug
+// (PLAN.md Phase 19): the Tauri shell shows the window before uvicorn
+// (assistant/server.py) is actually listening, so the very first mount-time
+// fetch can hit ECONNREFUSED before the backend finishes booting. A THROWN
+// network error (not a resolved non-OK response — that means the backend IS
+// up and answered, e.g. a real 503/404) is retried on a short fixed interval
+// until the backend comes up or a generous cap elapses; a non-OK response is
+// returned immediately; it's the caller's real answer, not a startup race.
+async function fetchWithRetry(
+  input: string,
+  init?: RequestInit,
+  { retries = 30, delayMs = 500 }: { retries?: number; delayMs?: number } = {},
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(input, init);
+    } catch (err) {
+      if (attempt >= retries) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
 }
 
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
@@ -86,6 +132,7 @@ async function streamSSE(
   body: unknown,
   onToken: (text: string) => void,
   onA2UI: (surface: A2UISurface) => void = () => {},
+  onActivity: (event: AgentActivityEvent) => void = () => {},
 ): Promise<ChatTurnResult> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
@@ -116,11 +163,14 @@ async function streamSSE(
         | { type: "a2ui"; surface: A2UISurface }
         | { type: "message"; content: string }
         | { type: "interrupt"; payload: InterruptPayload }
+        | ({ type: "activity" } & AgentActivityEvent)
         | { type: "error"; detail: string };
       if (event.type === "token") {
         onToken(event.text);
       } else if (event.type === "a2ui") {
         onA2UI(event.surface);
+      } else if (event.type === "activity") {
+        onActivity(event);
       } else if (event.type === "error") {
         throw new Error(`${path} stream error: ${event.detail}`);
       } else {
@@ -143,16 +193,18 @@ export async function sendChat(
   message: string,
   onToken: (text: string) => void = () => {},
   onA2UI: (surface: A2UISurface) => void = () => {},
+  onActivity: (event: AgentActivityEvent) => void = () => {},
 ): Promise<ChatTurnResult> {
-  return streamSSE("/chat", { message }, onToken, onA2UI);
+  return streamSSE("/chat", { message }, onToken, onA2UI, onActivity);
 }
 
 export async function resumeChat(
   approved: boolean,
   onToken: (text: string) => void = () => {},
   onA2UI: (surface: A2UISurface) => void = () => {},
+  onActivity: (event: AgentActivityEvent) => void = () => {},
 ): Promise<ChatTurnResult> {
-  return streamSSE("/resume", { approved }, onToken, onA2UI);
+  return streamSSE("/resume", { approved }, onToken, onA2UI, onActivity);
 }
 
 // Phase 17 Part B: what an A2UIRenderer's Button reports (POST /a2ui/action)
@@ -166,8 +218,15 @@ export async function sendA2UIAction(
   context: Record<string, unknown>,
   onToken: (text: string) => void = () => {},
   onA2UI: (surface: A2UISurface) => void = () => {},
+  onActivity: (event: AgentActivityEvent) => void = () => {},
 ): Promise<ChatTurnResult> {
-  return streamSSE("/a2ui/action", { surface_id: surfaceId, name, context }, onToken, onA2UI);
+  return streamSSE(
+    "/a2ui/action",
+    { surface_id: surfaceId, name, context },
+    onToken,
+    onA2UI,
+    onActivity,
+  );
 }
 
 // Cancels whatever turn is currently streaming for the active thread, if
@@ -178,7 +237,7 @@ export async function stopChat(): Promise<{ stopped: boolean }> {
 }
 
 export async function fetchHistory(): Promise<HistoryMessage[]> {
-  const response = await fetch(`${API_BASE_URL}/history`);
+  const response = await fetchWithRetry(`${API_BASE_URL}/history`);
   if (!response.ok) {
     throw new Error(`/history failed (${response.status}): ${await response.text()}`);
   }
@@ -205,7 +264,7 @@ export async function fetchThreads(): Promise<{
   threads: ThreadSummary[];
   activeThreadId: string;
 }> {
-  const response = await fetch(`${API_BASE_URL}/threads`);
+  const response = await fetchWithRetry(`${API_BASE_URL}/threads`);
   if (!response.ok) {
     throw new Error(`/threads failed (${response.status}): ${await response.text()}`);
   }
@@ -317,7 +376,7 @@ export interface CostStats {
 export class LangSmithNotConfiguredError extends Error {}
 
 export async function fetchCost(): Promise<CostStats> {
-  const response = await fetch(`${API_BASE_URL}/cost`);
+  const response = await fetchWithRetry(`${API_BASE_URL}/cost`);
   if (response.status === 503) {
     throw new LangSmithNotConfiguredError(await response.text());
   }
