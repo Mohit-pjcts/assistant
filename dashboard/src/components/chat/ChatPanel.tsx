@@ -1,4 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { Mic, Square } from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   ChatMessageList,
   ChatMessage,
@@ -20,6 +23,7 @@ import {
   sendA2UIAction,
   sendChat,
   stopChat,
+  transcribeVoice,
   uploadFile,
   type A2UISurface,
   type AgentActivityEvent,
@@ -145,6 +149,17 @@ export function ChatPanel({
   // other piece of ChatPanel's logic (streaming, interrupt, A2UI, the
   // external-update poll, stop handling) is completely unmodified.
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  // iPhone-access feature: browser-side voice input, only ever shown
+  // outside the Tauri app (the Mac already has its own always-on
+  // hotkey-driven voice daemon — a second, different voice affordance in
+  // the same desktop window would just be confusing). "recording" and
+  // "transcribing" are mutually exclusive UI states on the same mic
+  // button: tap to start, tap again to stop-and-upload, button stays
+  // disabled while the /voice/transcribe round trip is in flight.
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingTextRef = useRef("");
   // Surfaces rendered so far by the turn CURRENTLY in flight. Kept live
@@ -345,6 +360,50 @@ export function ChatPanel({
     }
   }
 
+  // iPhone-access feature. Tap-to-start/tap-to-stop rather than
+  // press-and-hold — simpler and more reliable across mobile Safari's
+  // touch-event handling than trying to distinguish a hold from a tap.
+  // On stop, `mediaRecorder.onstop` (set in startRecording) does the
+  // upload+transcribe+send; this function's own job is just starting or
+  // stopping the recorder.
+  async function toggleRecording() {
+    if (recording) {
+      mediaRecorderRef.current?.stop();
+      setRecording(false);
+      return;
+    }
+    if (busy || pendingInterrupt || transcribing) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordedChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        // Stop the mic indicator/permission light immediately — no reason
+        // to hold the stream open through the upload+transcribe round trip.
+        for (const track of stream.getTracks()) track.stop();
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType });
+        if (blob.size === 0) return;
+        setTranscribing(true);
+        transcribeVoice(blob)
+          .then((text) => {
+            if (text.trim()) void handleSend(text);
+          })
+          .catch((err: unknown) => {
+            setError(err instanceof Error ? err.message : String(err));
+          })
+          .finally(() => setTranscribing(false));
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch (err) {
+      setError(`Microphone access failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   async function handleResume(approved: boolean) {
     setBusy(true);
     setPendingInterrupt(null);
@@ -529,17 +588,36 @@ export function ChatPanel({
           ) : undefined
         }
         footerActions={
-          <FileInput
-            label="Attach files"
-            isLabelHidden
-            isMultiple
-            value={null}
-            onChange={handleFilesSelected}
-            accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json"
-            maxSize={20_000_000}
-            maxFiles={5}
-            isDisabled={busy || pendingInterrupt !== null}
-          />
+          <Fragment>
+            <FileInput
+              label="Attach files"
+              isLabelHidden
+              isMultiple
+              value={null}
+              onChange={handleFilesSelected}
+              accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json"
+              maxSize={20_000_000}
+              maxFiles={5}
+              isDisabled={busy || pendingInterrupt !== null}
+            />
+            {/* iPhone-access feature: never shown inside the Tauri app —
+                the Mac already has its own hotkey-driven voice daemon. */}
+            {!isTauri() && (
+              <button
+                type="button"
+                aria-label={recording ? "Stop recording" : "Record a voice message"}
+                onClick={() => void toggleRecording()}
+                disabled={transcribing || busy || pendingInterrupt !== null}
+                className={cn(
+                  "flex size-8 items-center justify-center rounded-full text-muted-foreground disabled:opacity-50",
+                  recording && "animate-pulse",
+                )}
+                style={recording ? { color: "var(--color-error)" } : undefined}
+              >
+                {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+              </button>
+            )}
+          </Fragment>
         }
         sendButton={
           // Default ChatSendButton only enables on non-empty TEXT (canSend =

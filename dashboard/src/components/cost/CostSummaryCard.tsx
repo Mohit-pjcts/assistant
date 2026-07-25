@@ -10,9 +10,10 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
 
 // Compact right-rail counterpart to the full Cost tab (CostPanel.tsx) —
 // just the 7-day window, matching the redesign's rail widget. Reuses the
-// same /cost endpoint and LangSmith-estimate framing; see CostPanel.tsx
-// for the full three-window view and the complete disclaimer about what
-// this dollar figure actually represents (PLAN.md Phase 19).
+// same /cost endpoint and estimate framing (Langfuse's own token counts ×
+// its price list, as of the 2026-07-25 LangSmith->Langfuse swap); see
+// CostPanel.tsx for the full three-window view and the complete disclaimer
+// about what this dollar figure actually represents (PLAN.md Phase 19).
 export function CostSummaryCard() {
   const [stats, setStats] = useState<CostStats | null>(null);
   const [unavailable, setUnavailable] = useState(false);

@@ -51,11 +51,13 @@ import asyncio
 import base64
 import json
 import os
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -69,9 +71,10 @@ load_dotenv()
 from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 from langchain_core.messages import BaseMessage  # noqa: E402
+from langfuse import Langfuse  # noqa: E402
 from langgraph.types import Command  # noqa: E402
-from langsmith import Client as LangSmithClient  # noqa: E402
 from PIL import Image  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
@@ -97,6 +100,15 @@ observability.configure_client("dashboard")
 # same "env before code runs" ordering as tools.py's TAVILY_API_KEY.
 CONVERSATION_DB_PATH = os.environ.get("ASSISTANT_CONVERSATION_DB_PATH", "conversation_memory.sqlite")
 
+# iPhone-access feature: serving the dashboard's OWN build as static files
+# from this same server (see the mount at the bottom of this file) is what
+# lets a phone browser reach it same-origin — no CORS entries needed for
+# it, unlike the Tauri app's cross-origin dev/webview requests above.
+# Relative to cwd, same convention as CONVERSATION_DB_PATH — both Tauri's
+# spawn_backend (current_dir=project root) and a by-hand launch from the
+# project root satisfy that.
+DASHBOARD_DIST_PATH = Path("dashboard/dist")
+
 # Same redirect story for the long-term facts DB — monkeypatches
 # memory_store.DEFAULT_DB_PATH exactly the way memory_store's own tests
 # already do (its docstring: a parameter default would bind too early to
@@ -112,47 +124,76 @@ if "ASSISTANT_THREADS_DB_PATH" in os.environ:
 if "ASSISTANT_BOARD_DB_PATH" in os.environ:
     board_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_BOARD_DB_PATH"]
 
-# Matches CLAUDE.md's Tech stack section (LANGCHAIN_PROJECT=personal-assistant),
-# read from the env rather than hardcoded so a differently-configured
-# deployment still points at the right project.
-LANGSMITH_PROJECT = os.environ.get("LANGCHAIN_PROJECT", "personal-assistant")
-
-# Verified live against the real project before choosing this shape
-# (STEPS.md 60): `Client.get_run_stats()` is a real server-side aggregation
-# endpoint — 0.7s for 1358 runs, vs. 30+s to page through and sum
-# `list_runs()` client-side, and that gap only grows as the thread's
-# history does. `is_root=True` matches how the History/chat panels already
-# think about "one turn" — LangSmith rolls a trace's full token/cost total
-# up onto its root run, confirmed by cross-checking the manually-summed
-# total against get_run_stats's own total for the same window (identical
-# to the cent).
 _COST_WINDOWS: dict[str, timedelta | None] = {
     "today": timedelta(hours=24),
     "week": timedelta(days=7),
     "all_time": None,
 }
 
+# "all_time" needs a concrete lower bound — Langfuse's metrics API requires
+# fromTimestamp, unlike LangSmith's get_run_stats(start_time=None). Anchored
+# well before this project's Langfuse integration existed at all (Phase 16,
+# 2026-07-16), so it's guaranteed to cover every real trace regardless of
+# exactly when the account/project actually started.
+_ALL_TIME_START = datetime(2020, 1, 1, tzinfo=UTC)
 
-def _get_run_stats_sync(client: LangSmithClient, start_time: str | None) -> dict[str, Any]:
-    """Blocking call (langsmith's Client is sync-only) — always run via
-    asyncio.to_thread, never awaited directly, or it stalls every other
-    concurrent request on this server for the ~1s this takes."""
-    return client.get_run_stats(
-        project_names=[LANGSMITH_PROJECT],
-        is_root=True,
-        start_time=start_time,
-    )
+# Swapped from LangSmith to Langfuse (2026-07-25) — see /cost's own
+# docstring for why. Queries the "observations" view (each observation is
+# one model call), v2's replacement for v1's now-deprecated "traces" view —
+# confirmed live that v2 rejects view="traces" outright
+# (invalid_value: must be one of observations/scores-numeric/
+# scores-categorical/scores-boolean). uniq(traceId) recovers the same
+# "one turn" count v1's trace-level `count` measure gave: cross-checked
+# live against the real project, both returned the identical number (611)
+# for the same 30-day window, as did sum(totalCost)/sum(totalTokens)
+# against v1's trace-level totalCost/totalTokens (also identical to the
+# fraction-of-a-cent) — confirms observation-level sums already equal the
+# trace-level rollup, so there's no double-counting from nested
+# spans/generations within one turn.
+_COST_METRICS_QUERY = [
+    {"measure": "traceId", "aggregation": "uniq"},
+    {"measure": "inputTokens", "aggregation": "sum"},
+    {"measure": "outputTokens", "aggregation": "sum"},
+    {"measure": "totalTokens", "aggregation": "sum"},
+    {"measure": "inputCost", "aggregation": "sum"},
+    {"measure": "outputCost", "aggregation": "sum"},
+    {"measure": "totalCost", "aggregation": "sum"},
+]
 
 
-def _summarize_run_stats(stats: dict[str, Any]) -> dict[str, Any]:
+def _query_langfuse_cost_sync(client: Langfuse, start: datetime, end: datetime) -> dict[str, Any]:
+    """Blocking call (Langfuse's `api.metrics_v_2.metrics()` makes a
+    synchronous HTTP request) — always run via asyncio.to_thread, same
+    caution the LangSmith call this replaces used to need, or it stalls
+    every other concurrent request on this server for however long the
+    three windows' calls take.
+
+    A zero-data window still returns one row, but a sum measure with no
+    matching data comes back `None` (not `0`) — live-confirmed against a
+    deliberately empty 1-minute window — so `_summarize_langfuse_row` below
+    coalesces explicitly rather than relying on `dict.get`'s default."""
+    query = {
+        "view": "observations",
+        "metrics": _COST_METRICS_QUERY,
+        "fromTimestamp": start.isoformat(),
+        "toTimestamp": end.isoformat(),
+    }
+    rows = client.api.metrics_v_2.metrics(query=json.dumps(query)).data
+    return rows[0] if rows else {}
+
+
+def _summarize_langfuse_row(row: dict[str, Any]) -> dict[str, Any]:
+    def _num(key: str) -> float:
+        return row.get(key) or 0
+
     return {
-        "run_count": stats.get("run_count", 0),
-        "total_tokens": stats.get("total_tokens", 0),
-        "prompt_tokens": stats.get("prompt_tokens", 0),
-        "completion_tokens": stats.get("completion_tokens", 0),
-        "total_cost": stats.get("total_cost", 0.0),
-        "prompt_cost": stats.get("prompt_cost", 0.0),
-        "completion_cost": stats.get("completion_cost", 0.0),
+        "run_count": int(_num("uniq_traceId")),
+        "total_tokens": int(_num("sum_totalTokens")),
+        "prompt_tokens": int(_num("sum_inputTokens")),
+        "completion_tokens": int(_num("sum_outputTokens")),
+        "total_cost": float(_num("sum_totalCost")),
+        "prompt_cost": float(_num("sum_inputCost")),
+        "completion_cost": float(_num("sum_outputCost")),
     }
 
 
@@ -455,6 +496,13 @@ ALLOWED_DOCUMENT_EXT = {
 # chat use — CLAUDE.md's standing cost-consciousness rule.
 IMAGE_MAX_LONG_EDGE = 1568
 
+# iPhone-access feature: a browser-recorded utterance (webm/opus or mp4/aac,
+# whatever the client's MediaRecorder produces) shouldn't run more than a
+# couple minutes for a single chat turn — generous headroom over that, not
+# tuned tight, since unlike images there's no per-byte cost signal to guard
+# against (STT cost is local/free, per voice_io.py's own module docstring).
+MAX_VOICE_UPLOAD_BYTES = 25_000_000
+
 
 def _sanitize_upload_filename(filename: str) -> str:
     """Server-generated-safe stem + real extension — never the raw client
@@ -598,19 +646,6 @@ async def lifespan(app: FastAPI):
         mcp_tools = await load_mcp_tools()
     except Exception:  # e.g. GMAIL_MCP_SERVER_PATH unset, server not built
         mcp_tools = []
-
-    try:
-        # Constructed once for the process lifetime, same as the graph
-        # below — NOT per-request. Wrapped defensively (unlike the graph,
-        # which is load-bearing for every other endpoint): a missing
-        # LANGSMITH_API_KEY or misconfigured account must not take down
-        # chat/history/memory, which don't need LangSmith at all. /cost
-        # checks for None and reports a clear "not configured" error
-        # instead of the whole server failing to start.
-        langsmith_client: LangSmithClient | None = LangSmithClient()
-    except Exception:
-        langsmith_client = None
-    app.state.langsmith_client = langsmith_client
 
     async with get_checkpointer(CONVERSATION_DB_PATH) as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
@@ -757,6 +792,68 @@ async def upload_file(file: UploadFile = File(...)) -> dict[str, Any]:
         "size": len(raw),
         "kind": "image" if is_image else "document",
     }
+
+
+@app.post("/voice/transcribe")
+async def voice_transcribe(file: UploadFile = File(...)) -> dict[str, str]:
+    """iPhone-access feature: the phone's browser records via the Web
+    Audio/MediaRecorder API (whatever format Safari produces — webm/opus
+    or mp4/aac) and uploads the blob here. Reuses the exact same
+    mlx-whisper model the Mac's own voice daemon uses (voice_io.py's
+    `transcribe_file`, a sibling of `transcribe()` that accepts a file path
+    instead of an already-decoded buffer) — not a second STT pipeline, one
+    model reached two ways. The transcript is returned as plain text; the
+    client sends it through the normal /chat path exactly like a typed
+    message, so nothing downstream of this endpoint needs to know a
+    request came from voice.
+
+    `voice_io` is imported LAZILY here, not at module top level — it pulls
+    in mlx_whisper/sounddevice (real, already-proven-installed
+    dependencies per voice_daemon.py, but a genuinely heavier import),
+    and the common case (typing, not talking) shouldn't pay that startup
+    cost on every server boot for a feature it never uses.
+
+    `ffmpeg` on PATH is a hard requirement (voice_io.transcribe_file's own
+    docstring) — surfaced here as a clear 502 rather than a bare stack
+    trace, since "ffmpeg missing" is a real, expected first-run gap for
+    anyone following the iPhone-access setup steps out of order."""
+    from assistant.voice_io import transcribe_file
+
+    if not file.content_type or not file.content_type.startswith("audio/"):
+        raise HTTPException(
+            status_code=415, detail=f"expected an audio upload, got '{file.content_type}'"
+        )
+
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(1_048_576):
+        total += len(chunk)
+        if total > MAX_VOICE_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413, detail=f"recording exceeds {MAX_VOICE_UPLOAD_BYTES} byte limit"
+            )
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if not raw:
+        return {"text": ""}
+
+    # NamedTemporaryFile, not workspace/ — this is ephemeral audio for STT
+    # only, never content the agent or a file tool should see, deleted
+    # unconditionally once transcription finishes (or fails).
+    suffix = "." + file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else ".webm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+    try:
+        text = await asyncio.to_thread(transcribe_file, tmp_path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"transcription failed ({type(exc).__name__}: {exc})"
+        ) from exc
+    finally:
+        os.unlink(tmp_path)
+
+    return {"text": text}
 
 
 @app.post("/resume")
@@ -1057,43 +1154,71 @@ async def delete_board_task(task_id: str) -> dict[str, Any]:
 
 @app.get("/cost")
 async def cost() -> dict[str, Any]:
-    """Token/cost tracking (PLAN.md Phase 9 step 6) — real LangSmith
-    aggregates, not computed from local pricing tables. Three windows,
-    queried concurrently (each is an independent ~1s blocking call).
+    """Token/cost tracking (PLAN.md Phase 9 step 6). Source swapped from
+    LangSmith to Langfuse (2026-07-25): LangSmith's account-level monthly
+    trace-ingestion quota silently stopped accepting new traces (PLAN.md
+    Phase 19's finding, live-confirmed via a real 429 "Monthly unique
+    traces usage limit exceeded"), and stayed exhausted for over a week
+    with nothing fixable on this side — the gap was entirely upstream in
+    what LangSmith accepted, not a bug in the aggregation call. Langfuse
+    (Phase 16) is a completely separate ingestion pipeline that was already
+    tracing every real call correctly the whole time (the v2->v3 migration's
+    own fix for a token/cost bug), so it was never affected.
 
-    The returned `total_cost` is LangSmith's OWN estimate (its recorded
-    token counts × its maintained per-model price list) — not a pull from
-    Anthropic's real invoice. Live-diagnosed (PLAN.md Phase 19, 2026-07-24):
-    a window can legitimately read all-zero not because nothing ran, but
-    because LangSmith's account-level ingestion quota was exceeded
-    ("Monthly unique traces usage limit exceeded", a real 429 hit live
-    against this project's own account) — new traces stop landing entirely
-    until the plan is upgraded or the quota resets, while `get_run_stats`
-    itself keeps working correctly and reporting exactly what LangSmith
-    actually has. This function has no bug to fix for that case: it already
-    reflects LangSmith's true stored state; the gap is upstream, in what
-    LangSmith accepted."""
-    client = app.state.langsmith_client
+    Considered Anthropic's own Usage & Cost Admin API instead (real USD,
+    not an estimate) — the more authoritative source in principle — but it
+    requires the Console account to first be converted from an individual
+    account into an Organization (Admin API keys don't exist for individual
+    accounts; live-confirmed the documented Console path 401s/doesn't exist
+    otherwise), a real account-structure change well beyond the scope of
+    unblocking this panel. Left as a possible future upgrade.
+
+    `total_cost`/`prompt_cost`/`completion_cost` remain an ESTIMATE —
+    Langfuse's own recorded token counts × its maintained per-model price
+    list — same caveat the LangSmith-backed version carried, just from an
+    unblocked source, never a literal Anthropic invoice pull.
+
+    Three windows, queried concurrently. `run_count` comes from
+    `uniq(traceId)` over the "observations" view rather than a dedicated
+    trace-count endpoint — see `_query_langfuse_cost_sync`'s docstring for
+    why that's equivalent, verified live against the real project."""
+    client = observability.get_client()
     if client is None:
         raise HTTPException(
             status_code=503,
-            detail="LangSmith not configured (LANGSMITH_API_KEY missing or invalid)",
+            detail="Langfuse not configured (LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY missing or invalid)",
         )
 
     now = datetime.now(UTC)
 
     async def _window(delta: timedelta | None) -> dict[str, Any]:
-        start_time = (now - delta).isoformat() if delta else None
+        start = now - delta if delta else _ALL_TIME_START
         try:
-            stats = await asyncio.to_thread(_get_run_stats_sync, client, start_time)
+            row = await asyncio.to_thread(_query_langfuse_cost_sync, client, start, now)
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"{type(exc).__name__}: {exc}"
             ) from exc
-        return _summarize_run_stats(stats)
+        return _summarize_langfuse_row(row)
 
     results = await asyncio.gather(*(_window(delta) for delta in _COST_WINDOWS.values()))
     return {
-        "project": LANGSMITH_PROJECT,
+        "project": "langfuse",
         "windows": dict(zip(_COST_WINDOWS.keys(), results)),
     }
+
+
+# iPhone-access feature: mounted LAST, deliberately — Starlette tries
+# routes in registration order, and a root mount matches every path that
+# isn't otherwise claimed, so every explicit @app.get/post route above
+# MUST already be registered before this line or it would shadow them.
+# `html=True` serves index.html both at "/" and as the fallback for any
+# unmatched path, which is what lets the SPA's own client-side router
+# handle deep links (e.g. a phone bookmark straight to a specific view)
+# instead of 404ing at the server. Guarded on the directory actually
+# existing so `pytest`/a dev checkout that's never run `npm run build`
+# doesn't fail at import time — same defensive-construction posture as
+# the Langfuse/MCP clients above, just for a static directory instead of
+# a network client.
+if DASHBOARD_DIST_PATH.is_dir():
+    app.mount("/", StaticFiles(directory=DASHBOARD_DIST_PATH, html=True), name="dashboard")

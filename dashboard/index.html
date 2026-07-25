@@ -3,8 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/favicon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Oni</title>
+
+    <!-- iPhone home-screen icon feature (PWA-style "Add to Home Screen").
+         Desktop/Tauri is completely unaffected by any of this — Tauri's
+         own window chrome/icon come from tauri.conf.json, not this file.
+         These tags only matter to a plain browser, i.e. exactly the
+         same-origin phone path server.py's static mount serves. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- iOS ignores manifest.json's `display: "standalone"` for the
+         home-screen-added icon specifically — this meta tag is the one
+         iOS Safari actually honors to open full-screen (no URL bar) when
+         launched from the home screen. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Oni" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0A0908" />
   </head>
 
   <body>

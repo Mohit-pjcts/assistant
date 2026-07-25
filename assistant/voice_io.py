@@ -107,6 +107,29 @@ def transcribe(audio: np.ndarray) -> str:
     return result["text"].strip()
 
 
+def transcribe_file(path: str) -> str:
+    """Transcribe an arbitrary audio FILE (any format `ffmpeg` can decode —
+    e.g. the webm/opus or mp4/aac a browser's MediaRecorder produces) to
+    text. Added for the iPhone-access feature: server.py's
+    `/voice/transcribe` saves a phone's uploaded recording to a temp file
+    and calls this, reusing the exact same STT model/repo as the Mac
+    daemon's own `transcribe()` above — this is NOT a second model, just a
+    second entry point into the same `mlx_whisper.transcribe()` call,
+    which accepts a path directly (`Union[str, np.ndarray, mx.array]`,
+    confirmed via its own signature) and internally shells out to `ffmpeg`
+    to decode/resample whatever format it's given — unlike `transcribe()`
+    above, which only ever sees an already-decoded mono float32 buffer
+    from `Recorder`, so this path was never previously exercised.
+    `ffmpeg` on PATH is a hard requirement for this function specifically
+    (not for the local-mic path above); a missing `ffmpeg` surfaces as
+    whatever exception `mlx_whisper`'s own audio loader raises, left
+    uncaught here — server.py's endpoint turns that into a clean HTTP
+    error rather than this function silently returning an empty string,
+    which would look identical to "you said nothing"."""
+    result = mlx_whisper.transcribe(path, path_or_hf_repo=STT_MODEL_REPO, language="en")
+    return result["text"].strip()
+
+
 def _installed_voices() -> set[str]:
     """Names of the voices `say` can actually use, per `say -v ?`.
 

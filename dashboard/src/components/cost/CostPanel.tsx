@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { fetchCost, LangSmithNotConfiguredError, type CostStats, type CostWindow } from "@/lib/api";
+import {
+  fetchCost,
+  CostSourceNotConfiguredError,
+  type CostStats,
+  type CostWindow,
+} from "@/lib/api";
 
 // PLAN.md Phase 9 step 6, the last of the initial panel set — real
-// LangSmith token/cost aggregates (server.py's /cost), not a locally
-// computed pricing estimate. CLAUDE.md's Cost section: flag spend, don't
-// guess at it.
+// aggregate token/cost data (server.py's /cost, backed by Langfuse as of
+// the 2026-07-25 LangSmith swap), not a locally computed pricing estimate.
+// CLAUDE.md's Cost section: flag spend, don't guess at it.
 const WINDOW_LABELS: Record<keyof CostStats["windows"], string> = {
   today: "Today",
   week: "Last 7 days",
@@ -66,7 +71,7 @@ export function CostPanel() {
     fetchCost()
       .then(setStats)
       .catch((err: unknown) => {
-        if (err instanceof LangSmithNotConfiguredError) {
+        if (err instanceof CostSourceNotConfiguredError) {
           setNotConfigured(true);
         } else {
           setError(err instanceof Error ? err.message : String(err));
@@ -83,11 +88,12 @@ export function CostPanel() {
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
-          LangSmith&apos;s own aggregate (its token counts × its maintained model price list) — not
-          a locally computed guess, but also not a literal Anthropic invoice pull. A window reading
-          $0 with 0 runs means LangSmith has recorded nothing in that window (e.g. its own
-          account-level rate/trace-quota limits silently pausing ingestion), not necessarily that
-          nothing ran (PLAN.md Phase 19).
+          Langfuse&apos;s own aggregate (its token counts × its maintained model price list) — not a
+          locally computed guess, but also not a literal Anthropic invoice pull. Swapped off
+          LangSmith on 2026-07-25 after LangSmith&apos;s own account-level trace-ingestion quota
+          silently stopped accepting new traces; Langfuse is a separate pipeline unaffected by that.
+          A window reading $0 with 0 runs means Langfuse has recorded nothing in that window, not
+          necessarily that nothing ran (PLAN.md Phase 19/22).
         </p>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
@@ -95,8 +101,8 @@ export function CostPanel() {
       </div>
       {notConfigured && (
         <p className="text-sm text-muted-foreground">
-          LangSmith isn&apos;t configured (missing or invalid LANGSMITH_API_KEY) — cost tracking is
-          unavailable until it is.
+          Langfuse isn&apos;t configured (missing or invalid LANGFUSE_PUBLIC_KEY/
+          LANGFUSE_SECRET_KEY) — cost tracking is unavailable until it is.
         </p>
       )}
       {error && <p className="text-sm text-destructive">{error}</p>}

@@ -22,7 +22,7 @@ const emptyWindow = {
 };
 
 const sampleStats = {
-  project: "personal-assistant",
+  project: "langfuse",
   windows: {
     today: {
       ...emptyWindow,
@@ -73,12 +73,12 @@ describe("CostPanel", () => {
     expect(screen.getByText(/1,234,500 tokens/)).toBeInTheDocument();
   });
 
-  it("shows a distinct message when LangSmith isn't configured, not a generic error", async () => {
-    mockedFetchCost.mockRejectedValue(new api.LangSmithNotConfiguredError("no key"));
+  it("shows a distinct message when Langfuse isn't configured, not a generic error", async () => {
+    mockedFetchCost.mockRejectedValue(new api.CostSourceNotConfiguredError("no key"));
 
     render(<CostPanel />);
 
-    expect(await screen.findByText(/LangSmith isn.t configured/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Langfuse isn.t configured/i)).toBeInTheDocument();
     expect(screen.queryByText("Today")).not.toBeInTheDocument();
   });
 
@@ -88,7 +88,7 @@ describe("CostPanel", () => {
     render(<CostPanel />);
 
     expect(await screen.findByText("network down")).toBeInTheDocument();
-    expect(screen.queryByText(/LangSmith isn.t configured/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Langfuse isn.t configured/i)).not.toBeInTheDocument();
   });
 
   it("refetches when Refresh is clicked", async () => {

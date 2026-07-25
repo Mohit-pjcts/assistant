@@ -357,18 +357,20 @@ async def test_delete_unknown_fact_returns_404() -> None:
         assert response.status_code == 404
 
 
-async def test_cost_returns_real_langsmith_aggregates() -> None:
-    """Against the REAL personal-assistant LangSmith project — no mocking,
-    same convention as every other test in this file. Not a cost concern to
-    run for real: get_run_stats() is a read-only aggregation query, not an
-    LLM call (STEPS.md 60). No DB isolation needed either — /cost never
-    touches conversation_memory.sqlite/long_term_memory.sqlite, it only
-    talks to LangSmith's API."""
+async def test_cost_returns_real_langfuse_aggregates() -> None:
+    """Against the REAL Langfuse project — no mocking, same convention as
+    every other test in this file. Not a cost concern to run for real:
+    metrics_v_2.metrics() is a read-only aggregation query, not an LLM
+    call. No DB isolation needed either — /cost never touches
+    conversation_memory.sqlite/long_term_memory.sqlite, it only talks to
+    Langfuse's API. Swapped from LangSmith (2026-07-25) after LangSmith's
+    own monthly trace-ingestion quota silently stopped accepting new
+    traces — see server.py's /cost docstring."""
     with TestClient(server.app) as client:
         response = client.get("/cost")
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["project"] == "personal-assistant"
+        assert body["project"] == "langfuse"
         windows = body["windows"]
         assert set(windows.keys()) == {"today", "week", "all_time"}
 
@@ -380,7 +382,8 @@ async def test_cost_returns_real_langsmith_aggregates() -> None:
             assert window["total_tokens"] == window["prompt_tokens"] + window["completion_tokens"]
 
         # Nested time windows: all_time >= week >= today, always, given this
-        # project has real historical usage (STEPS.md 54 onward).
+        # project has real Langfuse trace history (Phase 16 onward,
+        # 2026-07-16).
         assert windows["all_time"]["run_count"] >= windows["week"]["run_count"]
         assert windows["week"]["run_count"] >= windows["today"]["run_count"]
         assert windows["all_time"]["total_cost"] >= windows["week"]["total_cost"]
@@ -724,8 +727,8 @@ if __name__ == "__main__":
     print("OK: /memory/facts list + delete round-trip")
     asyncio.run(test_delete_unknown_fact_returns_404())
     print("OK: deleting an unknown fact id returns 404")
-    asyncio.run(test_cost_returns_real_langsmith_aggregates())
-    print("OK: /cost returns real LangSmith aggregates across today/week/all_time")
+    asyncio.run(test_cost_returns_real_langfuse_aggregates())
+    print("OK: /cost returns real Langfuse aggregates across today/week/all_time")
     asyncio.run(test_history_response_carries_the_thread_id_it_read())
     print("OK: /history response includes the thread_id it read")
     asyncio.run(test_threads_list_includes_the_bootstrapped_legacy_thread())

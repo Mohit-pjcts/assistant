@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Menu, PanelRight } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/chat/ChatPanel";
@@ -44,6 +46,16 @@ function App() {
   // onConsumeInitialMessage so it can't resend on a later tab revisit.
   const [activeTab, setActiveTab] = useState("home");
   const [pendingHomeMessage, setPendingHomeMessage] = useState<string | null>(null);
+  // iPhone-access feature: below the `md` breakpoint the thread sidebar
+  // and right context rail (both fixed-width, together wider than a
+  // phone screen) stop taking up permanent layout space and become
+  // slide-over drawers instead, toggled from the mobile-only header
+  // buttons below. `null` = both closed; at most one open at a time
+  // (opening one closes the other, matching a single-drawer mental
+  // model rather than letting them stack). Desktop/Tauri layout (`md:`
+  // and up) ignores this entirely — both stay always-visible flex
+  // siblings exactly as before.
+  const [mobileNav, setMobileNav] = useState<"sidebar" | "rail" | null>(null);
 
   function startChatFromHome(message: string) {
     setPendingHomeMessage(message);
@@ -52,14 +64,60 @@ function App() {
 
   return (
     <div className="flex h-screen bg-background">
-      <ThreadSidebar onActiveThreadChange={setActiveThreadId} />
+      {/* Backdrop: mobile-only, closes whichever drawer is open on tap.
+          Absent on md+ (mobileNav never gets set there since the toggle
+          buttons that set it are themselves md:hidden). */}
+      {mobileNav && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 md:hidden"
+          onClick={() => setMobileNav(null)}
+          aria-hidden
+        />
+      )}
+      <div
+        className={cn(
+          // iPhone-access feature, PWA fix: `top-[env(safe-area-inset-top)]`
+          // instead of `inset-y-0`'s implicit top-0 — on an iPhone with a
+          // Dynamic Island/notch, `viewport-fit=cover` (index.html) draws
+          // this app edge-to-edge, so a bare top-0 renders the sidebar's
+          // own header content straight under the island. env() resolves
+          // to 0 wherever there's no inset to clear (desktop, older
+          // iPhones), so this is a no-op everywhere but where it's needed.
+          "fixed top-[env(safe-area-inset-top)] bottom-0 left-0 z-50 -translate-x-full transition-transform duration-200 md:static md:top-0 md:z-auto md:translate-x-0",
+          mobileNav === "sidebar" && "translate-x-0",
+        )}
+      >
+        <ThreadSidebar onActiveThreadChange={setActiveThreadId} />
+      </div>
       <main className="flex h-screen min-w-0 flex-1 flex-col gap-4 p-4">
-        <header className="flex items-center justify-between gap-3">
+        {/* PWA fix (same reasoning as the sidebar drawer above): the
+            hamburger/title/status row is the exact content that was
+            rendering under the Dynamic Island — this is the actual
+            reported bug, not just the drawer. */}
+        <header className="flex items-center justify-between gap-3 pt-[env(safe-area-inset-top)]">
           <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              aria-label="Open threads"
+              className="text-muted-foreground md:hidden"
+              onClick={() => setMobileNav((v) => (v === "sidebar" ? null : "sidebar"))}
+            >
+              <Menu className="size-5" />
+            </button>
             <h1 className="font-heading text-lg font-semibold tracking-tight">Oni</h1>
             <StatusPill agent={activeAgent} tool={activeTool} />
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              aria-label="Open activity panel"
+              className="text-muted-foreground md:hidden"
+              onClick={() => setMobileNav((v) => (v === "rail" ? null : "rail"))}
+            >
+              <PanelRight className="size-5" />
+            </button>
+            <ThemeToggle />
+          </div>
         </header>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1">
           <TabsList variant="line" className="border-b border-border">
@@ -125,7 +183,13 @@ function App() {
           </TabsContent>
         </Tabs>
       </main>
-      <aside className="flex h-screen w-96 shrink-0 flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground">
+      <aside
+        className={cn(
+          // Same Dynamic Island fix as the sidebar drawer above.
+          "fixed top-[env(safe-area-inset-top)] bottom-0 right-0 z-50 flex w-96 max-w-[85vw] translate-x-full flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground transition-transform duration-200 md:static md:top-0 md:z-auto md:h-screen md:max-w-none md:translate-x-0 md:shrink-0",
+          mobileNav === "rail" && "translate-x-0",
+        )}
+      >
         <Card size="sm">
           <CardHeader>
             <CardTitle className="panel-label text-[0.65rem] text-muted-foreground">

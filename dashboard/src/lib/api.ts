@@ -1,12 +1,22 @@
+import { isTauri } from "@tauri-apps/api/core";
+
 // Client for assistant/server.py (Phase 9's backend wrapper — STEPS.md 55).
 // Talks to the SAME shared graph/thread the CLI and voice daemon use; see
 // server.py's own module docstring for why that matters.
 //
-// Base URL is fixed — the Tauri shell now spawns/manages the backend's
-// process lifecycle itself (Phase 14 packaging step, STEPS.md 71/72:
-// src-tauri/src/lib.rs), always on 127.0.0.1:8000, so this doesn't need to
-// be configurable.
-const API_BASE_URL = "http://127.0.0.1:8000";
+// Base URL: two real deployments now share this file (iPhone-access
+// feature). Inside the Tauri app, the window itself loads from a custom
+// `tauri://localhost` scheme — `window.location.origin` there is useless
+// for reaching the backend, so it stays the fixed 127.0.0.1:8000 the Tauri
+// shell has always spawned/managed (Phase 14, STEPS.md 71/72:
+// src-tauri/src/lib.rs). In a plain browser (a phone on the same
+// Tailscale/LAN reaching the Mac directly), server.py now serves the
+// dashboard's own build as static files from itself — same-origin — so
+// `window.location.origin` IS the backend's real address there, whatever
+// host/IP was actually used to reach it. `isTauri()` (the official
+// `@tauri-apps/api/core` detection helper, not a hand-rolled
+// `window.__TAURI__` check) is what tells the two cases apart.
+const API_BASE_URL = isTauri() ? "http://127.0.0.1:8000" : window.location.origin;
 
 export interface HistoryMessage {
   role: string;
@@ -99,6 +109,27 @@ export async function uploadFile(file: File): Promise<Attachment> {
     throw new Error(`/uploads failed (${response.status}): ${await response.text()}`);
   }
   return response.json() as Promise<Attachment>;
+}
+
+// iPhone-access feature: uploads a browser-recorded utterance (whatever
+// format MediaRecorder produced — webm/opus on most browsers, mp4/aac on
+// Safari/iOS) to server.py's /voice/transcribe, which runs it through the
+// same mlx-whisper model the Mac's own voice daemon uses and hands back
+// plain text. ChatPanel sends that text through the normal handleSend
+// path, same as a typed message — this function's job ends at "here's
+// the transcript."
+export async function transcribeVoice(blob: Blob): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", blob, `utterance.${blob.type.split("/")[1]?.split(";")[0] ?? "webm"}`);
+  const response = await fetch(`${API_BASE_URL}/voice/transcribe`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) {
+    throw new Error(`/voice/transcribe failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { text: string };
+  return body.text;
 }
 
 // Startup-time GETs (fetchThreads/fetchHistory/fetchCost) race a real bug
@@ -371,8 +402,11 @@ export async function deleteMemoryFact(id: number): Promise<void> {
   }
 }
 
-// Token/cost tracking (PLAN.md Phase 9 step 6) — real LangSmith aggregates
-// (server.py's `/cost`), not computed locally from a pricing table.
+// Token/cost tracking (PLAN.md Phase 9 step 6) — real Langfuse aggregates
+// (server.py's `/cost`), not computed locally from a pricing table. Source
+// swapped from LangSmith to Langfuse (2026-07-25) after LangSmith's own
+// monthly trace-ingestion quota silently stopped accepting new traces —
+// see server.py's `/cost` docstring for the full story.
 export interface CostWindow {
   run_count: number;
   total_tokens: number;
@@ -392,16 +426,16 @@ export interface CostStats {
   };
 }
 
-// Thrown specifically on the backend's 503 ("LANGSMITH_API_KEY missing or
-// invalid") so the panel can show a distinct, actionable message instead of
-// a generic error banner — this isn't a broken request, it's a feature
-// that isn't set up.
-export class LangSmithNotConfiguredError extends Error {}
+// Thrown specifically on the backend's 503 ("LANGFUSE_PUBLIC_KEY/
+// LANGFUSE_SECRET_KEY missing or invalid") so the panel can show a
+// distinct, actionable message instead of a generic error banner — this
+// isn't a broken request, it's a feature that isn't set up.
+export class CostSourceNotConfiguredError extends Error {}
 
 export async function fetchCost(): Promise<CostStats> {
   const response = await fetchWithRetry(`${API_BASE_URL}/cost`);
   if (response.status === 503) {
-    throw new LangSmithNotConfiguredError(await response.text());
+    throw new CostSourceNotConfiguredError(await response.text());
   }
   if (!response.ok) {
     throw new Error(`/cost failed (${response.status}): ${await response.text()}`);

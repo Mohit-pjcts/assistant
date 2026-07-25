@@ -7913,3 +7913,404 @@ per CLAUDE.md's Git rules (Claude never runs `git add`/`commit`/`push`
 on its own initiative). `oni/` (the Part A sandbox) added to
 `.gitignore` rather than committed — throwaway exploration, superseded
 entirely by the real integration documented above.
+
+## 98. Phase 21 (candidate) — supervisor routing/gate eval suite via
+Langfuse Datasets + Experiments (2026-07-25)
+
+**Why:** raised as a brainstormed improvement idea (proactivity, eval
+suite, remote access, memory-retrieval quality, portfolio polish), user
+picked this one. The class of bug it targets had already bitten this
+project twice from prompt drift alone — Phase 18's `render_ui` delegation
+refusal and Phase 20's board delegation refusal (STEPS.md 95, 97) — both
+"supervisor has no visibility into a specialist's own bound tools" bugs
+that a routing regression suite is the natural defense against.
+
+**Two design forks resolved with the user before building (AskUserQuestion),
+both matching this project's own prior precedent for cost-bearing
+decisions** (the Haiku-vs-Sonnet eval, STEPS.md 75; CI declined over
+real-API cost, STEPS.md 76):
+1. **Framework: Langfuse Datasets + Experiments**, not a bare pytest
+   harness — chosen since Langfuse is already deeply wired in (Phase 16:
+   tracing, prompts, gate-outcome scoring) and its native `run_experiment()`
+   gives a persistent, browsable run history for free.
+2. **Scope: routing + confirmation-gate correctness only**, not specialist
+   output quality — a closed, deterministically-checkable decision space,
+   unlike output quality, which has no stable "golden" answer to pin
+   against model updates.
+
+**Verification discipline applied before writing any code** (installed
+reality checked, not assumed, per CLAUDE.md): confirmed `langfuse==3.15.0`
+actually exposes `create_dataset`/`create_dataset_item`/`get_dataset`/
+`run_experiment` (`dir(Langfuse)` + `inspect.signature`); confirmed live
+against the real account that `create_dataset`/`create_dataset_item` are
+BOTH upsert-by-name/id (calling `create_dataset` twice with the same name
+returns the identical dataset id, not a duplicate) — this is what makes
+`evals/supervisor_dataset.py`'s sync script safe to re-run after editing a
+scenario; confirmed `langgraph.checkpoint.memory.InMemorySaver` importable
+(needed because `request_gated_action_confirmation`'s `interrupt()`
+requires SOME checkpointer to pause/resume against — `studio.py`'s
+`checkpointer=None` only works there because the LangGraph API server
+supplies its own).
+
+**Built:**
+- `evals/supervisor_dataset.py` — 14 hand-written golden scenarios: a
+  direct-answer/no-delegation case, one per specialist, the Apple/Google
+  Calendar disambiguation rule, every `GATED_ACTIONS` action at least
+  once, a Gmail-read negative case (must NOT gate), a multi-hop case, and
+  the two direct regressions named above. `sync_dataset()` pushes them to
+  a Langfuse dataset (`supervisor-routing-gate-eval`), manual/repeatable,
+  same posture as `scripts/sync_prompts_to_langfuse.py`.
+- `evals/supervisor_eval.py` — the runner. Builds the real supervisor
+  graph (`InMemorySaver`, `mcp_tools=[]` — deliberate: this suite only
+  checks WHICH specialist got called, never whether a read actually
+  succeeded, so it has no live-OAuth dependency). The task function runs
+  each scenario end-to-end and **unconditionally declines every
+  `interrupt()` it hits** (`Command(resume=False)`) — including both a
+  real gated action AND any incidental long-term-memory-write proposal —
+  so the suite can never actually send an email, touch a calendar, run a
+  Shortcut, or persist a memory fact. Two deterministic evaluators
+  (`routing_correct`, `gate_correct`) score each run; deliberately NOT an
+  LLM judge, since both signals are mechanically readable off the graph's
+  own tool-call/`__interrupt__` shape.
+- `tests/test_evals.py` (14 tests) — pure-logic coverage only (message
+  parsing, both evaluators, dataset self-validation); deliberately does
+  NOT test `_run_scenario` itself, same no-mocking-means-no-CI reasoning
+  as the rest of this project (PLAN.md's CI-declined note) — that function
+  is inherently a real-API integration point, verified live instead (below).
+
+**Real bug caught on the very first live run — in the eval, not the
+assistant.** `routing_correct` scored 0.571 (8/14): every gated scenario
+"failed" because `expected_specialists` had assumed the owning specialist
+would still get called after a decline. It's the opposite: the
+supervisor's own `request_gated_action_confirmation` tool description says
+"if declined, do not delegate at all" — and under this suite's
+always-decline policy, that's exactly what should happen every time.
+Pulled each failing item's real trace via `client.get_dataset_run()` +
+`client.api.trace.get()` to confirm directly rather than guess: in all 6
+cases the owning specialist was correctly ABSENT from `specialists_called`
+— the assistant behaved correctly, the dataset's expectation was wrong.
+Fixed by rewriting `routing_evaluator`: when a scenario expects a gate, it
+now checks that `GATED_ACTIONS[gate_action]`'s owning specialist is absent
+from what got called (tolerating an incidental `research_agent` call made
+earlier to resolve an objective date, per CLAUDE.md's Phase 10 rule) —
+`gate_correct` already independently confirms the RIGHT action was
+identified. Added two new tests for this exact branch
+(`test_routing_evaluator_gated_scenario_*`) so the distinction can't
+silently regress.
+
+**Re-run after the fix: `routing_correct` 1.000 (14/14), `gate_correct`
+0.857 (12/14) — a second real, non-code finding.** The two gate misses
+were `apple-calendar-disambiguation-gated` and `multi-hop-create-event`:
+across the two live runs, the model picked the CORRECT-for-the-OTHER-
+scenario action both times (`calendar_create_event` vs
+`create_calendar_event` swapped) — genuine, live-observed flakiness on
+exactly the Apple/Google Calendar disambiguation rule
+`SUPERVISOR_SYSTEM_PROMPT_FALLBACK` explicitly calls out as something to
+get right. Not fixed here — out of scope for building the harness itself,
+and this is precisely the kind of latent drift an eval suite exists to
+surface rather than hide. Left as a flagged, real finding for a future
+prompt-tuning pass.
+
+**Cost, real and disclosed, not unattended:** two full live runs during
+this session (~$0.30–0.50/run per the module's own estimate, based on the
+Haiku-eval's real $0.0117/call figure, STEPS.md 75) — spent knowingly to
+verify the harness end-to-end and to confirm the fix, not as an ongoing
+cost. `evals/supervisor_eval.py` is manually triggered only
+(`python -m evals.supervisor_eval`), never wired into CI or any
+scheduled/unattended path, same posture already chosen for pytest itself.
+One incidental smoke-test artifact left in the real Langfuse account
+(`eval-smoke-test-dataset`, used to verify the upsert-by-name behavior
+before writing any code) — the SDK exposes no dataset-delete method
+(`dir(Langfuse)`/`dir(client.api.datasets)` both checked), so it can only
+be removed from the Langfuse web UI; harmless, same category as other
+live-verification artifacts this project has already left behind.
+
+**Run command note:** must be run as `python -m evals.supervisor_eval`
+(module mode), not `python evals/supervisor_eval.py` directly — the
+latter puts only `evals/` on `sys.path`, not the repo root, so the
+`from evals.supervisor_dataset import DATASET_NAME` cross-module import
+fails with `ModuleNotFoundError`. Caught live on the first run attempt.
+
+**Tests:** 232/232 backend tests pass (14 new, all pure-logic); `ruff
+check evals/ tests/test_evals.py` clean.
+
+**Not yet done:** the commit itself, and the CLAUDE.md/PLAN.md status
+write-up — proposed to the user for approval, per CLAUDE.md's process
+(status edits happen only with explicit approval) and Git rules.
+
+## 99. Cost panel source swap: LangSmith → Langfuse (2026-07-25)
+
+**Why:** `/cost` had been reading all-zero for over a week (Phase 19's
+finding) because LangSmith's own account-level monthly trace-ingestion
+quota was exhausted, with no fix available on this project's side — new
+traces simply stop landing until the plan is upgraded or the quota resets.
+First explored a real fix via Anthropic's own Usage & Cost Admin API
+(actual USD, not an estimate) — live-researched the exact endpoints
+(`/v1/organizations/{usage_report/messages,cost_report}`), auth model, and
+response shapes via the real docs, then live-tested against a real key.
+**Dead end, not a bug:** the user's Console account is an individual
+account, and Admin API keys don't exist for those at all (confirmed live:
+a `svac_...` Workload Identity Federation service-account ID — a
+completely different object — 401'd as `invalid x-api-key`; the
+documented Console path for admin keys requires first converting to an
+Organization, a real account-structure change the user opted not to make
+for this). Fell back to the user's chosen alternative: Langfuse, which had
+been correctly tracing every real call the whole time (Phase 16), on a
+completely separate ingestion pipeline unaffected by LangSmith's quota.
+
+**Implementation** (`assistant/server.py`'s `/cost`, `dashboard/src/lib/
+api.ts`, `CostPanel.tsx`, `CostSummaryCard.tsx`, `tests/test_server.py`,
+`CostPanel.test.tsx`): swapped the LangSmith `Client.get_run_stats()` call
+for Langfuse's v2 metrics API (`client.api.metrics_v_2.metrics()`,
+`view="observations"`). Live-verified before writing any query logic that
+v1's `view="traces"` (deprecated) has no v2 equivalent — v2 flatly rejects
+`view="traces"` — so `run_count` is instead `uniq(traceId)` over the
+observations view; cross-checked live against the real project that this
+gives the IDENTICAL number to v1's trace-level `count` (611) for the same
+window, and that summed observation-level `totalCost`/`totalTokens` match
+v1's trace-level rollup to the fraction of a cent — confirms no
+double-counting from nested spans within one turn. `amount` fields are
+cents-as-decimal-strings per the Cost Report API's own docs — divided by
+100 for USD. Response shape kept IDENTICAL to the LangSmith version
+(`CostWindow`/`CostStats` unchanged) so the frontend needed no structural
+changes, only renaming `LangSmithNotConfiguredError` →
+`CostSourceNotConfiguredError` and updating disclaimer text. Removed the
+now-unused `LangSmithClient` construction from `server.py`'s `lifespan`.
+
+**Live-verified, not just reasoned through:** a real `TestClient` call
+against the actual Langfuse project returned real, correctly-nested
+numbers (all_time $10.56 / 4.97M tokens / 611 turns ≥ week ≥ today).
+232/232 backend tests pass (the real `/cost` test hits the live Langfuse
+API, same no-mocking convention as its LangSmith predecessor), 64/64
+frontend tests pass, `tsc`/ruff/prettier all clean (only the same 6
+pre-existing, unrelated prettier findings from Phase 20, confirmed via
+`git stash`). **Loose end, left for the user:** a stray
+`ANTHROPIC_ADMIN_API_KEY=svac_...` line in `.env` from the abandoned Admin
+API attempt — inert (nothing reads it) but not yet removed, pending
+whether the user wants to revisit the Organization path later.
+
+## 100. iPhone access: Tailscale + mobile web + browser-side voice input
+(2026-07-25, in progress — user setup steps still pending)
+
+**Why:** direct user request ("I want to be able to use this with my
+iPhone as well"). Two real decisions resolved with the user first
+(AskUserQuestion, matching this session's established pattern for
+anything touching the security model or requiring real setup effort):
+network path (Tailscale — a private device-to-device mesh VPN, chosen
+over a public tunnel + new auth layer specifically to avoid widening the
+threat model CLAUDE.md's security section protects) and feature scope
+(text chat + voice input from the phone's own mic, not just text; mobile
+UI scope capped at "collapse sidebar/rail behind toggles on narrow
+screens," not a full responsive redesign of every panel).
+
+**Real blockers found before writing code** (verification discipline):
+the backend was hard-bound to `127.0.0.1` (Tauri's `spawn_backend()`,
+`src-tauri/src/lib.rs`) — unreachable from a phone regardless of network
+path; CORS (`DASHBOARD_ORIGINS`) only allowed the Tauri app's own origins;
+`api.ts`'s `API_BASE_URL` was hardcoded to `127.0.0.1:8000`, meaningless
+off-Mac; and `ffmpeg` is NOT installed on this Mac, a hard requirement for
+decoding whatever format a phone browser's `MediaRecorder` produces
+(webm/opus or mp4/aac) into what `mlx_whisper` needs.
+
+**Built:**
+- `src-tauri/src/lib.rs`: `spawn_backend()` now passes `--host 0.0.0.0` to
+  uvicorn. Deliberately safe to widen here — nothing forwards this port
+  from the router to the public internet, so this only adds reachability
+  from the same LAN or a Tailscale peer, never the open internet. The
+  Tauri app itself is untouched — still talks to `127.0.0.1` exactly as
+  before.
+- `assistant/server.py`: mounts the dashboard's OWN production build
+  (`dashboard/dist/`, via `npm run build`) as static files, `html=True`,
+  at `/` — added LAST, after every `@app.get/post` route, since Starlette
+  tries routes in registration order and a root mount would otherwise
+  shadow every API route. This is what lets a phone reach the app
+  same-origin (no CORS entries needed for it at all — verified this
+  reasoning is correct, not just assumed) while leaving the Tauri app's
+  own cross-origin CORS list untouched. Guarded on the directory actually
+  existing so a fresh checkout / `pytest` without a build doesn't fail at
+  import time (same defensive-construction posture as the Langfuse/MCP
+  clients). Live-verified against a real running server: `GET /` serves
+  the real SPA (200, real `index.html`), `GET /threads` (an existing API
+  route) still 200s correctly — confirms no shadowing — and `GET /assets/
+  *` serves built JS/CSS. One found, accepted limitation:
+  `StaticFiles(html=True)` is NOT a true SPA-deep-link fallback — an
+  arbitrary unmatched path 404s rather than serving `index.html` — but
+  this app has no URL-based routing at all (Tabs state, not React Router;
+  everything lives at `/`), so this is a real limitation with zero actual
+  impact on this specific app, not silently assumed safe.
+- `assistant/server.py` + `assistant/voice_io.py`: new `POST
+  /voice/transcribe` endpoint + `voice_io.transcribe_file(path)` (a
+  sibling of the existing `transcribe(audio: np.ndarray)`, confirmed live
+  via its own signature that `mlx_whisper.transcribe()` accepts a file
+  path directly, not just a decoded buffer — internally shells out to
+  `ffmpeg` to decode/resample, the same underlying model the Mac's own
+  voice daemon already uses, reached a second way, not a second model).
+  `voice_io` is imported LAZILY inside the endpoint, not at server.py's
+  module top level — deliberately, so the common case (typing, not
+  talking) doesn't pay mlx_whisper/sounddevice's real import cost on every
+  server boot. Chunked-read size cap (25MB) mirrors the existing `/uploads`
+  endpoint's defensive pattern; audio saved to a `NamedTemporaryFile`
+  (never `workspace/` — this is ephemeral STT input, not agent-visible
+  content) and unconditionally deleted in a `finally`. Live-verified the
+  full error path against the real server with `ffmpeg` genuinely absent:
+  a real uploaded WAV produces a clean `502` naming the exact
+  `FileNotFoundError: ffmpeg`, not a crash — confirms the endpoint is
+  ready the moment the user installs `ffmpeg` (`brew install ffmpeg`,
+  their own action step, not yet done as of this entry).
+- `dashboard/src/lib/api.ts`: `API_BASE_URL` now branches on `isTauri()`
+  (the official `@tauri-apps/api/core` detection helper, not a hand-rolled
+  `window.__TAURI__` check) — `127.0.0.1:8000` inside Tauri (whose window
+  loads from a `tauri://` custom scheme, so `window.location.origin` is
+  useless there), `window.location.origin` in a plain browser (correct
+  automatically for however a phone actually reached the Mac — Tailscale
+  hostname or IP — since the dashboard is now served same-origin).
+- `App.tsx`: below the `md` breakpoint, the thread sidebar and right
+  context rail become slide-over drawers (`fixed` + `translate-x`
+  transition, single mount each — not a duplicate mobile copy, so
+  `ThreadSidebar`'s own internal fetch state isn't reset by toggling)
+  instead of permanent flex siblings, opened via two new mobile-only
+  header icon buttons (hamburger / rail). No new dependency — hand-built
+  with Tailwind classes + one `mobileNav` state value, not a pulled-in
+  Sheet/Drawer library, matching the "minimal" scope the user picked.
+  Desktop/Tauri layout is completely unchanged (`md:` and up overrides
+  every mobile-specific class back to the original always-visible
+  layout).
+- `ChatPanel.tsx` + `api.ts`'s new `transcribeVoice()`: a mic button in
+  the composer's footer, shown only when `!isTauri()` (the Mac already has
+  its own always-on hotkey voice daemon — a second, different voice
+  affordance in the same desktop window would just be confusing, so this
+  is phone/browser-only by design, not an oversight). Tap-to-start/
+  tap-to-stop (not press-and-hold — more reliable across mobile Safari's
+  touch-event handling); on stop, uploads via `MediaRecorder`'s blob to
+  `/voice/transcribe`, then feeds the returned transcript through the
+  EXACT same `handleSend(overrideText)` path a typed message already
+  uses — no new send/receive logic, voice is purely a different way to
+  populate the same text the composer would have sent anyway.
+
+**Tests:** 232/232 backend tests pass, 64/64 frontend tests pass (existing
+suites — no new test files added for the mobile UI/voice-recording paths
+themselves, since they need a real browser mic/MediaRecorder and a real
+phone/Tailscale network to exercise meaningfully; covered instead by the
+live curl/TestClient verification above for every piece that COULD be
+verified without those). `tsc`/ruff/prettier all clean (same 6
+pre-existing prettier findings, confirmed via `git stash`); real Rust
+`cargo check` (via `~/.cargo/bin/cargo`, not on this shell's default PATH)
+also clean.
+
+**Not yet done — genuine user action items, not oversights:**
+1. `brew install ffmpeg` — hard requirement for `/voice/transcribe`,
+   confirmed missing live, not yet installed as of this entry.
+2. Install Tailscale on the Mac and the iPhone, sign in on both — the
+   actual mechanism that lets the phone reach the Mac at all. No code
+   change needed for this step; it's purely account/app setup on the
+   user's two devices.
+3. Restart the Tauri app (or `npm run build` + relaunch) so the new
+   `--host 0.0.0.0` bind and the freshly-built `dashboard/dist/` actually
+   take effect — the currently-running live app process predates both
+   changes.
+4. The stray `ANTHROPIC_ADMIN_API_KEY` line in `.env` (STEPS.md 99) is
+   still unresolved, unrelated to this entry.
+
+## 101. Real desktop app: `/Applications/Oni.app` as a live-dev launcher
+(2026-07-25)
+
+**Why:** direct follow-up request — a real, double-clickable, Spotlight-
+findable app, not a terminal command. First built the OTHER way (`npm run
+tauri build`, a real release-profile `.app` + `.dmg`, `productName: "Oni"`
+already correct in `tauri.conf.json` so no rename needed) and installed it
+to `/Applications` — live-verified: launched it, confirmed its spawned
+backend bound `0.0.0.0:8000` correctly and answered a real request.
+
+**Superseded same session, at the user's own follow-up request** ("make it
+the live dev build bro"): a static release bundle is a frozen snapshot —
+exactly the "NOT a frozen/portable bundle" trade-off CLAUDE.md's own
+Load-bearing decision already documents as deliberate, now directly in
+tension with "always live." Resolution: quit the release-snapshot
+instance, replace `/Applications/Oni.app` with an `osacompile`-built
+AppleScript launcher (`CFBundleName` "Oni", icon swapped to the project's
+own `icon.icns` for visual consistency) that opens Terminal and runs a new
+`dashboard/run-oni-dev.sh` — which is just `npm run tauri dev`, launched
+by double-click instead of by typing the command. Same process, same live
+reload, same backend/voice-daemon child-lifecycle as running it by hand;
+the one real trade-off is a visible Terminal window staying open
+alongside the app window (also useful — that's where backend errors
+surface). Live-verified end to end: real debug Tauri binary + real uvicorn
+child process came up, backend answered a real request. Old release-build
+artifacts (`target/release/bundle/{macos,dmg}`) deleted per the user's own
+follow-up ("kill/delete the old path") — the raw Rust build cache
+(`target/release/dashboard`, `deps/`) left alone since it's not anything
+double-clickable, just compiler cache that'd otherwise force a slow
+rebuild for no benefit.
+
+## 102. PWA home-screen icon + unified live-update across all three
+surfaces (2026-07-25)
+
+**PWA icon (direct request):** iOS Safari's "Add to Home Screen" needs
+real assets, not just a URL — generated `apple-touch-icon.png` (180×180)
++ `icon-192.png`/`icon-512.png` from the SAME master `icon.png` the
+desktop app already uses (`dashboard/src-tauri/icons/`), flattened onto
+the Oni theme's own actual dark `--color-background-body` token
+(`#0A0908`, read from `oniMatchaTheme.ts`, not guessed) — live-checked
+first that the master PNG has real alpha transparency (corners fully
+transparent), which iOS renders as solid BLACK behind a home-screen icon
+if left as-is, not "no icon"; flattening onto the theme's real background
+avoids that. Added `dashboard/public/manifest.webmanifest` +
+`apple-mobile-web-app-capable`/`apple-mobile-web-app-title`/
+`apple-mobile-web-app-status-bar-style`/`theme-color` meta tags to
+`index.html` — `apple-mobile-web-app-capable` is the one iOS Safari
+actually honors for full-screen (no URL bar) launch from the home screen;
+the Web App Manifest's own `display: "standalone"` alone does not get
+that on iOS. Rebuilt `dashboard/dist/` and live-verified against the real
+running backend: `/manifest.webmanifest` and `/apple-touch-icon.png` both
+200, and the served `index.html` carries every new tag. Desktop/Tauri
+completely unaffected — its own window chrome comes from
+`tauri.conf.json`, not this file; these tags only matter to the
+same-origin phone path (STEPS.md 100's static mount).
+
+**Unified live-update ("every update should live update to all three"):**
+the phone/PWA path and the backend were BOTH still snapshot-on-restart
+even after STEPS.md 101's desktop launcher — a real gap the user's own
+framing named directly, not something inferred. Two independent fixes,
+one backend flag + one new frontend script, since desktop/phone/backend
+don't share a single "freshness" mechanism:
+- **Backend** (`src-tauri/src/lib.rs`'s `spawn_backend`): added
+  `--reload --reload-dir assistant` to the uvicorn invocation.
+  Deliberately scoped `--reload-dir` to `assistant/` ONLY rather than
+  uvicorn's default (the whole current-working-directory, i.e. the
+  project root) — the project root also holds
+  `conversation_memory.sqlite`/`threads.sqlite`/`board.sqlite`/
+  `long_term_memory.sqlite` (written on nearly every turn),
+  `node_modules/`, and `.venv/`; watching any of those would mean either
+  constant spurious mid-conversation restarts (the sqlite WAL files) or a
+  pointlessly expensive watch tree. Confirmed `watchfiles` (uvicorn's
+  reloader backend — the flag silently no-ops without it, per uvicorn's
+  own `--help` text) was already installed before relying on it, not
+  assumed. Live-verified with a REAL file touch, not just "the flag
+  exists": `assistant/server.py` touched twice, the worker child PID
+  changed each time (confirmed via `pgrep -P <reloader-pid>`) while the
+  server kept answering real requests throughout — genuine restart-on-
+  change, not a no-op flag.
+- **Phone/PWA** (`package.json`'s new `build:watch` script = `vite build
+  --watch`, run in the background by the updated `run-oni-dev.sh`): keeps
+  `dashboard/dist/` continuously rebuilt instead of only refreshing on a
+  manual `npm run build`. Deliberately skips `tsc` in the watch loop
+  (unlike the real `build` script) — a full type-check on every
+  incremental save would be slow, and this matches the existing `npm run
+  dev` dev-server path, which already skips full type-checking too. The
+  phone itself still needs an actual page reload to see a new build
+  (there is no network-HMR to a phone browser, and building one wasn't
+  asked for) — the guarantee this closes is narrower and correct: the
+  build itself is never more than a few seconds stale. Live-verified with
+  a real file touch: `src/App.tsx` touched, `dist/assets/*.js`'s mtime
+  changed within the 3s check window.
+- Desktop got nothing new here — Tauri's own Vite HMR (`npm run tauri
+  dev`'s `beforeDevCommand`) already covered it before this entry.
+
+**Tests:** 231/232 backend tests pass (`test_cost_returns_real_langfuse_
+aggregates` failed on a REAL Langfuse metrics-API 429 — `retryAfterSeconds:
+81908`, `limit: 100, remaining: 0` — from this session's own heavy `/cost`
+testing exhausting Langfuse's rate limit, not a code regression;
+`/cost` correctly surfaced it as a 502 exactly as designed, same as any
+other real upstream failure; will self-resolve when the window resets,
+not fixed here). 64/64 frontend tests pass, `tsc`/ruff/prettier/`cargo
+check` all clean (same 6 pre-existing prettier findings).

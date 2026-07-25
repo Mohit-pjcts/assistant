@@ -78,6 +78,32 @@ fn free_port(port: u16) {
 /// with the project root as its working directory (assistant/'s own
 /// relative paths — workspace/, the SQLite files — are anchored there,
 /// same as when a person runs it by hand from that directory).
+///
+/// `--host 0.0.0.0` (not the default loopback-only bind) as of the
+/// iPhone-access feature: lets a phone on the same Tailscale mesh (or LAN)
+/// reach this server directly. Safe to widen here specifically because
+/// nothing forwards this port from the router to the public internet —
+/// only devices that can already route to the Mac (same LAN, or a
+/// Tailscale peer) can reach it either way. The Tauri app itself keeps
+/// talking to 127.0.0.1 exactly as before (see `wait_for_backend` below
+/// and `api.ts`'s Tauri-vs-browser origin detection) — this only ADDS
+/// reachability, it doesn't change how the desktop app connects.
+///
+/// `--reload --reload-dir assistant` (live-dev-app feature): auto-restarts
+/// the backend on a Python source change, same "always live" goal as the
+/// frontend's `build:watch` (run-oni-dev.sh) — both the desktop window and
+/// the phone/PWA path share this ONE backend process, so this single flag
+/// covers both. `--reload-dir` is deliberately scoped to `assistant/`
+/// ONLY, not the default (the whole current_dir, i.e. the project root) —
+/// the project root also contains `conversation_memory.sqlite`/
+/// `threads.sqlite`/`board.sqlite`/`long_term_memory.sqlite` (written on
+/// nearly every turn), `workspace/`, `node_modules/`, and `.venv/`;
+/// watching any of those would mean either constant spurious restarts
+/// mid-conversation (the sqlite WAL files) or a pointlessly expensive
+/// watch tree (node_modules/.venv). `watchfiles` (uvicorn's reloader
+/// backend) confirmed already installed in this project's `.venv` before
+/// adding this — the flag silently no-ops without it, per uvicorn's own
+/// `--help` text, so this was verified rather than assumed.
 fn spawn_backend() -> std::io::Result<Child> {
     let root = project_root();
     let uvicorn = root.join(".venv/bin/uvicorn");
@@ -86,8 +112,13 @@ fn spawn_backend() -> std::io::Result<Child> {
     Command::new(uvicorn)
         .args([
             "assistant.server:app",
+            "--host",
+            "0.0.0.0",
             "--port",
             &BACKEND_PORT.to_string(),
+            "--reload",
+            "--reload-dir",
+            "assistant",
         ])
         .current_dir(&root)
         .spawn()
