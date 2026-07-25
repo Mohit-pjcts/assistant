@@ -1,4 +1,21 @@
+/* Astryx's reset/theme CSS must land in named layers ordered BEFORE
+   Tailwind's "utilities" layer — otherwise reset.css's bare-selector rules
+   (e.g. h1-h6) would beat Tailwind utility classes app-wide, not just on
+   Astryx components, since layer order wins over specificity. */
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
 @import "tailwindcss";
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+/* Must be imported HERE (not from a component file) so its `astryx-theme`
+   layer rules land textually after astryx.css's `astryx-base` defaults in
+   the SAME stylesheet — @layer registration order is fixed at first
+   sighting across the whole page, and a separate JS-triggered <style> tag
+   from a component import can load before this file, silently reordering
+   layer priority and making the recolor lose to Astryx's own defaults
+   (found live: --color-accent stayed the default blue until this moved
+   here). */
+@import "./themes/oniMatcha/oni-matcha.css";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/space-grotesk";
@@ -7,6 +24,11 @@
 @import "@fontsource/ibm-plex-sans/600.css";
 @import "@fontsource/ibm-plex-mono/400.css";
 @import "@fontsource/ibm-plex-mono/500.css";
+/* oni-matcha theme fonts (matcha's own typography config) */
+@import "@fontsource/dm-sans/400.css";
+@import "@fontsource/dm-sans/500.css";
+@import "@fontsource/dm-sans/600.css";
+@import "@fontsource/playwrite-us-trad/index.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -17,9 +39,15 @@
    --primary/--destructive so the gate's copper never gets pulled toward
    whatever --primary happens to be tuned to. */
 @theme inline {
+  /* Oni Matcha fonts, applied app-wide (same reasoning as the color pass
+     above): matcha's typography config is Playwrite US Trad for headings,
+     DM Sans for body — already imported (Step 1) but previously only
+     reachable by Astryx components via their own font tokens, not by these
+     Tailwind font-* classes the rest of the app (h1 "Oni", panel labels,
+     card titles) actually uses. */
   --font-heading: var(--font-display);
-  --font-display: "Space Grotesk Variable", sans-serif;
-  --font-sans: "IBM Plex Sans", sans-serif;
+  --font-display: "Playwrite US Trad", serif;
+  --font-sans: "DM Sans", sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
   --color-operator: var(--operator);
   --color-operator-foreground: var(--operator-foreground);
@@ -67,84 +95,93 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Oni Matcha, applied app-wide (not just the Astryx-rebuilt Chat/Board
+   surfaces): these are the app's OWN Tailwind/shadcn tokens — History,
+   Memory, Cost, and ThreadSidebar all still render through shadcn/ui
+   components, which read --primary/--background/--card/etc., NOT Astryx's
+   own --color-* tokens (the two systems were deliberately kept
+   non-overlapping, see oniMatchaTheme.ts's own docstring). Recoloring these
+   values is what makes the WHOLE app read as one theme without rewriting
+   every remaining panel onto Astryx components too — same ember palette,
+   values taken directly from oniMatchaTheme.ts's light/dark tuples. */
 :root {
-  --background: #f6f7f9;
-  --foreground: #14171c;
+  --background: #f3ece2;
+  --foreground: #1a1512;
   --card: #ffffff;
-  --card-foreground: #14171c;
+  --card-foreground: #1a1512;
   --popover: #ffffff;
-  --popover-foreground: #14171c;
-  --primary: #2f5fd1;
+  --popover-foreground: #1a1512;
+  --primary: #a8431f;
   --primary-foreground: #ffffff;
-  --secondary: #edeff3;
-  --secondary-foreground: #14171c;
-  --muted: #edeff3;
-  --muted-foreground: #5b6270;
-  --accent: #e7ebf4;
-  --accent-foreground: #1b2a55;
+  --secondary: #ede4d8;
+  --secondary-foreground: #1a1512;
+  --muted: #ede4d8;
+  --muted-foreground: #6b5d51;
+  --accent: #f0e6d8;
+  --accent-foreground: #6b2c10;
   --destructive: #c6323b;
-  --border: #e1e4e9;
-  --input: #e1e4e9;
-  --ring: #2f5fd1;
-  --chart-1: #2f5fd1;
-  --chart-2: #b45309;
-  --chart-3: #5b6270;
-  --chart-4: #1b2a55;
-  --chart-5: #9aa1ad;
+  --border: #e0d5c6;
+  --input: #e0d5c6;
+  --ring: #a8431f;
+  --chart-1: #a8431f;
+  --chart-2: #b8860b;
+  --chart-3: #6b5d51;
+  --chart-4: #1a1512;
+  --chart-5: #a0907f;
   --radius: 0.375rem;
-  --sidebar: #eef0f4;
-  --sidebar-foreground: #14171c;
-  --sidebar-primary: #2f5fd1;
+  --sidebar: #ede4d8;
+  --sidebar-foreground: #1a1512;
+  --sidebar-primary: #a8431f;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e3e7ef;
-  --sidebar-accent-foreground: #14171c;
-  --sidebar-border: #e1e4e9;
-  --sidebar-ring: #2f5fd1;
+  --sidebar-accent: #f0e6d8;
+  --sidebar-accent-foreground: #1a1512;
+  --sidebar-border: #e0d5c6;
+  --sidebar-ring: #a8431f;
   /* Instrument-rail accents — see the block comment above @theme. */
-  --operator: #2f5fd1;
+  --operator: #a8431f;
   --operator-foreground: #ffffff;
-  --signal: #b45309;
+  --signal: #b8860b;
   --signal-foreground: #ffffff;
   --alarm: #c6323b;
   --alarm-foreground: #ffffff;
 }
 
 .dark {
-  --background: #0e1013;
-  --foreground: #e7e9ec;
-  --card: #16191f;
-  --card-foreground: #e7e9ec;
-  --popover: #16191f;
-  --popover-foreground: #e7e9ec;
-  --primary: #4c86ff;
-  --primary-foreground: #06122e;
-  --secondary: #1d2128;
-  --secondary-foreground: #e7e9ec;
-  --muted: #1d2128;
-  --muted-foreground: #9aa1ad;
-  --accent: #1b2740;
-  --accent-foreground: #c6d6ff;
+  --background: #0a0908;
+  --foreground: #f3ece2;
+  --card: #17140f;
+  --card-foreground: #f3ece2;
+  --popover: #1c1712;
+  --popover-foreground: #f3ece2;
+  --primary: #c2542b;
+  --primary-foreground: #ffffff;
+  --secondary: #1a1613;
+  --secondary-foreground: #f3ece2;
+  --muted: #1a1613;
+  --muted-foreground: #b3a497;
+  --accent: #241d16;
+  --accent-foreground: #e8926b;
   --destructive: #e5484d;
-  --border: #262b33;
-  --input: #262b33;
-  --ring: #4c86ff;
-  --chart-1: #4c86ff;
-  --chart-2: #e8963c;
-  --chart-3: #9aa1ad;
-  --chart-4: #c6d6ff;
-  --chart-5: #5b6270;
-  --sidebar: #121419;
-  --sidebar-foreground: #e7e9ec;
-  --sidebar-primary: #4c86ff;
-  --sidebar-primary-foreground: #06122e;
-  --sidebar-accent: #1b2028;
-  --sidebar-accent-foreground: #e7e9ec;
-  --sidebar-border: #21252c;
-  --sidebar-ring: #4c86ff;
+  --border: #2a2118;
+  --input: #2a2118;
+  --ring: #c2542b;
+  --chart-1: #c2542b;
+  --chart-2: #e0a93a;
+  --chart-3: #b3a497;
+  --chart-4: #f3ece2;
+  --chart-5: #6b5d51;
+  --sidebar: #131110;
+  --sidebar-foreground: #f3ece2;
+  --sidebar-primary: #c2542b;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1a1613;
+  --sidebar-accent-foreground: #f3ece2;
+  --sidebar-border: #2a2118;
+  --sidebar-ring: #c2542b;
   /* Instrument-rail accents — see the block comment above @theme. */
-  --operator: #4c86ff;
-  --operator-foreground: #06122e;
-  --signal: #e8963c;
+  --operator: #c2542b;
+  --operator-foreground: #ffffff;
+  --signal: #e0a93a;
   --signal-foreground: #1a1000;
   --alarm: #e5484d;
   --alarm-foreground: #170406;
@@ -170,10 +207,31 @@
 /* Panel-label vernacular: uppercase, letter-spaced, Space Grotesk — used for
    tab triggers, sidebar section headers, and gate eyebrow labels. A silkscreen
    label reads as an instruction, not prose, so it earns its own utility class
-   rather than being redefined per component. */
+   rather than being redefined per component.
+
+   Deliberately NOT var(--font-heading) (Playwrite US Trad, a cursive/
+   handwriting display face, as of the oni-matcha font pass): cursive script
+   in spaced-out ALL CAPS is illegible (found live — "CHAT HISTORY MEMORY"
+   as tab labels). Same scoping call the built-in `gothic` theme already
+   makes for its own display font ("reserved for hero/marketing-scale text
+   only") — Playwrite stays on genuine headings (the "Oni" wordmark, h1-h3),
+   this stays on the geometric sans it was designed for. */
 .panel-label {
-  font-family: var(--font-heading);
+  font-family: "Space Grotesk Variable", sans-serif;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 500;
+}
+
+/* Kanban board cards: cursor/drag affordance + hover elevation. Inline
+   styles (used for the rest of the board's layout, see KanbanBoard.tsx)
+   can't express :hover, so this one rule stays a real CSS class. */
+.kanban-card {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  transition: box-shadow 120ms ease;
+}
+.kanban-card:hover {
+  box-shadow: var(--shadow-med);
 }

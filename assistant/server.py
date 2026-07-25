@@ -48,12 +48,15 @@ terminal SSE frame of a stream.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from io import BytesIO
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 
@@ -63,15 +66,16 @@ from dotenv import load_dotenv
 # first.
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from langchain_core.messages import BaseMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 from langsmith import Client as LangSmithClient  # noqa: E402
+from PIL import Image  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from assistant import memory_store, observability, thread_store  # noqa: E402
+from assistant import board_store, memory_store, observability, thread_store  # noqa: E402
 from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
@@ -79,6 +83,7 @@ from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
+from assistant.tools import _resolve_in_workspace  # noqa: E402
 
 # Historically had to run before observability's lazy handler was first
 # constructed, since tags were constructor-bound in Langfuse v2. No longer
@@ -102,6 +107,10 @@ if "ASSISTANT_MEMORY_DB_PATH" in os.environ:
 # Same redirect story again, for Phase 15's thread registry/pointer DB.
 if "ASSISTANT_THREADS_DB_PATH" in os.environ:
     thread_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_THREADS_DB_PATH"]
+
+# Same redirect story again, for the kanban board DB.
+if "ASSISTANT_BOARD_DB_PATH" in os.environ:
+    board_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_BOARD_DB_PATH"]
 
 # Matches CLAUDE.md's Tech stack section (LANGCHAIN_PROJECT=personal-assistant),
 # read from the env rather than hardcoded so a differently-configured
@@ -414,6 +423,99 @@ async def _stream_turn(
         app.state.active_tasks.pop(thread_id, None)
 
 
+# --- File/photo upload (dashboard chat composer) --------------------------
+#
+# Uploading your own file is user input, not an agent-initiated side effect —
+# symmetric with typing a message, so this deliberately does NOT go through
+# the interrupt/confirmation gate (CLAUDE.md's standing rule only gates
+# agent-authored actions). Two invariants this must never violate:
+#   1. /uploads writes only through _resolve_in_workspace (tools.py) — the
+#      existing sandboxed-directory boundary every file tool already uses.
+#      The filename is server-generated (uuid4, never the raw client name),
+#      but it's still routed through that same containment check rather
+#      than trusted "because we generated it" — one implementation of the
+#      boundary, not a second bespoke one for uploads.
+#   2. Content read back via read_file is ordinary untrusted tool output,
+#      already covered by the existing threat model (assistant/tools.py's
+#      module docstring). No new mitigation category.
+MAX_IMAGE_BYTES = 3_500_000  # raw; ~4.7MB base64, under Claude's 10MB cap w/ headroom
+MAX_DOCUMENT_BYTES = 20_000_000
+# Exactly Claude's supported image set (Anthropic vision docs) — HEIC (the
+# default from iPhone/Photos.app) is deliberately NOT accepted; rejected with
+# a clear error rather than silently mishandled or transcoded (no HEIC
+# decoder dependency in v1).
+ALLOWED_IMAGE_MIME = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+ALLOWED_DOCUMENT_EXT = {
+    ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".yaml", ".yml",
+    ".log", ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".sql", ".sh",
+}
+# claude-sonnet-5 is in Anthropic's high-resolution vision tier: an
+# unresized 4K screenshot costs ~4784 visual tokens; downsampling to this
+# long edge first cuts that to ~1560 (~3x) for negligible quality loss in
+# chat use — CLAUDE.md's standing cost-consciousness rule.
+IMAGE_MAX_LONG_EDGE = 1568
+
+
+def _sanitize_upload_filename(filename: str) -> str:
+    """Server-generated-safe stem + real extension — never the raw client
+    name verbatim (collisions, path-shaped names). Routed through
+    _resolve_in_workspace below regardless; this only keeps the on-disk
+    name readable."""
+    stem, _, ext = filename.rpartition(".")
+    stem = stem or filename
+    safe_stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in stem)[:64] or "file"
+    safe_ext = "".join(c for c in ext if c.isalnum())[:10]
+    return f"{safe_stem}.{safe_ext}" if safe_ext else safe_stem
+
+
+class Attachment(BaseModel):
+    """What /uploads returned, echoed back on the /chat call that uses it.
+    The client is telling us a path — _build_user_content re-resolves it
+    server-side via _resolve_in_workspace rather than trusting it."""
+
+    path: str  # workspace-relative
+    mime_type: str
+    kind: Literal["image", "document"]
+    filename: str
+
+
+def _build_user_content(message: str, attachments: list[Attachment]) -> str | list[dict[str, Any]]:
+    """Plain string when there are no attachments — byte-identical to the
+    pre-upload shape, so every existing caller (CLI, voice daemon, every
+    test that predates this feature) is completely unaffected. Only
+    attachment-bearing turns get the multimodal content-block list."""
+    if not attachments:
+        return message
+
+    blocks: list[dict[str, Any]] = []
+    doc_lines: list[str] = []
+    for att in attachments:
+        resolved = _resolve_in_workspace(att.path)  # raises ValueError on escape/dotfile
+        if not resolved.is_file():
+            raise HTTPException(status_code=400, detail=f"unknown attachment: {att.path}")
+        if att.kind == "image":
+            blocks.append(
+                {
+                    "type": "image",
+                    "source_type": "base64",
+                    "mime_type": att.mime_type,
+                    "data": base64.b64encode(resolved.read_bytes()).decode(),
+                }
+            )
+        else:
+            doc_lines.append(f"- {att.filename} -> {att.path}")
+
+    text = message
+    if doc_lines:
+        text += (
+            "\n\n[The user attached these files to the workspace. "
+            "Use read_file with the path shown to read one.]\n" + "\n".join(doc_lines)
+        )
+    # Images before text, matching Anthropic's own documented ordering guidance.
+    blocks.append({"type": "text", "text": text})
+    return blocks
+
+
 class ChatRequest(BaseModel):
     message: str
     # Optional (Phase 15): a client that manages its own conversation can
@@ -422,6 +524,9 @@ class ChatRequest(BaseModel):
     # the active pointer currently says", preserving every pre-Phase-15
     # client's behavior exactly.
     thread_id: str | None = None
+    # File/photo upload feature: paths returned by POST /uploads. Default
+    # empty list keeps every pre-existing caller byte-compatible.
+    attachments: list[Attachment] = []
 
 
 class ResumeRequest(BaseModel):
@@ -566,10 +671,92 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     # response (SSE only starts once we've already committed to a 200,
     # since HTTP headers/status can't change after the body starts).
     thread_id = await _resolve_thread_id(request.thread_id)
-    input_ = {"messages": [("user", request.message)]}
+    input_ = {"messages": [("user", _build_user_content(request.message, request.attachments))]}
     return StreamingResponse(
         _stream_turn(app.state.graph, thread_id, input_), media_type="text/event-stream"
     )
+
+
+@app.post("/uploads")
+async def upload_file(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Accepts one file, validates it, and stores it under workspace/uploads/
+    — see the upload security-model comment above ChatRequest for the two
+    invariants this must preserve. Returns a reference the client echoes
+    back on /chat as an Attachment; nothing here touches the graph."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="missing filename")
+
+    ext = ("." + file.filename.rsplit(".", 1)[-1].lower()) if "." in file.filename else ""
+    is_image = (file.content_type or "") in ALLOWED_IMAGE_MIME
+    is_document = ext in ALLOWED_DOCUMENT_EXT
+
+    if not is_image and not is_document:
+        if (file.content_type or "").startswith("image/"):
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"unsupported image type '{file.content_type}' — Claude accepts "
+                    f"{sorted(ALLOWED_IMAGE_MIME)} only. Convert to JPEG or PNG first "
+                    "(HEIC photos need converting)."
+                ),
+            )
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported file type '{ext or file.content_type}'",
+        )
+
+    max_bytes = MAX_IMAGE_BYTES if is_image else MAX_DOCUMENT_BYTES
+    # Streamed in chunks and aborted at the cap rather than trusting
+    # Content-Length (a lying header can't fill the disk).
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(1_048_576):
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"file exceeds {max_bytes} byte limit for {'images' if is_image else 'documents'}",
+            )
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if not raw:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    if is_image:
+        # Downsample to IMAGE_MAX_LONG_EDGE before storing — see the
+        # constant's own comment for the cost rationale. Re-encoded to the
+        # original format so mime_type stays accurate.
+        with Image.open(BytesIO(raw)) as img:
+            img.load()
+            long_edge = max(img.size)
+            if long_edge > IMAGE_MAX_LONG_EDGE:
+                scale = IMAGE_MAX_LONG_EDGE / long_edge
+                img = img.resize(
+                    (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+                    Image.LANCZOS,
+                )
+            buf = BytesIO()
+            fmt = {"image/jpeg": "JPEG", "image/png": "PNG", "image/gif": "GIF", "image/webp": "WEBP"}[
+                file.content_type
+            ]
+            img.save(buf, format=fmt)
+            raw = buf.getvalue()
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    safe_name = _sanitize_upload_filename(file.filename)
+    rel_path = f"uploads/{today}/{uuid.uuid4().hex[:8]}_{safe_name}"
+    resolved = _resolve_in_workspace(rel_path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_bytes(raw)
+
+    return {
+        "id": resolved.stem,
+        "path": rel_path,
+        "filename": file.filename,
+        "mime_type": file.content_type or "application/octet-stream",
+        "size": len(raw),
+        "kind": "image" if is_image else "document",
+    }
 
 
 @app.post("/resume")
@@ -772,6 +959,99 @@ async def delete_memory_fact(fact_id: int) -> dict[str, Any]:
     deleted = await memory_store.delete_fact(fact_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No fact with id {fact_id}")
+    return {"deleted": True}
+
+
+def _serialize_board_item(item: board_store.BoardItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "column": item.column,
+        "ref": item.ref,
+        "priority": item.priority,
+        "title": item.title,
+        "description": item.description,
+        "position": item.position,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+class CreateBoardTaskRequest(BaseModel):
+    column: str
+    title: str
+    description: str = ""
+    priority: str = "medium"
+
+
+class UpdateBoardTaskRequest(BaseModel):
+    """Open-ended: any subset of fields. Presence of `column` means "move
+    this task" (board_store.move_item); any of title/description/priority
+    present ALSO means "edit these fields" (board_store.update_item) —
+    both can apply to the same request, e.g. a drag-and-drop that also
+    changes priority in one PATCH."""
+
+    column: str | None = None
+    position: int | None = None
+    title: str | None = None
+    description: str | None = None
+    priority: str | None = None
+
+
+@app.get("/board/tasks")
+async def list_board_tasks() -> dict[str, Any]:
+    """Kanban board state — same store both the dashboard's Board tab and
+    life_admin_agent's board_tools.py read/write, full access per the
+    user's explicit request (see board_tools.py's own docstring for why
+    this is deliberately ungated, unlike email/calendar/filter writes)."""
+    items = await board_store.list_items()
+    return {"tasks": [_serialize_board_item(i) for i in items]}
+
+
+@app.post("/board/tasks")
+async def create_board_task(request: CreateBoardTaskRequest) -> dict[str, Any]:
+    try:
+        item = await board_store.create_item(
+            column=request.column,
+            title=request.title,
+            description=request.description,
+            priority=request.priority,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _serialize_board_item(item)
+
+
+@app.patch("/board/tasks/{task_id}")
+async def update_board_task(task_id: str, request: UpdateBoardTaskRequest) -> dict[str, Any]:
+    try:
+        if request.column is not None:
+            await board_store.move_item(task_id, column=request.column, position=request.position)
+        if request.title is not None or request.description is not None or request.priority is not None:
+            item = await board_store.update_item(
+                task_id,
+                title=request.title,
+                description=request.description,
+                priority=request.priority,
+            )
+        else:
+            items = await board_store.list_items()
+            item = next(i for i in items if i.id == task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No task with id {task_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _serialize_board_item(item)
+
+
+@app.delete("/board/tasks/{task_id}")
+async def delete_board_task(task_id: str) -> dict[str, Any]:
+    """User-initiated deletion of their own task — same reasoning as
+    delete_memory_fact above: curation of the user's own data, not a new
+    agent-authored side effect, so no confirmation gate."""
+    try:
+        await board_store.delete_item(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No task with id {task_id}") from exc
     return {"deleted": True}
 
 

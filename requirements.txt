@@ -19,6 +19,16 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 langsmith>=0.10.0
 
+# Dashboard file/photo upload feature: python-multipart was already a
+# transitive dep (FastAPI's own multipart parsing pulls it in silently, and
+# raises at import time on UploadFile/File() without it declared); made
+# explicit now that POST /uploads uses them directly. Pillow is new --
+# server-side downsampling of uploaded images to a 1568px long edge before
+# they're sent to Claude's vision API (a ~3x visual-token cost cut on
+# claude-sonnet-5's high-resolution tier for a typical 4K screenshot).
+python-multipart>=0.0.9
+Pillow>=10.0.0
+
 # Phase 16 Part B: Langfuse v3 tracing (additive to LangSmith, not a
 # replacement). Pinned <4.0 deliberately -- this migration's target is v3,
 # not v4 (which ships a differently-shaped span-filter API confirmed NOT

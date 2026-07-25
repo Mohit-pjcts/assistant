@@ -121,6 +121,28 @@ class ExtractionResult(BaseModel):
     facts: list[ProposedFact] = Field(default_factory=list)
 
 
+def _text_only_content(content: object) -> str:
+    """Text-only rendering of a message's content — mirrors server.py's
+    `_render_content` (same per-module duplication convention already used
+    there and in main.py). Load-bearing here specifically because the
+    dashboard's file-upload feature can put multimodal content BLOCKS on a
+    genuine HumanMessage (an image as a base64 data block); the old blind
+    `str(m.content)` fallback would stringify that entire block — several
+    MB of base64 — straight into this extraction prompt. Extracting only
+    text blocks keeps that out."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
 def _current_turn_user_text(messages: list[AnyMessage]) -> str:
     """(A) The entire trust boundary for extraction: concatenates ONLY
     genuine user HumanMessage content from the current top-level turn.
@@ -134,7 +156,7 @@ def _current_turn_user_text(messages: list[AnyMessage]) -> str:
         if is_genuine_human_turn(m):
             turn_start = i
     return "\n".join(
-        m.content if isinstance(m.content, str) else str(m.content)
+        _text_only_content(m.content)
         for m in messages[turn_start:]
         if is_genuine_human_turn(m)
     )

@@ -39,6 +39,7 @@ atexit.register(shutil.rmtree, _tmpdir, ignore_errors=True)
 os.environ.setdefault("ASSISTANT_CONVERSATION_DB_PATH", os.path.join(_tmpdir, "conversation_memory.sqlite"))
 os.environ.setdefault("ASSISTANT_MEMORY_DB_PATH", os.path.join(_tmpdir, "long_term_memory.sqlite"))
 os.environ.setdefault("ASSISTANT_THREADS_DB_PATH", os.path.join(_tmpdir, "threads.sqlite"))
+os.environ.setdefault("ASSISTANT_BOARD_DB_PATH", os.path.join(_tmpdir, "board.sqlite"))
 # Bound here, not re-read from os.environ inside the test function itself —
 # same reasoning, belt-and-suspenders: this constant is fixed at the exact
 # instant this module resolved the (possibly-already-set) env var, so nothing
@@ -529,6 +530,181 @@ async def test_delete_unknown_thread_returns_404() -> None:
         assert response.status_code == 404
 
 
+# --- POST /uploads (file/photo upload feature) ------------------------------
+# Deliberately hit the real workspace/ dir (tools.py's WORKSPACE_DIR has no
+# env-var redirect, unlike the DB paths above) rather than modifying that
+# security-sensitive module just for test isolation — each test cleans up
+# exactly what it wrote, same "throwaway scripts must not pollute real
+# state" discipline CLAUDE.md's verification section already requires.
+# None of these hit the graph — cheap, no Anthropic API calls.
+
+
+def _tiny_png_bytes() -> bytes:
+    import io as _io
+
+    from PIL import Image as _Image
+
+    buf = _io.BytesIO()
+    _Image.new("RGB", (4, 4), color=(200, 90, 40)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _cleanup_upload(rel_path: str) -> None:
+    from assistant.tools import WORKSPACE_DIR
+
+    resolved = WORKSPACE_DIR / rel_path
+    if resolved.exists():
+        resolved.unlink()
+        if not any(resolved.parent.iterdir()):
+            resolved.parent.rmdir()
+
+
+async def test_upload_image_happy_path_and_downsamples() -> None:
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/uploads", files={"file": ("photo.png", _tiny_png_bytes(), "image/png")}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["kind"] == "image"
+        assert body["mime_type"] == "image/png"
+        assert body["path"].startswith("uploads/")
+        assert body["filename"] == "photo.png"
+        try:
+            from assistant.tools import WORKSPACE_DIR
+
+            assert (WORKSPACE_DIR / body["path"]).is_file()
+        finally:
+            _cleanup_upload(body["path"])
+
+
+async def test_upload_oversized_image_rejected_with_413() -> None:
+    oversized = b"\x00" * (server.MAX_IMAGE_BYTES + 1024)
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/uploads", files={"file": ("big.png", oversized, "image/png")}
+        )
+        assert response.status_code == 413
+
+
+async def test_upload_heic_rejected_with_clear_error() -> None:
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/uploads", files={"file": ("photo.heic", b"not-a-real-heic", "image/heic")}
+        )
+        assert response.status_code == 415
+        assert "HEIC" in response.text or "convert" in response.text.lower()
+
+
+async def test_upload_filename_with_traversal_characters_is_sanitized() -> None:
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/uploads",
+            files={"file": ("../../etc/passwd.png", _tiny_png_bytes(), "image/png")},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert ".." not in body["path"]
+        assert body["path"].startswith("uploads/")
+        _cleanup_upload(body["path"])
+
+
+async def test_chat_with_image_attachment_reaches_claude_vision() -> None:
+    """The one real end-to-end check for the whole upload feature: an
+    uploaded image actually reaches Claude as a multimodal content block
+    and gets a sensible response — not just that the endpoint accepts a
+    file. Hits the real Anthropic API (claude-sonnet-5 vision), unlike the
+    /uploads-only tests above."""
+    import io as _io
+
+    from PIL import Image as _Image
+
+    buf = _io.BytesIO()
+    _Image.new("RGB", (64, 64), color=(255, 0, 0)).save(buf, format="PNG")
+    red_square = buf.getvalue()
+
+    with TestClient(server.app) as client:
+        upload = client.post(
+            "/uploads", files={"file": ("swatch.png", red_square, "image/png")}
+        )
+        assert upload.status_code == 200, upload.text
+        attachment = upload.json()
+        try:
+            response = client.post(
+                "/chat",
+                json={
+                    "message": "What single color is this image? Answer with just the color name.",
+                    "attachments": [
+                        {
+                            "path": attachment["path"],
+                            "mime_type": attachment["mime_type"],
+                            "kind": attachment["kind"],
+                            "filename": attachment["filename"],
+                        }
+                    ],
+                },
+            )
+            assert response.status_code == 200, response.text
+            body = _final_sse_event(response)
+            assert body["type"] == "message"
+            assert "red" in body["content"].lower()
+        finally:
+            _cleanup_upload(attachment["path"])
+
+
+# --- /board/tasks (kanban board) ---------------------------------------
+# Pure CRUD over the isolated tmpdir-redirected board.sqlite — no graph
+# calls, cheap.
+
+
+async def test_board_task_create_list_update_move_delete_round_trip() -> None:
+    with TestClient(server.app) as client:
+        created = client.post(
+            "/board/tasks",
+            json={"column": "todo", "title": "Write tests", "priority": "high"},
+        )
+        assert created.status_code == 200, created.text
+        task = created.json()
+        assert task["column"] == "todo"
+        assert task["priority"] == "high"
+        assert task["ref"].startswith("ONI-")
+        task_id = task["id"]
+
+        listed = client.get("/board/tasks")
+        assert listed.status_code == 200
+        assert any(t["id"] == task_id for t in listed.json()["tasks"])
+
+        edited = client.patch(f"/board/tasks/{task_id}", json={"title": "Write more tests"})
+        assert edited.status_code == 200
+        assert edited.json()["title"] == "Write more tests"
+        assert edited.json()["column"] == "todo"
+
+        moved = client.patch(f"/board/tasks/{task_id}", json={"column": "done"})
+        assert moved.status_code == 200
+        assert moved.json()["column"] == "done"
+
+        deleted = client.delete(f"/board/tasks/{task_id}")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+        listed_after = client.get("/board/tasks")
+        assert not any(t["id"] == task_id for t in listed_after.json()["tasks"])
+
+
+async def test_board_task_unknown_id_returns_404() -> None:
+    with TestClient(server.app) as client:
+        assert client.patch("/board/tasks/does-not-exist", json={"title": "x"}).status_code == 404
+        assert client.delete("/board/tasks/does-not-exist").status_code == 404
+
+
+async def test_board_task_invalid_column_returns_400() -> None:
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/board/tasks", json={"column": "not-a-real-column", "title": "x"}
+        )
+        assert response.status_code == 400
+
+
 if __name__ == "__main__":
     asyncio.run(test_chat_round_trips_through_the_real_graph())
     print("OK: /chat round-trips through the real graph")
@@ -572,3 +748,19 @@ if __name__ == "__main__":
     print("OK: deleting the active thread reassigns the pointer")
     asyncio.run(test_delete_unknown_thread_returns_404())
     print("OK: DELETE /threads/{id} on an unknown thread returns 404")
+    asyncio.run(test_upload_image_happy_path_and_downsamples())
+    print("OK: POST /uploads accepts an image and stores it under workspace/")
+    asyncio.run(test_upload_oversized_image_rejected_with_413())
+    print("OK: POST /uploads rejects an oversized image with 413")
+    asyncio.run(test_upload_heic_rejected_with_clear_error())
+    print("OK: POST /uploads rejects HEIC with a clear conversion error")
+    asyncio.run(test_upload_filename_with_traversal_characters_is_sanitized())
+    print("OK: POST /uploads sanitizes a filename with traversal characters")
+    asyncio.run(test_chat_with_image_attachment_reaches_claude_vision())
+    print("OK: an uploaded image reaches Claude as a real multimodal content block")
+    asyncio.run(test_board_task_create_list_update_move_delete_round_trip())
+    print("OK: board task create/list/update/move/delete round-trips")
+    asyncio.run(test_board_task_unknown_id_returns_404())
+    print("OK: board task operations on an unknown id return 404")
+    asyncio.run(test_board_task_invalid_column_returns_400())
+    print("OK: board task creation with an invalid column returns 400")

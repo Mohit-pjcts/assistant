@@ -20,10 +20,10 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No phase currently ACTIVE.** Phase 19 (startup/cost/voice fixes +
-  "Oni" dashboard redesign, STEPS.md 96) is the most recently completed
-  phase, opened, built, and documented in one session (2026-07-24) — no
-  next phase opened or scoped yet.
+- **No phase currently ACTIVE.** Phase 20 (Astryx redesign integration:
+  theme, chat, uploads, kanban board, landing page, STEPS.md 97) is the
+  most recently completed phase, opened, built, and documented in one
+  session (2026-07-24/25) — no next phase opened or scoped yet.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -315,6 +315,87 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   `tsc`/`ruff`/`prettier`/`build` all clean (2 pre-existing, unrelated
   ruff findings confirmed via `git stash`, identical to Phase 18's own,
   not introduced here).
+- Complete: Phase 20 — Astryx redesign integration: theme, chat, uploads,
+  kanban board, landing page (2026-07-24/25, STEPS.md 97). Opened and
+  built in one long session, no phase previously ACTIVE; docs written up
+  in a closeout pass at the user's direct request, same pattern as
+  Phase 17's own (STEPS.md 93). Explored first in a throwaway sandbox
+  (`oni/`, gitignored, never committed) against the desktop wallpaper's
+  ember palette, then integrated into the real `dashboard/` app across a
+  run of escalating asks in the same conversation.
+  **Theme:** `dashboard/src/themes/oniMatcha/oniMatchaTheme.ts` —
+  `defineTheme({ extends: matchaTheme, ... })`, keeping matcha's own
+  shape/typography while overriding every color token (including the
+  ones matcha bakes its green directly into — shadows, overlays, the
+  gray family) with the sandbox's ember palette; applied app-wide via
+  `AstryxThemeBridge.tsx`, sharing the app's existing theme toggle.
+  **Chat redesign:** `ChatPanel.tsx`/`InterruptGate.tsx`/
+  `A2UIRenderer.tsx` migrated to Astryx components as a pure
+  presentation swap — `InterruptGate.tsx`'s security-critical
+  verbatim-payload contract (every `data-testid`, every per-action
+  field) left untouched, verified by the full existing test file passing
+  with zero test edits. Astryx's flagship contentEditable composer input
+  swapped for a real `<TextArea>` in the `input` slot (a documented,
+  deliberate trade-off — keeps `ChatPanel.test.tsx`'s placeholder-based
+  queries working, skips the flagship input's token-chip/mention
+  affordances for this panel specifically).
+  **File/photo uploads:** new `POST /uploads` (`server.py`) — image MIME
+  allowlist (HEIC explicitly rejected, no new dependency added for it), a
+  size cap, and server-side downsampling to a 1568px long edge before
+  storing/encoding (a real cost decision — cuts an unresized 4K
+  screenshot from ~4784 to ~1560 visual tokens against Claude's own
+  high-resolution vision tier). Every generated path still routed through
+  `tools.py`'s existing `_resolve_in_workspace()`, not trusted for being
+  server-generated. `memory_extraction.py` gained `_text_only_content()`
+  so a multimodal turn's base64 image blob can't get stringified into an
+  extraction prompt. Verified end-to-end against real Claude vision.
+  **Kanban board, real backend + full agent access:**
+  `assistant/board_store.py` (new, mirrors `thread_store.py`'s own
+  pattern — separate `board.sqlite`, durable human-readable "ONI-N" refs
+  via a `ref_counter` table) + `GET/POST/PATCH/DELETE /board/tasks[/{id}]`
+  (`server.py`) + `assistant/board_tools.py`, given to `life_admin_agent`
+  deliberately UNGATED — the standing confirmation rule (Security model
+  below) covers side-effectful EXTERNAL actions; the board is local,
+  in-app, and fully reversible, the same category that rule already
+  excludes, documented directly in the module's own docstring. A real,
+  live-found gap fixed along the way: the supervisor initially refused to
+  delegate board requests at all (same "no visibility into a specialist's
+  bound tools" class of bug Phase 18 hit for `render_ui`) —
+  `SUPERVISOR_SYSTEM_PROMPT_FALLBACK`'s routing line now names the board
+  explicitly, re-synced to Langfuse. `InProgressTasksCard.tsx` (new)
+  polls the same live data for the right rail (kept on shadcn, not
+  migrated to Astryx, matching History/Memory/Cost/ThreadSidebar).
+  **Landing page:** adapted from the Astryx Playground's "AI Chat
+  Landing" template (`astryx.atmeta.com/playground`) into a new Home tab
+  (`dashboard/src/components/home/HomePage.tsx`), now the default tab —
+  greeting, cursive heading, category filter, suggestion-card grid, and
+  composer kept and fully wired to the real chat pipeline via
+  `ChatPanel.tsx`'s new `initialMessage`/`onConsumeInitialMessage`
+  hand-off (auto-sends through the same, already-tested `handleSend`
+  path a typed message takes, consumed exactly once). The template's
+  non-functional demo content — a fake @mention team roster, a
+  `/command` palette, "Sensitive"/"Deep Mode" tokens, a dead settings
+  menu — deliberately dropped rather than shipped as UI that does
+  nothing in a single-user personal assistant. Extracting the design's
+  source hit an unrelated data-exfiltration guard blocking the
+  Playground tab's own tool-text-output channel (root-caused, not
+  guessed around — full detail in STEPS.md 97); worked around by reading
+  the Monaco editor's content directly via screenshots instead, then
+  cross-checked against the actually-installed `@astryxdesign/core`
+  source for every component/prop used. Live-verified against the real
+  running app via both submission paths (typed + Enter, and clicking a
+  suggestion card), each producing a real streamed reply from the live
+  backend.
+  **Layout/font fixes**, from direct user feedback mid-session: removed
+  a `max-w-2xl` cap that left empty space between columns, widened the
+  right rail (`w-72`→`w-96`), and scoped the cursive display font to
+  large headings only — briefly over-applied onto small uppercase tab
+  labels, self-corrected to match the pattern Astryx's own built-in
+  `gothic` theme already uses.
+  218/218 backend tests pass (8 new), 64/64 frontend tests pass (3 new);
+  `tsc`/`ruff`/`prettier`/`build` all clean (2 pre-existing, unrelated
+  ruff findings confirmed via `git stash`, identical to Phases 18/19's
+  own, not introduced here).
 
 Roadmap history: renumbered 2026-07-13 (handoff-fix/memory/voice-upgrade/
 dashboard inserted ahead of the original polish phase). On 2026-07-14 Phase
@@ -334,7 +415,10 @@ documented 2026-07-24). Phase 18 (render_ui extended to specialists +
 A2UI surface persistence) opened, built, and documented the same day,
 2026-07-24 (STEPS.md 95). Phase 19 (startup/cost/voice fixes + "Oni"
 dashboard redesign) opened, built, and documented the same day,
-2026-07-24 (STEPS.md 96). See PLAN.md.
+2026-07-24 (STEPS.md 96). Phase 20 (Astryx redesign integration: theme,
+chat, uploads, kanban board, landing page) opened and built the same
+day, 2026-07-24, spanning into 2026-07-25; documented in a closeout pass
+at the user's request (STEPS.md 97). See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -368,6 +452,11 @@ assistant/
 ├── thread_store.py        # Phase 15: active-thread pointer + registry (threads.sqlite,
 │                             separate from both other SQLite files above) — see the
 │                             Active-thread pointer load-bearing decision below
+├── board_store.py         # Phase 20: kanban board storage (board.sqlite, separate from every
+│                             other SQLite file above), mirrors thread_store.py's own pattern
+├── board_tools.py         # Phase 20: kanban board tools for life_admin_agent — deliberately
+│                             UNGATED (local/reversible/in-app, not an external side effect;
+│                             see its module docstring against the Security model below)
 ├── voice_io.py            # Phase 5/8: mic capture, local STT (mlx-whisper), TTS (`say`)
 ├── voice_daemon.py        # Phase 5: always-on Option+Return hotkey daemon (menu bar app);
 │                             Phase 15: local trigger-phrase parsing for starting a new thread
@@ -379,18 +468,31 @@ assistant/
 └── studio.py              # LangGraph Studio / `langgraph dev` entry point (dev-time graph
                               debugger only; checkpointer=None, unrelated to server.py)
 
-dashboard/                 # Phase 9: Tauri 2 + React + TypeScript + shadcn/ui desktop app
+dashboard/                 # Phase 9: Tauri 2 + React + TypeScript desktop app (shadcn/ui +,
+│                             as of Phase 20, Astryx components on the Chat/Board/Home surfaces
+│                             specifically — see the oniMatchaTheme note below)
 ├── src/
-│   ├── App.tsx             # tab shell (chat/history/memory/cost)
+│   ├── App.tsx             # three-column shell: ThreadSidebar · tabs (home/chat/history/
+│   │                          memory/cost/board) · right context rail (Phase 19/20)
 │   ├── lib/api.ts          # typed client for assistant/server.py's endpoints
+│   ├── themes/oniMatcha/   # Phase 20: ember-recolored matcha theme (defineTheme, extends
+│   │                          matchaTheme) — app-wide via components/theme/AstryxThemeBridge.tsx
 │   └── components/
-│       ├── chat/           # ChatPanel + InterruptGate (confirmation-gate UI affordance)
+│       ├── chat/           # ChatPanel + InterruptGate + A2UIRenderer — Astryx components as of
+│       │                     Phase 20, InterruptGate's verbatim-payload contract unchanged
+│       ├── home/            # Phase 20: HomePage — landing tab adapted from the Astryx
+│       │                     Playground, wired to ChatPanel's real send pipeline
+│       ├── board/           # Phase 20: KanbanBoard + InProgressTasksCard — backed by
+│       │                     board_store.py/board_tools.py, full life_admin_agent access
 │       ├── history/        # HistoryPanel — full unfiltered /history feed
 │       ├── memory/         # MemoryPanel — view + delete (client-confirm, not interrupt-gated)
-│       ├── cost/           # CostPanel — LangSmith aggregates, today/week/all-time
-│       └── ui/             # shadcn/ui primitives
-└── src-tauri/              # Rust shell (process lifecycle not yet wired to server.py — started
-                               by hand as of Phase 9 step 6)
+│       ├── cost/           # CostPanel + CostSummaryCard — LangSmith aggregates
+│       ├── threads/        # Phase 15: ThreadSidebar — new/switch/rename/delete
+│       ├── activity/       # Phase 19: AgentActivityGraph/ToolCallTimeline/StatusPill —
+│       │                     live agent_activity SSE frames, right context rail
+│       └── ui/             # shadcn/ui primitives (still the base for un-migrated panels)
+└── src-tauri/              # Rust shell — owns the Python backend's + voice daemon's process
+                               lifecycle end-to-end (spawn on launch, kill on quit; Phase 14)
 
 tests/                      # pytest-shaped, runnable with plain python; one test file per
                                assistant/ module (test_server.py, test_supervisor.py, etc.)

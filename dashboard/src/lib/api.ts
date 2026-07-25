@@ -79,6 +79,28 @@ export interface AgentActivityEvent {
   tool: string;
 }
 
+// File/photo upload feature: what POST /uploads returns, echoed back
+// verbatim as a ChatRequest.attachments entry (server.py's Attachment
+// model). `kind` is the only thing this client branches on — the
+// image/multimodal vs. document/read_file split happens entirely
+// server-side in _build_user_content.
+export interface Attachment {
+  path: string;
+  mime_type: string;
+  kind: "image" | "document";
+  filename: string;
+}
+
+export async function uploadFile(file: File): Promise<Attachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(`${API_BASE_URL}/uploads`, { method: "POST", body: formData });
+  if (!response.ok) {
+    throw new Error(`/uploads failed (${response.status}): ${await response.text()}`);
+  }
+  return response.json() as Promise<Attachment>;
+}
+
 // Startup-time GETs (fetchThreads/fetchHistory/fetchCost) race a real bug
 // (PLAN.md Phase 19): the Tauri shell shows the window before uvicorn
 // (assistant/server.py) is actually listening, so the very first mount-time
@@ -194,8 +216,9 @@ export async function sendChat(
   onToken: (text: string) => void = () => {},
   onA2UI: (surface: A2UISurface) => void = () => {},
   onActivity: (event: AgentActivityEvent) => void = () => {},
+  attachments: Attachment[] = [],
 ): Promise<ChatTurnResult> {
-  return streamSSE("/chat", { message }, onToken, onA2UI, onActivity);
+  return streamSSE("/chat", { message, attachments }, onToken, onA2UI, onActivity);
 }
 
 export async function resumeChat(
@@ -384,4 +407,75 @@ export async function fetchCost(): Promise<CostStats> {
     throw new Error(`/cost failed (${response.status}): ${await response.text()}`);
   }
   return response.json() as Promise<CostStats>;
+}
+
+// Kanban board — same store both the dashboard's Board tab and
+// life_admin_agent's board_tools.py read/write (server.py's /board/tasks,
+// full agent access per the user's explicit request). No confirmation gate
+// on any of these: board changes are the user's own in-app data, same
+// reasoning as deleteMemoryFact above, not a new agent-authored side effect
+// in the email/calendar/filter sense.
+export type BoardColumnId = "todo" | "in-progress" | "in-review" | "done";
+export type BoardPriority = "high" | "medium" | "low";
+
+export interface BoardTask {
+  id: string;
+  column: BoardColumnId;
+  ref: string;
+  priority: BoardPriority;
+  title: string;
+  description: string;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchBoardTasks(): Promise<BoardTask[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/board/tasks`);
+  if (!response.ok) {
+    throw new Error(`/board/tasks failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { tasks: BoardTask[] };
+  return body.tasks;
+}
+
+export async function createBoardTask(params: {
+  column: BoardColumnId;
+  title: string;
+  description?: string;
+  priority?: BoardPriority;
+}): Promise<BoardTask> {
+  return postJSON<BoardTask>("/board/tasks", params);
+}
+
+export async function updateBoardTask(
+  taskId: string,
+  changes: {
+    column?: BoardColumnId;
+    position?: number;
+    title?: string;
+    description?: string;
+    priority?: BoardPriority;
+  },
+): Promise<BoardTask> {
+  const response = await fetch(`${API_BASE_URL}/board/tasks/${taskId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `PATCH /board/tasks/${taskId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  return response.json() as Promise<BoardTask>;
+}
+
+export async function deleteBoardTask(taskId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/board/tasks/${taskId}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(
+      `DELETE /board/tasks/${taskId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
 }

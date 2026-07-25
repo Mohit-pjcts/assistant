@@ -1,14 +1,9 @@
 import { ShieldAlert, Keyboard, Mic } from "lucide-react";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { Card } from "@astryxdesign/core/Card";
+import { VStack, HStack } from "@astryxdesign/core/Stack";
+import { Heading, Text } from "@astryxdesign/core/Text";
+import { Button } from "@astryxdesign/core/Button";
+import { Badge } from "@astryxdesign/core/Badge";
 import type { InterruptPayload } from "@/lib/api";
 
 interface InterruptGateProps {
@@ -345,67 +340,65 @@ export function InterruptGate({ payload, onApprove, onDecline, disabled }: Inter
 
   return (
     <Card
-      className="gap-3 border-l-4 border-l-signal bg-signal/5 py-3 ring-0"
+      className="border-l-4 border-l-signal bg-signal/5"
+      padding={4}
       data-testid="interrupt-gate"
     >
-      <CardHeader className="gap-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <div className="panel-label flex items-center gap-1.5 text-[0.7rem] text-signal">
+      <VStack gap={3}>
+        <HStack justify="between" align="center">
+          <HStack gap={2} align="center" className="panel-label text-[0.7rem] text-signal">
             <ShieldAlert className="size-3.5" aria-hidden />
             Approval required
-          </div>
-          <div className="flex items-center gap-1.5">
-            {source && (
-              <Badge variant="outline" className="text-[0.65rem]">
-                {source}
-              </Badge>
-            )}
+          </HStack>
+          <HStack gap={1.5} align="center">
+            {source && <Badge variant="neutral" label={source} />}
+            {/* No Tooltip wrapper here (unlike the original's `title` attr):
+                Astryx's Tooltip renders its content into the DOM rather than
+                a native title attribute, which put the word "voice" into the
+                document even for memory-write gates — breaking the test that
+                requires ZERO voice-related text on that specific gate. The
+                badge's own visible label already conveys the state. */}
             <Badge
-              variant="outline"
-              className="gap-1 text-[0.65rem] text-muted-foreground"
-              title={
-                voiceApprovable ? "Can be approved by voice" : "Text-only — not voice-approvable"
-              }
-            >
-              {voiceApprovable ? <Mic className="size-3" /> : <Keyboard className="size-3" />}
-              {voiceApprovable ? "Voice OK" : "Text only"}
-            </Badge>
-          </div>
+              variant="neutral"
+              label={voiceApprovable ? "Voice OK" : "Text only"}
+              icon={voiceApprovable ? <Mic className="size-3" /> : <Keyboard className="size-3" />}
+            />
+          </HStack>
+        </HStack>
+        <VStack gap={1}>
+          <Heading level={4}>Confirmation needed</Heading>
+          <Text color="secondary" size="sm">
+            {description}
+          </Text>
+        </VStack>
+        <div>
+          {memoryWrite ? (
+            <>
+              <blockquote
+                data-testid="interrupt-fact-verbatim"
+                className="whitespace-pre-wrap rounded-md border bg-muted p-3 font-mono text-sm"
+              >
+                {payload.fact as string}
+              </blockquote>
+              {typeof payload.provenance === "string" && payload.provenance && (
+                <p className="mt-2 text-xs text-muted-foreground">Source: {payload.provenance}</p>
+              )}
+            </>
+          ) : ActionBody ? (
+            <ActionBody payload={payload} />
+          ) : (
+            !spokenPrompt && (
+              <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-xs">
+                {JSON.stringify(payload, null, 2)}
+              </pre>
+            )
+          )}
         </div>
-        <CardTitle>Confirmation needed</CardTitle>
-        <CardDescription>{description}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {memoryWrite ? (
-          <>
-            <blockquote
-              data-testid="interrupt-fact-verbatim"
-              className="whitespace-pre-wrap rounded-md border bg-muted p-3 font-mono text-sm"
-            >
-              {payload.fact as string}
-            </blockquote>
-            {typeof payload.provenance === "string" && payload.provenance && (
-              <p className="mt-2 text-xs text-muted-foreground">Source: {payload.provenance}</p>
-            )}
-          </>
-        ) : ActionBody ? (
-          <ActionBody payload={payload} />
-        ) : (
-          !spokenPrompt && (
-            <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-xs">
-              {JSON.stringify(payload, null, 2)}
-            </pre>
-          )
-        )}
-      </CardContent>
-      <CardFooter className="gap-2">
-        <Button onClick={onApprove} disabled={disabled}>
-          Approve
-        </Button>
-        <Button variant="outline" onClick={onDecline} disabled={disabled}>
-          Decline
-        </Button>
-      </CardFooter>
+        <HStack gap={2}>
+          <Button label="Approve" onClick={onApprove} isDisabled={disabled} />
+          <Button label="Decline" variant="secondary" onClick={onDecline} isDisabled={disabled} />
+        </HStack>
+      </VStack>
     </Card>
   );
 }

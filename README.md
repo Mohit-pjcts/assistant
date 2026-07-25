@@ -11,7 +11,8 @@ A personal AI assistant built on the Claude API and [LangGraph](https://github.c
 - **Mac control**: open/focus an app, control Music.app playback, read/create Reminders and Notes, start a new Shortcut in the editor (you finish and save it), run a named Shortcut (confirmation-gated), read/create/update Apple Calendar events (create/update gated, mirrors the Google Calendar pattern), and open a URL in Brave.
 - **Memory**: short-term — conversation history is automatically compacted (summarized) once it grows large, so cost/latency don't scale with a thread's entire lifetime. Long-term — the agent can propose durable facts about you worth remembering across conversations (always behind a confirmation gate showing the exact fact text, never voice-approvable), recalled selectively on later turns, never dumped wholesale.
 - **Voice**: press Option+Return from any application to talk to it and hear it answer — an always-on menu bar daemon (🎙/🔴/💭 state), speech-to-text running fully locally (`mlx-whisper large-v3`, no audio ever leaves the machine), replies spoken via macOS `say`. Say "start a new conversation" to switch threads by voice. Voice and text share the same conversation history and thread; the confirmation gate works spoken too — except for anything with free-text content (email body, memory fact, event description), which is text-only by design (harder to vet by ear than an action verb).
-- **Dashboard**: a Tauri + React desktop app — live chat with token-streaming responses and a Stop button, full conversation history, memory viewer, a per-day/week/all-time cost panel (real LangSmith aggregates), and a thread sidebar. Tauri owns the Python backend's and voice daemon's process lifecycle — launching the app starts both, quitting it stops both.
+- **Dashboard ("Oni")**: a Tauri + React desktop app — a landing Home tab (adapted from an Astryx Playground design) that hands a typed message or a prompt-suggestion card straight into a live chat with token-streaming responses and a Stop button, full conversation history, memory viewer, a per-day/week/all-time cost panel (real LangSmith aggregates), a thread sidebar, a live right-hand rail (agent activity graph, tool-call timeline, cost summary), and a kanban board the assistant can read and write directly. Tauri owns the Python backend's and voice daemon's process lifecycle — launching the app starts both, quitting it stops both.
+- **Photos and files in chat**: attach an image or a text file to a message; images are downsampled server-side before reaching Claude's vision model (keeps token cost sane on a large screenshot or photo).
 - Side-effectful or opaque actions pause the conversation for an explicit confirmation before executing, via a real LangGraph interrupt — not just a prompt instruction. In the text CLI that's a y/n prompt; in the dashboard it's a real UI affordance rendering the verbatim payload; in voice mode the question is spoken and the answer parsed fail-closed (anything that isn't a clear yes — mumble, silence, timeout — declines).
 
 Email, calendar, Note, and Shortcut content are all treated as untrusted input: the system prompts tell the model not to follow instructions embedded in message/event content or blindly trust what a Shortcut does, and — more importantly — the tools themselves are built so an adversarial instruction has nothing dangerous to reach even if the model is fooled. See [Security model](#security-model) below.
@@ -47,6 +48,9 @@ assistant/
 ├── memory_extraction.py   # Long-term memory: source-restricted extraction, confirmation gate,
 │                            selective recall — see its module docstring for the full security design
 ├── thread_store.py        # Multi-thread registry + active-thread pointer (separate SQLite file)
+├── board_store.py         # Kanban board storage (separate SQLite file)
+├── board_tools.py         # Kanban board tools for life_admin_agent — deliberately ungated
+│                            (local, in-app, fully reversible — not an external side effect)
 ├── thinking_repair.py     # Repairs a confirmed langchain-anthropic streaming bug so extended
 │                            thinking can stay enabled without corrupting conversation state
 ├── voice_io.py            # Mic capture, local STT (mlx-whisper), `say` TTS, confirmation parsing
@@ -54,16 +58,21 @@ assistant/
 │                            "start a new conversation" trigger phrase for switching threads
 └── memory.py              # get_checkpointer() — async context manager over AsyncSqliteSaver
 
-dashboard/                 # Tauri 2 + React + TypeScript desktop app
+dashboard/                 # Tauri 2 + React + TypeScript desktop app ("Oni")
 ├── src/
-│   ├── App.tsx             # tab shell (chat/history/memory/cost) + persistent thread sidebar
+│   ├── App.tsx             # three-column shell: thread sidebar · tabs (home/chat/history/
+│   │                          memory/cost/board) · live right-hand context rail
 │   ├── lib/api.ts          # typed client for assistant/server.py, incl. SSE streaming
+│   ├── themes/oniMatcha/   # ember-recolored Astryx theme, applied app-wide
 │   └── components/
 │       ├── chat/           # ChatPanel (streaming + Stop) + InterruptGate (per-action gate UI)
+│       ├── home/           # landing tab — greeting, prompt suggestions, hands off into chat
+│       ├── board/           # kanban board UI, backed by board_store.py/board_tools.py
 │       ├── history/        # full unfiltered conversation feed
 │       ├── memory/         # view + delete durable facts
 │       ├── cost/           # LangSmith cost aggregates
-│       └── threads/        # thread sidebar — new/switch/rename/delete
+│       ├── threads/        # thread sidebar — new/switch/rename/delete
+│       └── activity/       # live agent-activity graph, tool-call timeline, status pill
 └── src-tauri/              # Rust shell — owns the Python backend's and voice daemon's process
                                lifecycle end-to-end (spawn on launch, kill on quit)
 
@@ -212,7 +221,7 @@ Threat model: any tool that touches the web, email, calendar, Notes, or Shortcut
 - **Gmail read**: `download_attachment`/`download_email` write to disk from inside the separate Node server process, outside `tools.py`'s own sandbox — an interceptor forces their save path into `workspace/` and reduces filenames to their basename.
 - **Cost**: an MCP tool that defaults to expanding up to 50 full email threads into context on a single call is capped by an interceptor, rather than trusting the model to pass a small limit.
 - **Long-term memory**: writing a durable fact is automatic (the agent decides what's worth saving) but layered: extraction only ever reads the genuine user's own current-turn text (never tool-result content, closing the "a prompt-injected 'remember X' becomes a permanent fact" hole structurally, not just behaviorally); a cited fact must be backed by a real tool result found independently in the current turn or it's refused outright; every write still goes through the same confirmation gate as any other side effect, with the exact confirmed text persisted verbatim; and recall is framed as data ("known facts...") to the model, never as directives.
-- **Standing confirmation rule**: any side-effectful or opaque action pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit confirmation before executing — demonstrated end-to-end (both confirm and decline paths) through the real CLI/dashboard/voice, not just tested in isolation.
+- **Standing confirmation rule**: any side-effectful or opaque action pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit confirmation before executing — demonstrated end-to-end (both confirm and decline paths) through the real CLI/dashboard/voice, not just tested in isolation. The kanban board (`board_tools.py`) is the deliberate exception this rule already carves out: local, in-app, fully reversible actions aren't gated — the same category `open_url_in_brave` sits in below.
 - **Voice confirmation fails closed**: the spoken answer only approves on a recognized affirmative — a mistranscription, ambiguous phrase, silence, or timeout all decline. Decline-words win when both appear.
 - **Skill vetting**: a Claude Code skill is instruction-bearing content loaded into agent context — the same threat model as any other untrusted input. No skill is installed without reading it first; High/Medium-risk community skills are declined by default; bulk/marketplace installs are never used.
 
@@ -231,12 +240,17 @@ See [PLAN.md](PLAN.md) for the full phase-by-phase plan.
 7. ✅ Memory — short-term compaction + long-term automatic-write facts, behind a layered, red-teamed security design
 8. ✅ Voice upgrade — STT swapped to `mlx-whisper large-v3` (6-8x latency win)
 9. ✅ Tauri desktop dashboard — chat/history/memory/cost panels as a peer client of the graph
-10. 🔄 **Active** (pending sign-off) — proactivity + polish: extended thinking re-enabled behind a verified repair middleware, Haiku-for-research_agent evaluated (stays on Sonnet 5), pytest adopted (CI declined by choice), README refreshed, voice accuracy accepted as-is — every debt item is closed or explicitly accepted; the originally-planned morning-briefing feature was cut from scope entirely
+10. ✅ Proactivity + polish — extended thinking re-enabled behind a verified repair middleware, Haiku-for-research_agent evaluated (stays on Sonnet 5), pytest adopted (CI declined by choice), README refreshed, voice accuracy accepted as-is; the originally-planned morning-briefing feature was cut from scope entirely
 11. ✅ Skills cleanup + a standing skill-vetting policy
 12. ✅ Email + Google Calendar WRITE access — gated send/modify/create/update/delete, verbatim confirmation
 13. ✅ Apple Calendar (read + gated write) + open-URL-in-Brave
 14. ✅ UI rework — full visual redesign, SSE streaming + stop-mid-run, Tauri owns backend/voice process lifecycle
 15. ✅ Multi-thread conversation support — thread registry, delete, persistent sidebar
+16. ✅ Langfuse integration — tracing, prompt management, evaluations (v2 → v3), plus a distributed-tracing spike (real OTEL `traceparent` propagation, streaming relay, live abort-on-stop)
+17. ✅ A2UI generative UI — agents can render structured, optionally interactive cards/forms in the dashboard via a constrained, allowlisted component vocabulary, always display/input-only — no new side-effect path
+18. ✅ A2UI extended to specialist sub-agents + surfaces persist across a reload
+19. ✅ Startup/cost/voice bug fixes + the "Oni" dashboard redesign — three-column layout with a live agent-activity right rail
+20. ✅ Astryx redesign integration — an ember-recolored theme, the chat panel restyled on Astryx components, photo/file uploads, a real kanban board with full agent access, and a landing page adapted from an Astryx Playground design
 
 ## Development
 

@@ -35,3 +35,9 @@ tokens.json
 
 # Obsidian notes-app config — personal editor state, not project content.
 .obsidian/
+
+# Astryx redesign sandbox — throwaway exploration of theme/layout concepts
+# against the desktop wallpaper's ember palette, superseded by the real
+# integration into dashboard/ (oniMatchaTheme, KanbanBoard, HomePage, etc.).
+# Not part of the shipped app; never intended to enter the repo history.
+oni/

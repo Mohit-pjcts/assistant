@@ -79,6 +79,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from assistant import prompts
 from assistant.a2ui import build_render_ui_tool
+from assistant.board_tools import build_board_tools
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
 from assistant.tools import execute_shell_command, read_file, web_search, write_file
@@ -236,7 +237,16 @@ LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK = (
     "message from them, which you handle like any other request. Either "
     "way render_ui never itself performs an action or substitutes for a "
     "confirmation gate — a write action still always goes through its own "
-    "gated tool exactly as described above."
+    "gated tool exactly as described above.\n\n"
+    "You also have full, UNGATED access to the user's kanban board: "
+    "list_board_tasks, create_board_task, update_board_task, "
+    "move_board_task, delete_board_task. Unlike email/calendar/filter "
+    "writes above, board changes never need the user's confirmation first "
+    "— just act on board requests directly (create a task, move it to "
+    "done, delete it, etc.) the same turn they're asked for. Refer to "
+    "tasks by their ref (e.g. 'ONI-3') as shown in list_board_tasks' "
+    "output. When showing the board's current state, prefer render_ui "
+    "(a List or grouped Column layout) over a plain-text dump."
 )
 
 LIFE_ADMIN_SYSTEM_PROMPT = prompts.get_prompt(
@@ -322,7 +332,11 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
     model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
-        tools=[*_select_life_admin_tools(mcp_tools), build_render_ui_tool()],
+        tools=[
+            *_select_life_admin_tools(mcp_tools),
+            build_render_ui_tool(),
+            *build_board_tools(),
+        ],
         system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
         middleware=[NoParallelWrites(), ThinkingBlockRepairMiddleware()],
         state_schema=GatedAgentState,

@@ -133,7 +133,37 @@ describe("ChatPanel", () => {
       expect.any(Function),
       expect.any(Function),
       expect.any(Function),
+      [],
     );
+  });
+
+  it("sends a hand-off message from the Home tab once history has loaded, then consumes it exactly once", async () => {
+    // PLAN.md landing page: HomePage hands a message to App.tsx, which
+    // passes it down as initialMessage — this must auto-send through the
+    // same real handleSend path a typed message takes, and must call
+    // onConsumeInitialMessage so App.tsx clears it (no resend on a later
+    // re-render or tab revisit).
+    mockedSendChat.mockResolvedValue({ type: "message", content: "pong" });
+    const onConsumeInitialMessage = vi.fn();
+
+    render(
+      <ChatPanel
+        initialMessage="ping from home"
+        onConsumeInitialMessage={onConsumeInitialMessage}
+      />,
+    );
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+
+    expect(await screen.findByText("ping from home")).toBeInTheDocument();
+    expect(await screen.findByText("pong")).toBeInTheDocument();
+    expect(mockedSendChat).toHaveBeenCalledWith(
+      "ping from home",
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+      [],
+    );
+    expect(onConsumeInitialMessage).toHaveBeenCalledTimes(1);
   });
 
   it("shows a live streaming bubble that updates as tokens arrive, then finalizes into a real message", async () => {

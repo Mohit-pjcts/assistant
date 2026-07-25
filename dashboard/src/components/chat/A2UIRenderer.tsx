@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
-import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Card } from "@astryxdesign/core/Card";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Divider } from "@astryxdesign/core/Divider";
+import { Button } from "@astryxdesign/core/Button";
+import { TextInput } from "@astryxdesign/core/TextInput";
+import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import type { A2UIComponent, A2UISurface } from "@/lib/api";
 
 // Renders a validated A2UI surface (Phase 17, PLAN.md) — a small,
@@ -68,11 +68,11 @@ function TextNode({ node }: NodeProps) {
 }
 
 function BadgeNode({ node }: NodeProps) {
-  return <Badge variant="outline">{resolveDynamicString(node.text)}</Badge>;
+  return <Badge variant="neutral" label={resolveDynamicString(node.text)} />;
 }
 
 function DividerNode({ node }: NodeProps) {
-  return <Separator orientation={node.axis === "vertical" ? "vertical" : "horizontal"} />;
+  return <Divider orientation={node.axis === "vertical" ? "vertical" : "horizontal"} />;
 }
 
 function ImageNode({ node }: NodeProps) {
@@ -114,8 +114,8 @@ function ListNode({ node, ...rest }: NodeProps) {
 function CardNode({ node, ...rest }: NodeProps) {
   const childId = str(node.child);
   return (
-    <Card className="max-w-md" size="sm">
-      <CardContent>{childId && <RenderNode id={childId} {...rest} />}</CardContent>
+    <Card maxWidth={448} padding={3}>
+      {childId && <RenderNode id={childId} {...rest} />}
     </Card>
   );
 }
@@ -125,12 +125,11 @@ function TextFieldNode({ node, data, setField }: NodeProps) {
   const current = data[path];
   const value = typeof current === "string" ? current : str(node.value);
   return (
-    <label className="flex flex-col gap-1 text-sm">
-      <span className="text-xs font-medium text-muted-foreground">
-        {resolveDynamicString(node.label)}
-      </span>
-      <Input value={value} onChange={(event) => setField(path, event.target.value)} />
-    </label>
+    <TextInput
+      label={resolveDynamicString(node.label)}
+      value={value}
+      onChange={(next) => setField(path, next)}
+    />
   );
 }
 
@@ -139,10 +138,11 @@ function CheckBoxNode({ node, data, setField }: NodeProps) {
   const current = data[path];
   const checked = typeof current === "boolean" ? current : node.value === true;
   return (
-    <label className="flex items-center gap-2 text-sm">
-      <Checkbox checked={checked} onCheckedChange={(next) => setField(path, next === true)} />
-      {resolveDynamicString(node.label)}
-    </label>
+    <CheckboxInput
+      label={resolveDynamicString(node.label)}
+      value={checked}
+      onChange={(next) => setField(path, next)}
+    />
   );
 }
 
@@ -183,11 +183,10 @@ function ChoicePickerNode({ node, data, setField }: NodeProps) {
             key={option}
             type="button"
             size="sm"
-            variant={selected.includes(option) ? "default" : "outline"}
+            variant={selected.includes(option) ? "primary" : "secondary"}
+            label={option}
             onClick={() => toggle(option)}
-          >
-            {option}
-          </Button>
+          />
         ))}
       </div>
     </div>
@@ -207,11 +206,10 @@ function ButtonNode({ node, data, onAction, disabled }: NodeProps) {
   return (
     <Button
       type="button"
+      label={resolveDynamicString(node.text)}
       onClick={() => name && onAction?.(name, data)}
-      disabled={!name || disabled}
-    >
-      {resolveDynamicString(node.text)}
-    </Button>
+      isDisabled={!name || disabled}
+    />
   );
 }
 

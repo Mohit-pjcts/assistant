@@ -1937,3 +1937,66 @@ new), 61/61 frontend tests pass (5 new), `tsc`/`ruff`/`prettier`/`build`
 all clean (2 pre-existing, unrelated ruff findings confirmed via
 `git stash`, identical to Phase 18's own, not introduced here) ✓;
 STEPS.md updated (96) ✓.
+
+## Phase 20 — Astryx redesign integration: theme, chat, uploads, kanban board, landing page — COMPLETE (2026-07-24/25)
+
+**Objective:** bring an Astryx-based visual redesign — explored first in a
+throwaway sandbox against the desktop wallpaper's ember palette — into the
+real `dashboard/` app, then extend it across a run of escalating asks in
+the same conversation: a recolored theme, a fully-usable kanban board with
+agent access, photo/file uploads, and a landing page adapted from the
+Astryx Playground. Opened and built in one long session, no phase
+previously ACTIVE; this PLAN.md entry, STEPS.md's group 97, and CLAUDE.md's
+Current Status flip are a docs-closeout pass written at the user's direct
+request, same pattern as Phase 17's own closeout (STEPS.md 93). Full
+chronological detail in STEPS.md 97, not repeated here.
+
+**Delivered:**
+- **Theme:** `oniMatchaTheme` (`dashboard/src/themes/oniMatcha/`) —
+  matcha's shape/typography kept, every color token overridden with the
+  ember palette (including the tokens matcha bakes its green directly
+  into: shadows, overlays, the gray family), applied app-wide via
+  `AstryxThemeBridge.tsx` sharing the existing theme toggle.
+- **Chat redesign:** `ChatPanel.tsx`/`InterruptGate.tsx`/`A2UIRenderer.tsx`
+  migrated to Astryx components as a pure restyle — `InterruptGate.tsx`'s
+  security-critical verbatim-payload contract untouched, verified by the
+  full existing test file passing with zero test edits.
+- **File/photo uploads:** `POST /uploads` (server-side downsampling to
+  1568px before Claude vision, HEIC rejected with a clear error, every
+  path still routed through the existing workspace-containment check) +
+  a real end-to-end vision test.
+- **Kanban board, real backend + full agent access:** `board_store.py`
+  (new, mirrors `thread_store.py`'s pattern) + `/board/tasks` REST +
+  `board_tools.py` given to `life_admin_agent` deliberately UNGATED (a
+  local/reversible/in-app action, not a side-effectful external one —
+  documented in-code against the standing confirmation rule). A real,
+  live-found supervisor routing gap (same class of bug as Phase 18's
+  `render_ui` one) fixed so board requests actually delegate. A right-rail
+  `InProgressTasksCard` polls the same live data.
+- **Landing page:** adapted from the Astryx Playground's "AI Chat
+  Landing" template (extracted via screenshots after the Playground tab's
+  own text-return-value channel hit an unrelated data-exfiltration guard
+  — see STEPS.md 97 for the full workaround) into a new Home tab, wired
+  to the real chat send pipeline via `ChatPanel`'s new `initialMessage`
+  hand-off. The template's non-functional demo affordances (fake
+  @mentions, `/commands`, dead settings menu) deliberately dropped rather
+  than shipped as UI that doesn't do anything.
+- **Layout/font fixes**, from direct user feedback mid-session: removed a
+  `max-w-2xl` cap that left empty space between columns, widened the
+  right rail, and scoped the cursive display font to large headings only
+  (not small uppercase tab labels, where it was briefly over-applied and
+  self-corrected).
+
+**Done-when: ALL MET.** Theme applied app-wide on the app's own
+component set ✓; chat panel restyled with zero behavioral/test change to
+the security-critical interrupt gate ✓; uploads live-verified end-to-end
+against real Claude vision ✓; kanban board has real persistence, full
+agent read/write access, and a live right-rail summary — the
+supervisor-routing gap that would have made agent access silently
+non-functional found and fixed, not just built and assumed working ✓;
+landing page implemented as a real, fully-wired page (not a static mock)
+and live-verified via both submission paths against the real running app
+✓; 218/218 backend tests pass (8 new), 64/64 frontend tests pass (3 new),
+`tsc`/`ruff`/`prettier`/`build` all clean (2 pre-existing, unrelated ruff
+findings confirmed via `git stash`, identical to Phases 18/19's own, not
+introduced here) ✓; STEPS.md updated (97) ✓.

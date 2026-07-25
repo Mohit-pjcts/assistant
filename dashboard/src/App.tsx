@@ -2,10 +2,13 @@ import { useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import { HomePage } from "@/components/home/HomePage";
 import { HistoryPanel } from "@/components/history/HistoryPanel";
 import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { CostPanel } from "@/components/cost/CostPanel";
 import { CostSummaryCard } from "@/components/cost/CostSummaryCard";
+import { KanbanBoard } from "@/components/board/KanbanBoard";
+import { InProgressTasksCard } from "@/components/board/InProgressTasksCard";
 import { ThreadSidebar } from "@/components/threads/ThreadSidebar";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 import { AgentActivityGraph } from "@/components/activity/AgentActivityGraph";
@@ -33,11 +36,24 @@ import { useAgentActivity } from "@/components/activity/useAgentActivity";
 function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const { activeAgent, activeTool, timeline, handleActivity } = useAgentActivity();
+  // Home tab landing composer hand-off: `activeTab` is controlled (rather
+  // than Tabs' own uncontrolled defaultValue) specifically so submitting a
+  // message on Home can switch to Chat programmatically. pendingHomeMessage
+  // travels with it and is consumed exactly once by ChatPanel's own
+  // initialMessage effect (see ChatPanel.tsx) — cleared via
+  // onConsumeInitialMessage so it can't resend on a later tab revisit.
+  const [activeTab, setActiveTab] = useState("home");
+  const [pendingHomeMessage, setPendingHomeMessage] = useState<string | null>(null);
+
+  function startChatFromHome(message: string) {
+    setPendingHomeMessage(message);
+    setActiveTab("chat");
+  }
 
   return (
     <div className="flex h-screen bg-background">
       <ThreadSidebar onActiveThreadChange={setActiveThreadId} />
-      <main className="mx-auto flex h-screen min-w-0 max-w-2xl flex-1 flex-col gap-4 p-4">
+      <main className="flex h-screen min-w-0 flex-1 flex-col gap-4 p-4">
         <header className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <h1 className="font-heading text-lg font-semibold tracking-tight">Oni</h1>
@@ -45,8 +61,14 @@ function App() {
           </div>
           <ThemeToggle />
         </header>
-        <Tabs defaultValue="chat" className="min-h-0 flex-1">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1">
           <TabsList variant="line" className="border-b border-border">
+            <TabsTrigger
+              value="home"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
+              Home
+            </TabsTrigger>
             <TabsTrigger
               value="chat"
               className="panel-label text-xs after:bg-operator data-active:text-operator"
@@ -71,9 +93,23 @@ function App() {
             >
               Cost
             </TabsTrigger>
+            <TabsTrigger
+              value="board"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
+              Board
+            </TabsTrigger>
           </TabsList>
+          <TabsContent value="home" className="min-h-0 h-full">
+            <HomePage greetingName="Mohit" onStartChat={startChatFromHome} />
+          </TabsContent>
           <TabsContent value="chat" className="min-h-0">
-            <ChatPanel key={activeThreadId ?? "pending"} onActivity={handleActivity} />
+            <ChatPanel
+              key={activeThreadId ?? "pending"}
+              onActivity={handleActivity}
+              initialMessage={pendingHomeMessage}
+              onConsumeInitialMessage={() => setPendingHomeMessage(null)}
+            />
           </TabsContent>
           <TabsContent value="history" className="min-h-0">
             <HistoryPanel key={activeThreadId ?? "pending"} />
@@ -84,9 +120,22 @@ function App() {
           <TabsContent value="cost" className="min-h-0">
             <CostPanel />
           </TabsContent>
+          <TabsContent value="board" className="min-h-0 h-full">
+            <KanbanBoard />
+          </TabsContent>
         </Tabs>
       </main>
-      <aside className="flex h-screen w-72 shrink-0 flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground">
+      <aside className="flex h-screen w-96 shrink-0 flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground">
+        <Card size="sm">
+          <CardHeader>
+            <CardTitle className="panel-label text-[0.65rem] text-muted-foreground">
+              In progress
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <InProgressTasksCard />
+          </CardContent>
+        </Card>
         <Card size="sm">
           <CardHeader>
             <CardTitle className="panel-label text-[0.65rem] text-muted-foreground">
