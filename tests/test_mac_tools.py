@@ -432,6 +432,138 @@ def test_open_url_in_brave_is_ungated_no_interrupt_needed() -> None:
     assert "Opened in Brave" in result
 
 
+# --- Messages (iMessage): gated send, no read capability — Phase 22 --------
+#
+# subprocess.run is mocked throughout (this file's own docstring) — real
+# Messages.app verification needs the user to click through a first-run
+# Automation permission dialog, which couldn't happen while building this
+# (see STEPS.md's Phase 22 entry) and is recorded there as still pending,
+# same category as every other allowlisted action's historical hands-on
+# verification pass.
+
+
+def test_send_imessage_declined_never_invokes_osascript() -> None:
+    calls, resumed = asyncio.run(
+        _run_gated_tool(
+            "send_imessage",
+            {"recipient": "+15551234567", "message": "running late"},
+            resume=False,
+        )
+    )
+    assert calls == [], f"osascript must never run on decline, but got: {calls}"
+    assert resumed["result"] == "Cancelled — user did not confirm."
+
+
+def test_send_imessage_approved_passes_recipient_and_message_as_argv() -> None:
+    """Same argv-only principle as every other gated osascript tool here:
+    the fixed script text never changes, and the recipient/message are
+    passed as separate argv items, never interpolated into the script
+    source."""
+    calls, resumed = asyncio.run(
+        _run_gated_tool(
+            "send_imessage",
+            {"recipient": "+15551234567", "message": "running late, be there in 10"},
+            resume=True,
+        )
+    )
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0:3] == ["osascript", "-e", mac_tools._IMESSAGE_SEND]
+    assert argv[3:] == ["+15551234567", "running late, be there in 10"]
+    # The mocked subprocess always returns empty stdout, so _run_osascript's
+    # own "(done)" placeholder is what surfaces here — the real "Sent"
+    # return value only comes from the actual AppleScript, not exercised by
+    # this mocked-subprocess test (this file's own docstring).
+    assert resumed["result"] == "(done)"
+
+
+def test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim() -> None:
+    """The confirmation-gate payload must show the ACTUAL content, never a
+    paraphrase — same red-team requirement every other gated tool in this
+    project is held to (CLAUDE.md's security model)."""
+    with tempfile.TemporaryDirectory() as tmp:
+
+        async def _run() -> dict:
+            async with get_checkpointer(Path(tmp) / "scratch.sqlite") as checkpointer:
+                graph = _build_tool_graph(
+                    checkpointer,
+                    "send_imessage",
+                    {"recipient": "+15551234567", "message": "the secret code is 4471"},
+                )
+                config = {"configurable": {"thread_id": str(uuid.uuid4()), "checkpoint_ns": ""}}
+                with _capture_subprocess_calls():
+                    first = await graph.ainvoke({"result": None}, config=config)
+                return first["__interrupt__"][0].value
+
+        payload = asyncio.run(_run())
+    assert payload["action"] == "send_imessage"
+    assert payload["recipient"] == "+15551234567"
+    assert payload["message"] == "the secret code is 4471"
+    assert payload["voice_approvable"] is False
+
+
+# --- WhatsApp: ungated compose-draft only — Phase 22 ------------------------
+
+
+def test_compose_whatsapp_passes_open_url_argv_never_shell() -> None:
+    with _capture_subprocess_calls() as calls:
+        result = mac_tools.compose_whatsapp.invoke(
+            {"phone": "15551234567", "message": "running late"}
+        )
+
+    assert calls == [["open", "whatsapp://send?phone=15551234567&text=running%20late"]]
+    assert "not sent" in result
+
+
+def test_compose_whatsapp_url_encodes_special_characters_in_the_message() -> None:
+    """Injection/malformation guard: a message containing URL-meaningful
+    characters (&, ?, #) must not corrupt the query string or let injected
+    content smuggle extra parameters into the whatsapp:// URL."""
+    with _capture_subprocess_calls() as calls:
+        mac_tools.compose_whatsapp.invoke(
+            {"phone": "15551234567", "message": "50% off? yes & no #deal"}
+        )
+
+    url = calls[0][1]
+    assert url.startswith("whatsapp://send?phone=15551234567&text=")
+    assert "&text=50%25%20off%3F%20yes%20%26%20no%20%23deal" in url
+
+
+def test_photos_search_passes_query_as_argv() -> None:
+    with _capture_subprocess_calls() as calls:
+        mac_tools.photos_search.invoke({"query": "beach 2023"})
+
+    assert calls == [["osascript", "-e", mac_tools._PHOTOS_SEARCH, "beach 2023"]]
+
+
+def test_photos_export_writes_into_the_workspace_containment_boundary() -> None:
+    """photos_export routes through _resolve_in_workspace (tools.py) —
+    same containment check every other workspace-writing tool uses, even
+    though the SOURCE (Photos.app) is outside the workspace entirely."""
+    with _capture_subprocess_calls() as calls:
+        result = mac_tools.photos_export.invoke(
+            {"item_id": "ABC123", "filename": "../../etc/passwd"}
+        )
+
+    assert calls == [], "must never invoke osascript for a path that escapes the workspace"
+    assert "Error" in result
+
+
+def test_compose_whatsapp_is_ungated_no_interrupt_needed() -> None:
+    """Deliberate — see this module's docstring, Phase 22: no autonomous-
+    send code path exists to gate at all, the human always taps Send
+    themselves inside WhatsApp. Documents CURRENT behavior; if this starts
+    failing because a gate was added, update the module docstring/PLAN.md
+    too, don't just patch the test."""
+    with _capture_subprocess_calls() as calls:
+        result = mac_tools.compose_whatsapp.invoke(
+            {"phone": "15551234567", "message": "anything at all"}
+        )
+
+    assert len(calls) == 1
+    assert "not sent" in result
+
+
 if __name__ == "__main__":
     test_run_osascript_passes_args_as_separate_argv_not_interpolated()
     print("OK: test_run_osascript_passes_args_as_separate_argv_not_interpolated")
@@ -473,4 +605,20 @@ if __name__ == "__main__":
     print("OK: test_open_url_in_brave_passes_url_as_argv_never_shell")
     test_open_url_in_brave_is_ungated_no_interrupt_needed()
     print("OK: test_open_url_in_brave_is_ungated_no_interrupt_needed")
-    print("\n20 tests passed")
+    test_send_imessage_declined_never_invokes_osascript()
+    print("OK: test_send_imessage_declined_never_invokes_osascript")
+    test_send_imessage_approved_passes_recipient_and_message_as_argv()
+    print("OK: test_send_imessage_approved_passes_recipient_and_message_as_argv")
+    test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim()
+    print("OK: test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim")
+    test_compose_whatsapp_passes_open_url_argv_never_shell()
+    print("OK: test_compose_whatsapp_passes_open_url_argv_never_shell")
+    test_compose_whatsapp_url_encodes_special_characters_in_the_message()
+    print("OK: test_compose_whatsapp_url_encodes_special_characters_in_the_message")
+    test_compose_whatsapp_is_ungated_no_interrupt_needed()
+    print("OK: test_compose_whatsapp_is_ungated_no_interrupt_needed")
+    test_photos_search_passes_query_as_argv()
+    print("OK: test_photos_search_passes_query_as_argv")
+    test_photos_export_writes_into_the_workspace_containment_boundary()
+    print("OK: test_photos_export_writes_into_the_workspace_containment_boundary")
+    print("\n28 tests passed")

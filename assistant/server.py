@@ -72,20 +72,29 @@ from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
-from langchain_core.messages import BaseMessage  # noqa: E402
+from langchain_core.messages import BaseMessage, HumanMessage  # noqa: E402
 from langfuse import Langfuse  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 from PIL import Image  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from assistant import board_store, memory_store, observability, thread_store  # noqa: E402
+from assistant import (  # noqa: E402
+    automation_store,
+    board_store,
+    memory_store,
+    observability,
+    phone_store,
+    thread_store,
+)
 from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
-from assistant.supervisor import build_graph  # noqa: E402
+from assistant.phone_tools import PHONE_ACTION_KEY  # noqa: E402
+from assistant.sub_agents import build_life_admin_agent, build_mac_control_agent  # noqa: E402
+from assistant.supervisor import GATED_ACTIONS, _invoke_agent_graph, build_graph  # noqa: E402
 from assistant.tools import _resolve_in_workspace  # noqa: E402
 
 # Historically had to run before observability's lazy handler was first
@@ -123,6 +132,26 @@ if "ASSISTANT_THREADS_DB_PATH" in os.environ:
 # Same redirect story again, for the kanban board DB.
 if "ASSISTANT_BOARD_DB_PATH" in os.environ:
     board_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_BOARD_DB_PATH"]
+
+# Same redirect story again, for Phase 21's phone-data-sync DB.
+if "ASSISTANT_PHONE_DB_PATH" in os.environ:
+    phone_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_PHONE_DB_PATH"]
+
+# Same redirect story again, for Phase 24's automation-registry DB.
+if "ASSISTANT_AUTOMATIONS_DB_PATH" in os.environ:
+    automation_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_AUTOMATIONS_DB_PATH"]
+
+# PLAN.md Phase 24: which GATED_ACTIONS an automation may be pre-approved
+# for — a deliberate NARROWING of the full GATED_ACTIONS set, not full
+# generality. The phase's own concrete example (and the grilling
+# session's own scoping) is messaging-shaped ("arrival/departure text to
+# a specific person") — letting an unattended, geofence-fired automation
+# silently pre-approve something like delete_disk_file or run_shortcut
+# was never actually discussed and would be a real, unrequested scope
+# expansion of an already-accepted risk, not a neutral default. Revisit
+# only with the user, same standing as every other security-model
+# decision in this project.
+AUTOMATION_ELIGIBLE_ACTIONS = {"send_imessage", "send_email"}
 
 _COST_WINDOWS: dict[str, timedelta | None] = {
     "today": timedelta(hours=24),
@@ -464,6 +493,106 @@ async def _stream_turn(
         app.state.active_tasks.pop(thread_id, None)
 
 
+async def _run_turn(
+    graph: Any,
+    thread_id: str,
+    input_or_command: Any,
+    gate_outcome: tuple[bool, str | None] | None = None,
+    *,
+    is_resume: bool = False,
+) -> dict[str, Any]:
+    """Non-streaming sibling of `_stream_turn`, for PLAN.md Phase 21's
+    phone-initiated-turn channel (`/phone/turn`/`/phone/resume`) — Shortcuts'
+    `Get Contents of URL` action can't consume an SSE stream, so this
+    collapses a turn to a single JSON response instead of a token stream.
+    Same interrupt-detection/trace-linking/gate-scoring contract as
+    `_stream_turn` (`aget_state`... no — here `graph.ainvoke()`'s own
+    return dict carries `__interrupt__` directly, the same shape
+    `voice_daemon.py`'s `_process_turn` already reads, since there's no
+    token stream here to make that detection unreliable the way it is for
+    `astream_events`).
+
+    One behavior this function has that `_stream_turn` does NOT: a
+    `voice_approvable: False` gate is auto-declined and the turn continues
+    silently, exactly like `voice_daemon.py`'s own loop — this channel has
+    no screen to show free-text gate content on, so it never surfaces a
+    text-only gate to Speak/Dictate at all (CLAUDE.md's standing rule: those
+    gates are text-only, never voice-approvable, on every existing voice
+    surface). Only a `voice_approvable: True` gate is returned to the
+    client as a real `{"type": "interrupt", ...}` response, for
+    `/phone/resume` to answer via its own Speak-then-Dictate round trip —
+    unlike `voice_daemon.py`, which owns the mic continuously and can ask
+    inline, this is a stateless HTTP channel: the client has to hang up and
+    call back once it has an answer.
+
+    Also collects PLAN.md Phase 21's `phone_action` marker
+    (`phone_tools.PHONE_ACTION_KEY`) — the mechanism `open_app_on_phone`/
+    `open_url_on_phone` use to describe a structured action for the
+    calling Shortcut to carry out locally after the reply (see
+    `phone_tools.py`'s own docstring for why nothing here can execute
+    anything on the phone directly). This must be scoped to messages added
+    DURING this call only — `result["messages"]` is the full, ever-growing
+    checkpointed thread history, and naively scanning all of it would
+    resurface a stale phone_action from an earlier turn on every
+    subsequent call. `graph.aget_state()` is read once up front purely to
+    capture that starting message count as a slice boundary.
+    """
+    config = make_thread_config(thread_id)
+    stored_headers = app.state.pending_trace_headers.pop(thread_id, None) if is_resume else None
+    tracing_scope = (
+        observability.resumed_tracing_context(stored_headers, thread_id)
+        if stored_headers
+        else observability.tracing_context(thread_id)
+    )
+    try:
+        with tracing_scope as span:
+            if span is not None and not is_resume:
+                span.update(input=input_or_command)
+
+            state_before = await graph.aget_state(config)
+            seen = len(state_before.values.get("messages", []))
+            phone_actions: list[dict[str, Any]] = []
+
+            def _collect_phone_actions(messages: list[Any]) -> None:
+                for m in messages:
+                    phone_actions.extend(
+                        getattr(m, "additional_kwargs", {}).get(PHONE_ACTION_KEY) or []
+                    )
+
+            result = await graph.ainvoke(input_or_command, config=config)
+            _collect_phone_actions(result["messages"][seen:])
+            seen = len(result["messages"])
+
+            response: dict[str, Any] | None = None
+            while "__interrupt__" in result:
+                payload = result["__interrupt__"][0].value
+                auto_action = payload.get("action") if isinstance(payload, dict) else None
+                if isinstance(payload, dict) and payload.get("voice_approvable") is False:
+                    result = await graph.ainvoke(Command(resume=False), config=config)
+                    _collect_phone_actions(result["messages"][seen:])
+                    seen = len(result["messages"])
+                    observability.fire_score_gate_outcome(thread_id, False, auto_action)
+                    continue
+                app.state.pending_trace_headers[thread_id] = observability.inject_trace_headers()
+                response = {"type": "interrupt", "payload": payload}
+                break
+
+            if response is None:
+                final_content = _render_content(result["messages"][-1].content)
+                if span is not None:
+                    span.update(output=final_content)
+                if gate_outcome is not None:
+                    approved, action = gate_outcome
+                    observability.fire_score_gate_outcome(thread_id, approved, action)
+                response = {"type": "message", "content": final_content}
+                if phone_actions:
+                    response["phone_actions"] = phone_actions
+        await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
+        return response
+    except Exception as exc:  # data, not a crash — same convention as _stream_turn's error frame
+        return {"type": "error", "detail": f"{type(exc).__name__}: {exc}"}
+
+
 # --- File/photo upload (dashboard chat composer) --------------------------
 #
 # Uploading your own file is user input, not an agent-initiated side effect —
@@ -588,6 +717,42 @@ class StopRequest(BaseModel):
     thread_id: str | None = None
 
 
+class PhoneTurnRequest(BaseModel):
+    """PLAN.md Phase 21: what the Action Button / Share Sheet Shortcut
+    posts to `/phone/turn`. Mirrors ChatRequest's shape (message/
+    thread_id/attachments — reusing the exact same `_resolve_thread_id`/
+    `_build_user_content` helpers /chat already uses, not a second
+    implementation) plus `location`. `location` is free text the Shortcut
+    itself attaches (e.g. via `Get Current Location` formatted to an
+    address or "lat,lon") — the backend never fetches it independently;
+    the project's governing "the backend can never push a request to the
+    phone" platform constraint (see PLAN.md's Phase 21 entry) means it
+    can't ask the phone for its location out of band either, only receive
+    whatever the Shortcut chose to include on THIS turn."""
+
+    message: str
+    thread_id: str | None = None
+    attachments: list[Attachment] = []
+    location: str | None = None
+
+
+class PhoneResumeRequest(BaseModel):
+    approved: bool
+    thread_id: str | None = None
+
+
+class PhoneHealthSyncRequest(BaseModel):
+    """PLAN.md Phase 21: what the health-sync Shortcut posts — a free-text
+    (or JSON-as-text) summary the Shortcut itself assembled from the
+    Health app's own data via its `Find Health Samples` action(s). This
+    server never talks to HealthKit directly (no such access exists
+    off-device) — it only ever stores whatever the phone already gathered
+    and chose to push, per PLAN.md Phase 21's "user-triggered push only"
+    decision."""
+
+    content: str
+
+
 class A2UIActionRequest(BaseModel):
     """Phase 17 Part B: what an interactive A2UI Button reports back —
     assistant/a2ui.py's module docstring has the full design. `context` is
@@ -650,6 +815,18 @@ async def lifespan(app: FastAPI):
     async with get_checkpointer(CONVERSATION_DB_PATH) as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
         app.state.graph = graph
+        # PLAN.md Phase 24: separate, checkpointer-less specialist graphs
+        # for the automation-fire endpoint to invoke directly via
+        # _invoke_agent_graph — deliberately NOT reused from build_graph()'s
+        # own internal ones (it doesn't expose them), so this is a second,
+        # independent construction. Cheap (no I/O beyond model client
+        # setup, same reasoning every build_*_agent() call already is) and
+        # scoped only to AUTOMATION_ELIGIBLE_ACTIONS' specialists — not all
+        # five, since only messaging-shaped actions are automation-eligible.
+        app.state.automation_specialist_graphs = {
+            "mac_control_agent": build_mac_control_agent(),
+            "life_admin_agent": build_life_admin_agent(mcp_tools),
+        }
         # No longer a single fixed config (Phase 15) — every endpoint below
         # resolves its own thread_id per-request instead, since which
         # thread is "active" can now change between requests (a switch, a
@@ -881,6 +1058,82 @@ async def resume(request: ResumeRequest) -> StreamingResponse:
         ),
         media_type="text/event-stream",
     )
+
+
+_PHONE_CHANNEL_MARKER = (
+    "[This message was sent from the user's iPhone via the Action Button / "
+    "Share Sheet — for opening an app, opening a URL, or a WhatsApp compose "
+    "draft, use phone_agent's own tools (open_app_on_phone/open_url_on_phone), "
+    "which act on THIS phone, not mac_control_agent's Mac-only equivalents "
+    "(open_app/open_url_in_brave/compose_whatsapp), which would act on the "
+    "user's Mac somewhere else instead — the wrong device for a request "
+    "made from the phone in hand.]"
+)
+
+
+@app.post("/phone/turn")
+async def phone_turn(request: PhoneTurnRequest) -> dict[str, Any]:
+    """PLAN.md Phase 21: the Action Button / Share Sheet entry point —
+    Shortcuts' `Dictate Text` (or a Share Sheet photo/link, uploaded first
+    via the existing `POST /uploads` and referenced as an attachment
+    exactly like the dashboard composer does) posts here and gets one JSON
+    reply back to feed into `Speak Text`. Non-streaming sibling of /chat —
+    see `_run_turn`'s docstring for the interrupt-handling contract, which
+    differs from /chat's in one deliberate way (text-only gates
+    auto-decline instead of surfacing).
+
+    Prepends `_PHONE_CHANNEL_MARKER` (PLAN.md Phase 22) — a real gap found
+    while wiring the messaging cluster: without an explicit signal, the
+    supervisor has no way to know a request came from the phone rather
+    than the Mac dashboard/CLI/voice, and could route an "open Spotify" or
+    "message Mom on WhatsApp" request to mac_control_agent's Mac-only
+    open_app/compose_whatsapp — which would act on the Mac sitting
+    elsewhere, not the phone actually in the user's hand. This marker is
+    plain context text the model reads, same trust tier as everything else
+    in its own turn (not a directive from untrusted content — it's
+    server-constructed, not user- or tool-supplied)."""
+    thread_id = await _resolve_thread_id(request.thread_id)
+    message = _PHONE_CHANNEL_MARKER + "\n\n" + request.message
+    if request.location:
+        message += f"\n\n[Current location, from the phone: {request.location}]"
+    input_ = {"messages": [("user", _build_user_content(message, request.attachments))]}
+    return await _run_turn(app.state.graph, thread_id, input_)
+
+
+@app.post("/phone/resume")
+async def phone_resume(request: PhoneResumeRequest) -> dict[str, Any]:
+    """Answers a `voice_approvable: True` gate reached via /phone/turn —
+    the Shortcut speaks the interrupt payload's `spoken_prompt`, Dictates a
+    yes/no, and posts the result here. A second endpoint rather than
+    folding into /resume itself: this channel is single-shot JSON, not
+    SSE, and the two response shapes shouldn't be conflated. Mirrors
+    /resume's own action-lookup-before-resuming pattern exactly."""
+    thread_id = await _resolve_thread_id(request.thread_id)
+    state = await app.state.graph.aget_state(make_thread_config(thread_id))
+    pending = [i for t in state.tasks for i in t.interrupts]
+    action = (
+        pending[0].value.get("action")
+        if pending and isinstance(pending[0].value, dict)
+        else None
+    )
+    return await _run_turn(
+        app.state.graph,
+        thread_id,
+        Command(resume=request.approved),
+        gate_outcome=(request.approved, action),
+        is_resume=True,
+    )
+
+
+@app.post("/phone/health-sync")
+async def phone_health_sync(request: PhoneHealthSyncRequest) -> dict[str, Any]:
+    """PLAN.md Phase 21: the health-sync Shortcut's own POST target — runs
+    only when the user manually triggers it, never automatically. Stores
+    the pushed content as phone_agent's `get_latest_health_snapshot` tool
+    will read it back; overwrites whatever was there before (phone_store.py's
+    module docstring — only the latest snapshot per kind is ever kept)."""
+    snapshot = await phone_store.save_snapshot("health", request.content)
+    return {"kind": snapshot.kind, "synced_at": snapshot.synced_at}
 
 
 @app.post("/a2ui/action")
@@ -1150,6 +1403,172 @@ async def delete_board_task(task_id: str) -> dict[str, Any]:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"No task with id {task_id}") from exc
     return {"deleted": True}
+
+
+# --- Unattended pre-approved automations (PLAN.md Phase 24) -----------------
+
+
+def _serialize_automation(a: automation_store.Automation) -> dict[str, Any]:
+    return {
+        "id": a.id,
+        "name": a.name,
+        "trigger_description": a.trigger_description,
+        "target": a.target,
+        "goal": a.goal,
+        "action": a.action,
+        "enabled": a.enabled,
+        "created_at": a.created_at,
+        "updated_at": a.updated_at,
+    }
+
+
+def _serialize_run(r: automation_store.AutomationRun) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "automation_id": r.automation_id,
+        "fired_at": r.fired_at,
+        "outcome": r.outcome,
+        "detail": r.detail,
+    }
+
+
+class CreateAutomationRequest(BaseModel):
+    name: str
+    trigger_description: str
+    target: str
+    goal: str
+    action: str
+
+
+class UpdateAutomationRequest(BaseModel):
+    name: str | None = None
+    trigger_description: str | None = None
+    target: str | None = None
+    goal: str | None = None
+    action: str | None = None
+    enabled: bool | None = None
+
+
+@app.get("/automations")
+async def list_automations() -> dict[str, Any]:
+    automations = await automation_store.list_automations()
+    return {"automations": [_serialize_automation(a) for a in automations]}
+
+
+@app.post("/automations")
+async def create_automation(request: CreateAutomationRequest) -> dict[str, Any]:
+    if request.action not in AUTOMATION_ELIGIBLE_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"action must be one of {sorted(AUTOMATION_ELIGIBLE_ACTIONS)} — "
+                "unattended pre-approval is deliberately scoped to messaging-shaped "
+                "actions only (PLAN.md Phase 24), not the full GATED_ACTIONS set"
+            ),
+        )
+    automation = await automation_store.create_automation(
+        name=request.name,
+        trigger_description=request.trigger_description,
+        target=request.target,
+        goal=request.goal,
+        action=request.action,
+    )
+    return _serialize_automation(automation)
+
+
+@app.patch("/automations/{automation_id}")
+async def update_automation(automation_id: str, request: UpdateAutomationRequest) -> dict[str, Any]:
+    if request.action is not None and request.action not in AUTOMATION_ELIGIBLE_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"action must be one of {sorted(AUTOMATION_ELIGIBLE_ACTIONS)}",
+        )
+    try:
+        automation = await automation_store.update_automation(
+            automation_id,
+            name=request.name,
+            trigger_description=request.trigger_description,
+            target=request.target,
+            goal=request.goal,
+            action=request.action,
+            enabled=request.enabled,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No automation with id {automation_id}") from exc
+    return _serialize_automation(automation)
+
+
+@app.delete("/automations/{automation_id}")
+async def delete_automation(automation_id: str) -> dict[str, Any]:
+    try:
+        await automation_store.delete_automation(automation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No automation with id {automation_id}") from exc
+    return {"deleted": True}
+
+
+@app.get("/automations/runs")
+async def list_automation_runs() -> dict[str, Any]:
+    runs = await automation_store.list_runs()
+    return {"runs": [_serialize_run(r) for r in runs]}
+
+
+@app.post("/automations/{automation_id}/fire")
+async def fire_automation(automation_id: str) -> dict[str, Any]:
+    """The geofence-detecting Shortcut's own POST target (PHONE_SETUP.md)
+    — the ENTIRE unattended-execution path lives in this one function.
+
+    **No `interrupt()` call exists anywhere in this function or anything
+    it calls with these arguments — that absence is intentional (this IS
+    the pre-approval this whole phase exists to provide), not an
+    oversight.** Reuses `_invoke_agent_graph` (supervisor.py) — the exact
+    same mechanism every other specialist delegation already uses — with
+    `pre_approved_actions={automation.action}`, so the target specialist's
+    own gated tool (`send_imessage`/`send_email`) sees its action already
+    cleared via the SAME `GatedAgentState.pre_approved_actions` check a
+    live upfront-confirmed turn would set, and proceeds without calling
+    `interrupt()` itself either. Every firing is logged via
+    `automation_store.log_run` regardless of outcome — the
+    reviewable-after-the-fact record this execution path substitutes for
+    a before-the-fact confirmation."""
+    automation = await automation_store.get_automation(automation_id)
+    if automation is None:
+        raise HTTPException(status_code=404, detail=f"No automation with id {automation_id}")
+
+    if not automation.enabled:
+        await automation_store.log_run(automation_id, outcome="skipped", detail="automation is disabled")
+        return {"outcome": "skipped", "detail": "automation is disabled"}
+
+    specialist_name = GATED_ACTIONS.get(automation.action)
+    specialist_graph = (
+        app.state.automation_specialist_graphs.get(specialist_name) if specialist_name else None
+    )
+    if specialist_graph is None:
+        detail = f"action {automation.action!r} has no automation-eligible specialist wired up"
+        await automation_store.log_run(automation_id, outcome="error", detail=detail)
+        return {"outcome": "error", "detail": detail}
+
+    instruction = (
+        f"{automation.goal}\n\nTarget: {automation.target}\n\n"
+        "This request comes from a pre-approved automation the user themselves "
+        f"registered in advance (PLAN.md Phase 24) — proceed directly with the "
+        f"{automation.action} action it is scoped to; it does not need a fresh "
+        "confirmation from you."
+    )
+    try:
+        content, _surfaces, _phone_actions = await _invoke_agent_graph(
+            specialist_graph,
+            specialist_name,
+            [HumanMessage(content=instruction)],
+            {automation.action},
+        )
+    except Exception as exc:  # a real upstream failure — logged, not raised
+        detail = f"{type(exc).__name__}: {exc}"
+        await automation_store.log_run(automation_id, outcome="error", detail=detail)
+        return {"outcome": "error", "detail": detail}
+
+    await automation_store.log_run(automation_id, outcome="fired", detail=content)
+    return {"outcome": "fired", "detail": content}
 
 
 @app.get("/cost")

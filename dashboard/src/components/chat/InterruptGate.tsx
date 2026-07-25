@@ -41,6 +41,12 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   run_shortcut: "The assistant wants to run this Shortcut:",
   calendar_create_event: "The assistant wants to create this Apple Calendar event:",
   calendar_update_event: "The assistant wants to update this Apple Calendar event:",
+  send_imessage: "The assistant wants to send this iMessage:",
+  write_disk_file: "The assistant wants to write this file OUTSIDE the workspace:",
+  delete_disk_file: "The assistant wants to DELETE this file OUTSIDE the workspace:",
+  // run_shortcut_on_phone is deliberately absent here — the user chose to
+  // leave phone_tools.py's run_shortcut_on_phone ungated, so it never
+  // gates and this entry would be dead/misleading code.
 };
 
 // Small source badge so it's visible at a glance which system a gate
@@ -58,6 +64,9 @@ const ACTION_SOURCE: Record<string, string> = {
   run_shortcut: "Mac Control",
   calendar_create_event: "Apple Calendar",
   calendar_update_event: "Apple Calendar",
+  send_imessage: "Messages",
+  write_disk_file: "Full-disk access",
+  delete_disk_file: "Full-disk access",
 };
 
 function str(v: unknown, fallback = ""): string {
@@ -297,6 +306,64 @@ function RunShortcutGateBody({ payload }: { payload: InterruptPayload }) {
   return <Field label="Shortcut" value={str(payload.name, "(unnamed)")} />;
 }
 
+// mac_tools.py's send_imessage (Phase 22) — same verbatim-content
+// requirement as EmailGateBody: the real recipient and message text, no
+// paraphrase. voice_approvable: False (mac_tools.py), same tier as email.
+function IMessageGateBody({ payload }: { payload: InterruptPayload }) {
+  return (
+    <div className="space-y-2">
+      <Field label="To" value={str(payload.recipient, "(unknown)")} />
+      <div>
+        <span className="text-sm font-medium">Message:</span>
+        <VerbatimBlock testId="interrupt-imessage-body">{str(payload.message)}</VerbatimBlock>
+      </div>
+    </div>
+  );
+}
+
+// mac_tools.py's/disk_tools.py's write_disk_file/delete_disk_file (Phase
+// 23) — the largest security-model change in this project's history
+// (PLAN.md's own Phase 23 entry). Same verbatim-content requirement as
+// every other gated tool: the real path, and the real previous/new
+// content (or current content, for delete), never paraphrased.
+function WriteDiskFileGateBody({ payload }: { payload: InterruptPayload }) {
+  const existed = payload.existed === true;
+  const previous = typeof payload.previous_content === "string" ? payload.previous_content : null;
+  return (
+    <div className="space-y-2">
+      <Field label="Path" value={str(payload.path, "(unknown)")} />
+      <Field
+        label="Already exists"
+        value={existed ? "Yes — will be OVERWRITTEN" : "No — new file"}
+      />
+      {existed && previous !== null && (
+        <div>
+          <span className="text-sm font-medium">Current content:</span>
+          <VerbatimBlock testId="interrupt-disk-file-previous">{previous}</VerbatimBlock>
+        </div>
+      )}
+      <div>
+        <span className="text-sm font-medium">New content:</span>
+        <VerbatimBlock testId="interrupt-disk-file-new">{str(payload.new_content)}</VerbatimBlock>
+      </div>
+    </div>
+  );
+}
+
+function DeleteDiskFileGateBody({ payload }: { payload: InterruptPayload }) {
+  return (
+    <div className="space-y-2">
+      <Field label="Path" value={str(payload.path, "(unknown)")} />
+      <div>
+        <span className="text-sm font-medium">Current content:</span>
+        <VerbatimBlock testId="interrupt-disk-file-delete-content">
+          {str(payload.content)}
+        </VerbatimBlock>
+      </div>
+    </div>
+  );
+}
+
 const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => React.ReactElement> =
   {
     send_email: EmailGateBody,
@@ -309,6 +376,9 @@ const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => Re
     run_shortcut: RunShortcutGateBody,
     calendar_create_event: AppleCalendarCreateEventGateBody,
     calendar_update_event: AppleCalendarUpdateEventGateBody,
+    send_imessage: IMessageGateBody,
+    write_disk_file: WriteDiskFileGateBody,
+    delete_disk_file: DeleteDiskFileGateBody,
   };
 
 // The confirmation-gate UI affordance PLAN.md's Phase 9 step 3 requires.

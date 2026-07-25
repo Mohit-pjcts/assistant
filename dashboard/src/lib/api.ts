@@ -513,3 +513,94 @@ export async function deleteBoardTask(taskId: string): Promise<void> {
     );
   }
 }
+
+// Unattended pre-approved automations (PLAN.md Phase 24) — a new,
+// deliberately narrow, explicitly-named exception to the standing
+// confirmation rule. `action` is server-validated against
+// AUTOMATION_ELIGIBLE_ACTIONS (server.py) — messaging-shaped actions
+// only, not the full GATED_ACTIONS set; the backend 400s a request
+// outside that allowlist, this panel doesn't duplicate the check.
+export type AutomationAction = "send_imessage" | "send_email";
+
+export interface Automation {
+  id: string;
+  name: string;
+  trigger_description: string;
+  target: string;
+  goal: string;
+  action: AutomationAction;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  automation_id: string;
+  fired_at: string;
+  outcome: "fired" | "skipped" | "error";
+  detail: string;
+}
+
+export async function fetchAutomations(): Promise<Automation[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/automations`);
+  if (!response.ok) {
+    throw new Error(`/automations failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { automations: Automation[] };
+  return body.automations;
+}
+
+export async function fetchAutomationRuns(): Promise<AutomationRun[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/automations/runs`);
+  if (!response.ok) {
+    throw new Error(`/automations/runs failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { runs: AutomationRun[] };
+  return body.runs;
+}
+
+export async function createAutomation(params: {
+  name: string;
+  trigger_description: string;
+  target: string;
+  goal: string;
+  action: AutomationAction;
+}): Promise<Automation> {
+  return postJSON<Automation>("/automations", params);
+}
+
+export async function updateAutomation(
+  automationId: string,
+  changes: Partial<{
+    name: string;
+    trigger_description: string;
+    target: string;
+    goal: string;
+    action: AutomationAction;
+    enabled: boolean;
+  }>,
+): Promise<Automation> {
+  const response = await fetch(`${API_BASE_URL}/automations/${automationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(changes),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `PATCH /automations/${automationId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  return response.json() as Promise<Automation>;
+}
+
+export async function deleteAutomation(automationId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/automations/${automationId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `DELETE /automations/${automationId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+}

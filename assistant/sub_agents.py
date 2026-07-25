@@ -80,7 +80,9 @@ from langgraph.graph.state import CompiledStateGraph
 from assistant import prompts
 from assistant.a2ui import build_render_ui_tool
 from assistant.board_tools import build_board_tools
+from assistant.disk_tools import build_disk_tools
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
+from assistant.phone_tools import build_phone_action_tools
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
 from assistant.tools import execute_shell_command, read_file, web_search, write_file
 from assistant.write_tools import build_write_tools
@@ -104,19 +106,55 @@ class GatedAgentState(AgentState):
 CODING_MODEL_NAME = "claude-sonnet-5"
 
 # Langfuse prompt name: "coding-agent-system-prompt" (scripts/
-# sync_prompts_to_langfuse.py). Mandatory local fallback, byte-for-byte
-# identical to the pre-Phase-16 text.
+# sync_prompts_to_langfuse.py). Mandatory local fallback — extended at
+# Phase 23 (PLAN.md) with the full-disk search/read/write/delete tools;
+# byte-for-byte identical to the pre-Phase-23 text otherwise.
 CODING_SYSTEM_PROMPT_FALLBACK = (
     "You are the coding/file sub-agent of a personal assistant. You have "
     "file read/write (confined to a local workspace directory) and shell "
     "command execution (also confined to that workspace, with destructive "
     "commands blocked). Use a tool when it would get a better or more "
-    "current answer than reasoning alone. Be direct and concise."
+    "current answer than reasoning alone. Be direct and concise.\n\n"
+    "You ALSO have full-disk access, separate from the workspace-confined "
+    "tools above: search_disk (Spotlight search across the WHOLE Mac "
+    "filesystem, not just the workspace) and read_disk_file (read any "
+    "file found that way) are ungated — use them freely for requests "
+    "like 'find that PDF from last month' or 'what's in my Downloads "
+    "folder'. write_disk_file and delete_disk_file (writing/overwriting/ "
+    "deleting a file OUTSIDE the workspace) pause for the user's explicit "
+    "confirmation showing the exact path and content first — you will "
+    "always find out whether it was approved from the tool's own return "
+    "value, so just call the tool directly and act on the outcome rather "
+    "than asking the user to confirm in chat yourself first. A small, "
+    "fixed set of credential/secret paths (SSH keys, cloud credentials, "
+    "Keychain files, browser cookie/password stores, .env-shaped files "
+    "anywhere) are refused by all four of these tools even though you "
+    "otherwise have full-disk access — if one of them returns that kind "
+    "of refusal, say so plainly rather than trying a workaround."
 )
 
 CODING_SYSTEM_PROMPT = prompts.get_prompt(
     "coding-agent-system-prompt", CODING_SYSTEM_PROMPT_FALLBACK
 )
+
+
+class NoParallelCodingWrites(AgentMiddleware):
+    """Forces coding_agent to call at most one tool per model turn.
+
+    Not needed before Phase 23 — this agent's only gated tool was the
+    optional send_test_notification (extra_tools), so two gated calls in
+    one AIMessage was structurally rare/impossible in normal builds. Phase
+    23 adds write_disk_file/delete_disk_file, both also gated — a compound
+    request ("delete this file and also rename that one") could now make
+    the model call two gated tools in one turn. Same failure mode as
+    write_tools.py's NoParallelWrites/mac_tools.py's NoParallelMacWrites:
+    server.py's turn-handling only relays the FIRST pending interrupt in a
+    turn, so a second interrupt raised in the same turn would be silently
+    stranded with no way to approve/decline it."""
+
+    async def awrap_model_call(self, request, handler):  # noqa: ANN001, ANN201
+        request.model_settings["parallel_tool_calls"] = False
+        return await handler(request)
 
 
 def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledStateGraph:
@@ -125,16 +163,21 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
     Args:
         extra_tools: Additional tools beyond the standard file/shell set —
             currently used to wire in interrupts.send_test_notification for
-            the Phase 3 step-5 confirmation-gate demo. A real side-effect
-            tool replaces this hook in a later phase.
+            the Phase 3 step-5 confirmation-gate demo.
     """
-    tools = [read_file, write_file, execute_shell_command, *(extra_tools or [])]
+    tools = [
+        read_file,
+        write_file,
+        execute_shell_command,
+        *build_disk_tools(),
+        *(extra_tools or []),
+    ]
     model = ChatAnthropic(model=CODING_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
         tools=tools,
         system_prompt=CODING_SYSTEM_PROMPT,
-        middleware=[ThinkingBlockRepairMiddleware()],
+        middleware=[NoParallelCodingWrites(), ThinkingBlockRepairMiddleware()],
         state_schema=GatedAgentState,
         name="coding_agent",
     )
@@ -356,7 +399,10 @@ MAC_CONTROL_SYSTEM_PROMPT_FALLBACK = (
     "playback (play, pause, next/previous track, read what's currently "
     "playing, play a specific song by name/artist, or play a specific "
     "playlist by exact name); read and create Reminders; read and create "
-    "Notes; open a "
+    "Notes; search Photos.app by text (photos_search — matches people/"
+    "places/objects/dates the way the app's own search bar does) and "
+    "export a found item into the workspace (photos_export) so it can be "
+    "viewed; open a "
     "blank Shortcut in the Shortcuts editor for the user to build and save "
     "themselves (you cannot pre-fill a name or actions, or finish creating "
     "one — there is no scriptable way to author a Shortcut's actual logic, "
@@ -371,15 +417,23 @@ MAC_CONTROL_SYSTEM_PROMPT_FALLBACK = (
     "about their Google account's calendar rather than the Calendar app on "
     "this Mac, say so rather than acting on the wrong one) — calling "
     "calendar_create_event/calendar_update_event itself pauses for "
-    "confirmation, showing the exact details; and open a URL in Brave "
+    "confirmation, showing the exact details; open a URL in Brave "
     "Browser (open/navigate only — "
     "you cannot click, type, fill forms, or scrape a page's content; if "
     "asked to do any of that, say plainly that only opening a URL is "
-    "supported). You have no other system access — no AppleScript beyond "
+    "supported); send an iMessage (send_imessage — pauses for confirmation "
+    "showing the exact recipient and message text; you CANNOT read past "
+    "iMessage content at all, only send — if asked to check/read messages, "
+    "say plainly that's not something you can do); and open a pre-filled "
+    "WhatsApp compose draft (compose_whatsapp) — this only opens WhatsApp "
+    "with the message ready to go, the user must tap Send themselves "
+    "inside the app; you cannot read WhatsApp content or complete a send "
+    "either. You have no other system access — no AppleScript beyond "
     "these fixed actions, no shell, no files. If asked to do something "
     "outside this list, say so plainly and name what you can do instead. "
     "Be direct and concise.\n\n"
-    "For run_shortcut, calendar_create_event, and calendar_update_event: "
+    "For run_shortcut, calendar_create_event, calendar_update_event, and "
+    "send_imessage: "
     "you will always find out whether the user approved from the tool's "
     "own return value, so just call the tool directly and act on the "
     "outcome — never ask the user to confirm in chat before calling it. "
@@ -448,4 +502,63 @@ def build_mac_control_agent() -> CompiledStateGraph:
         middleware=[NoParallelMacWrites(), ThinkingBlockRepairMiddleware()],
         state_schema=GatedAgentState,
         name="mac_control_agent",
+    )
+
+
+# --- Phone sub-agent (PLAN.md Phase 21) ------------------------------------
+
+PHONE_MODEL_NAME = "claude-sonnet-5"
+
+# Langfuse prompt name: "phone-agent-system-prompt". Mandatory local
+# fallback, same convention as every other specialist's own prompt.
+PHONE_SYSTEM_PROMPT_FALLBACK = (
+    "You are the phone sub-agent of a personal assistant, reached only "
+    "when the user contacts you FROM their iPhone (the Action Button or a "
+    "Share Sheet share) — never from the Mac dashboard, CLI, or voice, "
+    "which have no phone-side channel at all. You can: read the latest "
+    "synced health snapshot (get_latest_health_snapshot) — this is NOT "
+    "live, only as fresh as the last time the user ran their health-sync "
+    "Shortcut, so always say plainly how old it is rather than implying "
+    "it's current; open an app on their phone by name "
+    "(open_app_on_phone); and open a URL on their phone, in whatever "
+    "browser they've set as their iOS default (open_url_on_phone) — this "
+    "is also how you open a WhatsApp compose draft, using a "
+    "whatsapp://send?phone=<number>&text=<message> URL, though the user "
+    "still has to tap Send themselves inside WhatsApp; nothing you do can "
+    "complete that send; and run a named Shortcut on their phone "
+    "(run_shortcut_on_phone) — ungated, same as your other phone tools; "
+    "just call it directly. If the user shared their current location, it "
+    "appears as plain context text in their message — use it for "
+    "'near me'-style requests (delegating to research_agent if you need "
+    "web search), but you cannot ask the phone for it independently or on "
+    "a later turn. You have no other phone access at all — no messages, "
+    "no contacts, no notifications, no other apps' data, no way to search "
+    "files or photos yourself (a request like that may already include "
+    "results the Shortcut itself gathered before sending — use those if "
+    "present; if not, say plainly that you can't search the phone "
+    "directly). If asked to do something outside this list, say so "
+    "plainly and name what you can do instead. Be direct and concise."
+)
+
+PHONE_SYSTEM_PROMPT = prompts.get_prompt("phone-agent-system-prompt", PHONE_SYSTEM_PROMPT_FALLBACK)
+
+
+def build_phone_agent() -> CompiledStateGraph:
+    """Build the phone sub-agent (PLAN.md Phase 21) — reached only through
+    the Action Button / Share Sheet channel (server.py's `/phone/turn`),
+    never from the Mac dashboard/CLI/voice, which have no way to reach a
+    phone at all. Its `open_app_on_phone`/`open_url_on_phone` tools cannot
+    execute anything themselves (see phone_tools.py's module docstring for
+    the governing "no remote push to the phone" platform constraint) —
+    they stash a structured action on their own ToolMessage for
+    `server.py`'s `_run_turn` to surface in its JSON response, which the
+    calling Shortcut then executes locally."""
+    model = ChatAnthropic(model=PHONE_MODEL_NAME, thinking={"type": "adaptive"})
+    return create_agent(
+        model=model,
+        tools=build_phone_action_tools(),
+        system_prompt=PHONE_SYSTEM_PROMPT,
+        middleware=[ThinkingBlockRepairMiddleware()],
+        state_schema=GatedAgentState,
+        name="phone_agent",
     )

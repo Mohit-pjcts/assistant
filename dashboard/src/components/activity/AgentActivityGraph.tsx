@@ -7,16 +7,20 @@ const SPECIALISTS: { id: string; label: string; y: number }[] = [
   { id: "research_agent", label: "research", y: 75 },
   { id: "life_admin_agent", label: "life_admin", y: 125 },
   { id: "mac_control_agent", label: "mac_control", y: 175 },
+  { id: "phone_agent", label: "phone", y: 225 },
 ];
 
 const SUPERVISOR_X = 30;
-const SUPERVISOR_Y = 95;
+const SUPERVISOR_Y = 120;
 const SPECIALIST_X = 220;
 
 // The redesign's "Live agent activity" node graph — supervisor at the
-// hub, one line out to each of the four specialists (STEPS.md 94's
-// agents-as-tools architecture: supervisor.py's call_specialist tools).
-// Layout/shape only from the mock; colors stay this app's own tokens
+// hub, one line out to each of the five specialists (STEPS.md 94's
+// agents-as-tools architecture: supervisor.py's call_specialist tools;
+// phone_agent added Phase 21, STEPS.md 103 — this list must stay in sync
+// with supervisor.py's build_supervisor() tools list, not just the
+// original Phase 19 four). Layout/shape only from the mock; colors stay
+// this app's own tokens
 // (--operator for "currently active," --border/--muted-foreground for at
 // rest), per the user's explicit "don't change the colors" call. Colors
 // are set via inline `style` (not SVG presentation attributes) so the
@@ -24,7 +28,7 @@ const SPECIALIST_X = 220;
 export function AgentActivityGraph({ activeAgent }: AgentActivityGraphProps) {
   return (
     <svg
-      viewBox="0 0 260 190"
+      viewBox="0 0 260 240"
       className="h-auto w-full overflow-visible"
       role="img"
       aria-label="Agent activity graph"

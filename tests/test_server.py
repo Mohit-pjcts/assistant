@@ -40,6 +40,8 @@ os.environ.setdefault("ASSISTANT_CONVERSATION_DB_PATH", os.path.join(_tmpdir, "c
 os.environ.setdefault("ASSISTANT_MEMORY_DB_PATH", os.path.join(_tmpdir, "long_term_memory.sqlite"))
 os.environ.setdefault("ASSISTANT_THREADS_DB_PATH", os.path.join(_tmpdir, "threads.sqlite"))
 os.environ.setdefault("ASSISTANT_BOARD_DB_PATH", os.path.join(_tmpdir, "board.sqlite"))
+os.environ.setdefault("ASSISTANT_PHONE_DB_PATH", os.path.join(_tmpdir, "phone_data.sqlite"))
+os.environ.setdefault("ASSISTANT_AUTOMATIONS_DB_PATH", os.path.join(_tmpdir, "automations.sqlite"))
 # Bound here, not re-read from os.environ inside the test function itself —
 # same reasoning, belt-and-suspenders: this constant is fixed at the exact
 # instant this module resolved the (possibly-already-set) env var, so nothing
@@ -326,6 +328,302 @@ async def test_gated_tool_interrupt_then_decline() -> None:
         assert "not" in content and ("sent" in content or "cancel" in content), (
             f"expected a cancellation-flavored reply, got: {content}"
         )
+
+
+async def test_write_disk_file_gated_round_trip_through_the_real_graph() -> None:
+    """PLAN.md Phase 23: coding_agent's write_disk_file (outside workspace/)
+    is reachable via /chat, gates correctly, and actually writes on
+    approval — the real end-to-end proof that disk_tools.py's tools are
+    correctly wired into the supervisor/coding_agent, not just unit-tested
+    in isolation (tests/test_disk_tools.py). Uses a tempfile-safe target
+    path, never a real user file.
+
+    Same accepted non-determinism as test_gated_tool_interrupt_then_approve:
+    the supervisor may take the upfront-confirmation path
+    (request_gated_action_confirmation — payload has "summary", not the
+    tool's own "path"/"new_content" fields) or delegate straight to
+    coding_agent and hit write_disk_file's own interrupt directly (full
+    payload). Both are correct outcomes."""
+    target = os.path.join(_tmpdir, "phase23_write_test.txt")
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": (
+                    f"Use the write_disk_file tool to write the exact content "
+                    f"'phase 23 verified' to the exact path {target!r}."
+                )
+            },
+        )
+        body = _final_sse_event(response)
+        assert body["type"] == "interrupt", f"expected an interrupt, got {body}"
+        assert body["payload"]["action"] == "write_disk_file"
+        if "path" in body["payload"]:
+            assert body["payload"]["path"] == target
+            assert body["payload"]["new_content"] == "phase 23 verified"
+        assert not os.path.exists(target), "must not write before approval"
+
+        resumed = client.post("/resume", json={"approved": True})
+        assert resumed.status_code == 200, resumed.text
+        resumed_body = _final_sse_event(resumed)
+        if resumed_body["type"] == "interrupt":
+            # Took the upfront-confirmation path — the real write_disk_file
+            # interrupt (full payload) still fires from inside coding_agent.
+            assert resumed_body["payload"]["action"] == "write_disk_file"
+            assert resumed_body["payload"]["path"] == target
+            assert resumed_body["payload"]["new_content"] == "phase 23 verified"
+            resumed = client.post("/resume", json={"approved": True})
+            resumed_body = _final_sse_event(resumed)
+        assert resumed_body["type"] == "message", resumed_body
+
+    assert os.path.exists(target)
+    with open(target) as f:
+        assert f.read() == "phase 23 verified"
+
+
+async def test_phone_turn_round_trips_through_the_real_graph() -> None:
+    """PLAN.md Phase 21: /phone/turn is the non-streaming sibling of /chat —
+    same real-graph round trip, single JSON body back instead of SSE."""
+    with TestClient(server.app) as client:
+        response = client.post("/phone/turn", json={"message": "Say exactly: phone test ok"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message"
+        assert "phone test ok" in body["content"].lower()
+
+
+async def test_phone_turn_includes_location_context() -> None:
+    """`location` is free text the Shortcut itself attaches (module
+    docstring's `PhoneTurnRequest`) — proves it actually reaches the model
+    as real context, not silently dropped."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/phone/turn",
+            json={
+                "message": "What city am I in right now, based only on the location I just gave you? One word.",
+                "location": "San Francisco, CA",
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message"
+        assert "san francisco" in body["content"].lower()
+
+
+async def test_phone_turn_with_unknown_thread_id_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/phone/turn", json={"message": "hi", "thread_id": "does-not-exist"}
+        )
+        assert response.status_code == 404
+
+
+async def test_phone_turn_and_resume_gated_round_trip() -> None:
+    """The confirmation gate over the phone channel: mirrors
+    test_gated_tool_interrupt_then_approve's own accepted non-determinism
+    (the supervisor may take the upfront-confirmation path — voice_
+    approvable: False, auto-declined transparently by /phone/turn per
+    _run_turn's docstring — or delegate straight to coding_agent's own
+    send_test_notification interrupt, which carries no voice_approvable
+    key at all and so is never auto-declined). Both are correct outcomes;
+    this test accepts either rather than assuming one, same as its /chat
+    counterpart."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/phone/turn",
+            json={"message": "Use the send_test_notification tool to notify me 'phone approve test'"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        if body["type"] == "message":
+            # Took the voice_approvable: False upfront-confirmation path —
+            # _run_turn auto-declined it transparently, so the action never
+            # happened. Nothing further to resume.
+            assert "not" in body["content"].lower() or "cancel" in body["content"].lower()
+            return
+
+        assert body["type"] == "interrupt", f"expected an interrupt or message, got {body}"
+        assert body["payload"]["action"] == "send_test_notification"
+
+        resumed = client.post("/phone/resume", json={"approved": True})
+        assert resumed.status_code == 200, resumed.text
+        resumed_body = resumed.json()
+        if resumed_body["type"] == "interrupt":
+            resumed = client.post("/phone/resume", json={"approved": True})
+            resumed_body = resumed.json()
+        assert resumed_body["type"] == "message", f"expected a final message, got {resumed_body}"
+        assert "sent" in resumed_body["content"].lower()
+
+
+async def test_phone_turn_auto_declines_text_only_gate() -> None:
+    """The behavior _run_turn has that /chat's _stream_turn does not
+    (module docstring): a voice_approvable: False gate never reaches the
+    client as an interrupt at all — it auto-declines and the turn
+    continues silently, exactly like voice_daemon.py's own loop. Directs
+    the request at request_gated_action_confirmation's own upfront path by
+    naming it explicitly, sidestepping the same non-determinism the two
+    tests above have to accept."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/phone/turn",
+            json={
+                "message": (
+                    "Call request_gated_action_confirmation directly with "
+                    "action='send_test_notification' and a summary describing "
+                    "sending a notification that says 'phone auto-decline test'."
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message", (
+            f"a voice_approvable: False gate must never surface as an interrupt "
+            f"on this channel, got {body}"
+        )
+
+
+async def test_phone_turn_run_shortcut_on_phone_is_ungated() -> None:
+    """phone_tools.run_shortcut_on_phone was explicitly UNGATED at the
+    user's own request (deliberate, documented choice — see
+    phone_tools.py's module docstring, same category as mac_tools.py's
+    own open_url_in_brave decision).
+
+    A real, live-diagnosed model quirk (not a code bug) makes the
+    supervisor's OWN routing non-deterministic here, distinct from every
+    other GATED_ACTIONS-adjacent non-determinism already documented in
+    this file: given "call run_shortcut_on_phone," the supervisor
+    sometimes calls request_gated_action_confirmation('run_shortcut_on_
+    phone') anyway despite it not being a gated action, gets "not a
+    recognized gated action" back, then RETRIES with the similar-
+    sounding 'run_shortcut' (the still-gated MAC action) instead of just
+    delegating — which auto-declines (voice_approvable: False) and
+    reports "cancelled," even though the actual tool never gates.
+    Confirmed by reading the real /history trace for a failing run, not
+    guessed at; reproduces even with an instruction explicitly forbidding
+    the confirmation tool. tests/test_phone_tools.py's
+    test_run_shortcut_on_phone_never_gates proves the actual code-level
+    guarantee deterministically, without the supervisor's own reasoning
+    in the loop — this test accepts either supervisor path, same
+    convention as every other GATED_ACTIONS non-determinism test here,
+    and only makes the STRONGER assertion (a real phone_action, no
+    interrupt) when the direct-tool path is the one taken."""
+    with TestClient(server.app) as client:
+        thread = client.post("/threads", json={}).json()
+        response = client.post(
+            "/phone/turn",
+            json={
+                "thread_id": thread["id"],
+                "message": (
+                    "run_shortcut_on_phone is NOT a gated action and needs no "
+                    "confirmation. Delegate this exact instruction to phone_agent, "
+                    "verbatim, without calling request_gated_action_confirmation at "
+                    "all: call run_shortcut_on_phone with name='Lock Screen' exactly "
+                    "once. Then reply with exactly: ran it."
+                ),
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message", f"expected an immediate message, got {body}"
+
+        if "phone_actions" not in body:
+            # The supervisor took its confused-retry-then-decline path
+            # (see docstring) — a real, accepted model-level outcome,
+            # not the tool gating. Nothing further to assert.
+            assert "cancel" in body["content"].lower(), body
+            return
+
+        assert {"type": "run_shortcut", "name": "Lock Screen"} in body["phone_actions"]
+
+
+async def test_phone_turn_delegates_to_phone_agent_and_surfaces_open_url_action() -> None:
+    """PLAN.md Phase 21: phone_agent is reachable via /phone/turn (same
+    delegated-specialist proof pattern as test_a2ui.py's
+    test_render_ui_available_on_delegated_specialist_and_persists) and its
+    open_url_on_phone call surfaces as a `phone_actions` entry in the JSON
+    response — proving the additional_kwargs[PHONE_ACTION_KEY] forwarding
+    chain (open_url_on_phone -> _invoke_agent_graph -> call_specialist ->
+    _run_turn's message-diffing collection) all actually connects, not
+    just each link in isolation."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/phone/turn",
+            json={
+                "message": (
+                    "Delegate this exact instruction to phone_agent, verbatim: call "
+                    "open_url_on_phone with url='https://example.com/phone-test' "
+                    "exactly once. Then reply to me with exactly: opened it."
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message", body
+        assert "phone_actions" in body, f"expected a phone_actions entry, got {body}"
+        assert {"type": "open_url", "url": "https://example.com/phone-test"} in body["phone_actions"]
+
+
+async def test_phone_turn_ambiguous_open_request_routes_to_phone_not_mac() -> None:
+    """PLAN.md Phase 22's real routing gap, found while wiring the
+    messaging cluster: an ambiguous 'open X' request has no other signal
+    telling the supervisor whether to act on the Mac (mac_control_agent's
+    open_app) or the phone (phone_agent's open_app_on_phone) — without
+    _PHONE_CHANNEL_MARKER (server.py), a natural, non-explicit phrasing
+    like this one could silently open the app on the Mac sitting
+    elsewhere instead of the phone actually in the user's hand. Uses a
+    natural phrasing (no 'delegate to phone_agent' instruction, unlike the
+    test above) specifically to exercise the marker's real steering
+    effect, not just prove the tool works when explicitly named."""
+    with TestClient(server.app) as client:
+        response = client.post("/phone/turn", json={"message": "open Spotify"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message", body
+        assert "phone_actions" in body, (
+            f"expected phone_agent's open_app_on_phone to fire (proving it routed to "
+            f"the phone, not mac_control_agent's Mac-only open_app), got {body}"
+        )
+        assert any(a["type"] == "open_app" for a in body["phone_actions"]), body["phone_actions"]
+
+
+async def test_phone_turn_without_phone_action_omits_the_field() -> None:
+    """The common case — a plain question with no phone_agent tool call —
+    must not carry a stray empty/absent-but-truthy phone_actions key."""
+    with TestClient(server.app) as client:
+        response = client.post("/phone/turn", json={"message": "Say exactly: no phone action here"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "phone_actions" not in body, body
+
+
+async def test_phone_health_sync_round_trips_through_get_latest_health_snapshot() -> None:
+    """POST /phone/health-sync stores a snapshot; phone_agent's
+    get_latest_health_snapshot tool (reached via /phone/turn) reads it
+    back — the real end-to-end path a phone's health-sync Shortcut and a
+    later Action Button question would exercise."""
+    with TestClient(server.app) as client:
+        synced = client.post(
+            "/phone/health-sync",
+            json={"content": "Resting heart rate: 58 bpm. Steps today: 4213."},
+        )
+        assert synced.status_code == 200, synced.text
+        assert synced.json()["kind"] == "health"
+
+        response = client.post(
+            "/phone/turn",
+            json={
+                "message": (
+                    "Delegate this exact instruction to phone_agent, verbatim: call "
+                    "get_latest_health_snapshot and report back the resting heart "
+                    "rate number it returns, and nothing else."
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message", body
+        assert "58" in body["content"]
 
 
 async def test_memory_facts_list_and_delete() -> None:
@@ -708,6 +1006,124 @@ async def test_board_task_invalid_column_returns_400() -> None:
         assert response.status_code == 400
 
 
+# --- Unattended pre-approved automations (PLAN.md Phase 24) ----------------
+
+
+def _create_test_automation(client: TestClient, **overrides: Any) -> dict[str, Any]:
+    payload = {
+        "name": "Landing text",
+        "trigger_description": "arrive at SFO",
+        "target": "+15551234567",
+        "goal": "Say exactly: I have landed.",
+        "action": "send_imessage",
+        **overrides,
+    }
+    response = client.post("/automations", json=payload)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_automation_create_list_update_delete_round_trip() -> None:
+    with TestClient(server.app) as client:
+        created = _create_test_automation(client)
+        assert created["enabled"] is True
+        assert created["action"] == "send_imessage"
+        automation_id = created["id"]
+
+        listed = client.get("/automations")
+        assert listed.status_code == 200
+        assert any(a["id"] == automation_id for a in listed.json()["automations"])
+
+        updated = client.patch(f"/automations/{automation_id}", json={"enabled": False})
+        assert updated.status_code == 200
+        assert updated.json()["enabled"] is False
+
+        deleted = client.delete(f"/automations/{automation_id}")
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+        listed_after = client.get("/automations")
+        assert not any(a["id"] == automation_id for a in listed_after.json()["automations"])
+
+
+async def test_automation_create_rejects_non_eligible_action() -> None:
+    """PLAN.md Phase 24's deliberate scope narrowing — unattended
+    pre-approval is limited to messaging-shaped actions, not the full
+    GATED_ACTIONS set (server.py's AUTOMATION_ELIGIBLE_ACTIONS)."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/automations",
+            json={
+                "name": "bad",
+                "trigger_description": "x",
+                "target": "x",
+                "goal": "x",
+                "action": "delete_disk_file",
+            },
+        )
+        assert response.status_code == 400
+
+
+async def test_automation_update_unknown_id_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.patch("/automations/does-not-exist", json={"enabled": False})
+        assert response.status_code == 404
+
+
+async def test_automation_delete_unknown_id_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.delete("/automations/does-not-exist")
+        assert response.status_code == 404
+
+
+async def test_fire_disabled_automation_is_skipped_and_logged() -> None:
+    with TestClient(server.app) as client:
+        created = _create_test_automation(client)
+        client.patch(f"/automations/{created['id']}", json={"enabled": False})
+
+        fired = client.post(f"/automations/{created['id']}/fire")
+        assert fired.status_code == 200, fired.text
+        assert fired.json()["outcome"] == "skipped"
+
+        runs = client.get("/automations/runs")
+        assert any(
+            r["automation_id"] == created["id"] and r["outcome"] == "skipped"
+            for r in runs.json()["runs"]
+        )
+
+
+async def test_fire_unknown_automation_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/automations/does-not-exist/fire")
+        assert response.status_code == 404
+
+
+async def test_fire_automation_runs_through_the_real_graph_with_no_interrupt() -> None:
+    """PLAN.md Phase 24's central live-verification requirement: a real
+    registered automation fires against the REAL graph and completes with
+    NO interrupt — proving pre_approved_actions correctly short-circuits
+    send_imessage's own interrupt() call (mac_tools.py) the same way a
+    live upfront-confirmed turn already does, and that the whole chain
+    (automation_store -> /fire -> _invoke_agent_graph -> mac_control_agent
+    -> send_imessage) is actually wired together, not just each piece
+    unit-tested in isolation."""
+    with TestClient(server.app) as client:
+        created = _create_test_automation(
+            client,
+            goal="Use the send_imessage tool to send exactly this message: automation fired ok",
+            target="+15559990000",
+        )
+
+        fired = client.post(f"/automations/{created['id']}/fire")
+        assert fired.status_code == 200, fired.text
+        body = fired.json()
+        assert body["outcome"] == "fired", body
+
+        runs = client.get("/automations/runs")
+        matching = [r for r in runs.json()["runs"] if r["automation_id"] == created["id"]]
+        assert matching and matching[0]["outcome"] == "fired"
+
+
 if __name__ == "__main__":
     asyncio.run(test_chat_round_trips_through_the_real_graph())
     print("OK: /chat round-trips through the real graph")
@@ -723,6 +1139,28 @@ if __name__ == "__main__":
     print("OK: gated-tool interrupt -> /resume(approved=True) completes the action")
     asyncio.run(test_gated_tool_interrupt_then_decline())
     print("OK: gated-tool interrupt -> /resume(approved=False) cancels the action")
+    asyncio.run(test_write_disk_file_gated_round_trip_through_the_real_graph())
+    print("OK: write_disk_file gated round-trip through the real graph")
+    asyncio.run(test_phone_turn_round_trips_through_the_real_graph())
+    print("OK: /phone/turn round-trips through the real graph")
+    asyncio.run(test_phone_turn_includes_location_context())
+    print("OK: /phone/turn includes location context")
+    asyncio.run(test_phone_turn_with_unknown_thread_id_returns_404())
+    print("OK: /phone/turn with an unknown thread_id returns 404")
+    asyncio.run(test_phone_turn_and_resume_gated_round_trip())
+    print("OK: /phone/turn gated-tool interrupt -> /phone/resume completes the action")
+    asyncio.run(test_phone_turn_auto_declines_text_only_gate())
+    print("OK: /phone/turn auto-declines a voice_approvable: False gate")
+    asyncio.run(test_phone_turn_run_shortcut_on_phone_is_ungated())
+    print("OK: /phone/turn's run_shortcut_on_phone is ungated (accepting supervisor non-determinism)")
+    asyncio.run(test_phone_turn_delegates_to_phone_agent_and_surfaces_open_url_action())
+    print("OK: /phone/turn delegates to phone_agent and surfaces an open_url phone_action")
+    asyncio.run(test_phone_turn_ambiguous_open_request_routes_to_phone_not_mac())
+    print("OK: /phone/turn routes an ambiguous 'open X' request to phone_agent, not mac_control_agent")
+    asyncio.run(test_phone_turn_without_phone_action_omits_the_field())
+    print("OK: /phone/turn omits phone_actions when none occurred")
+    asyncio.run(test_phone_health_sync_round_trips_through_get_latest_health_snapshot())
+    print("OK: /phone/health-sync round-trips through get_latest_health_snapshot")
     asyncio.run(test_memory_facts_list_and_delete())
     print("OK: /memory/facts list + delete round-trip")
     asyncio.run(test_delete_unknown_fact_returns_404())
@@ -767,3 +1205,17 @@ if __name__ == "__main__":
     print("OK: board task operations on an unknown id return 404")
     asyncio.run(test_board_task_invalid_column_returns_400())
     print("OK: board task creation with an invalid column returns 400")
+    asyncio.run(test_automation_create_list_update_delete_round_trip())
+    print("OK: automation create/list/update/delete round-trips")
+    asyncio.run(test_automation_create_rejects_non_eligible_action())
+    print("OK: automation creation rejects a non-eligible action")
+    asyncio.run(test_automation_update_unknown_id_returns_404())
+    print("OK: automation update on an unknown id returns 404")
+    asyncio.run(test_automation_delete_unknown_id_returns_404())
+    print("OK: automation delete on an unknown id returns 404")
+    asyncio.run(test_fire_disabled_automation_is_skipped_and_logged())
+    print("OK: firing a disabled automation is skipped and logged")
+    asyncio.run(test_fire_unknown_automation_returns_404())
+    print("OK: firing an unknown automation returns 404")
+    asyncio.run(test_fire_automation_runs_through_the_real_graph_with_no_interrupt())
+    print("OK: firing a real automation runs through the real graph with no interrupt")

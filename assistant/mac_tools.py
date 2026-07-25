@@ -54,11 +54,48 @@ above:
   "fix" it by adding a gate without discussion, and do not treat its
   absence as evidence the injection-navigation risk was judged low; it was
   judged real and accepted anyway. Revisit if this decision changes.
+
+Phase 22 (PLAN.md, 2026-07-25) adds a messaging cluster, same osascript/`open`
+pattern as above:
+
+- send_imessage: `tell application "Messages" to send <text> to buddy
+  <recipient>` — gated (interrupt() showing the real recipient/message
+  verbatim, `voice_approvable: False`, same tier as write_tools.py's
+  send_email), following the exact GATED_ACTIONS/pre_approved_actions
+  pattern every other gated tool here uses. **Send is well-documented and
+  reliable via Messages.app's AppleScript dictionary** (`send <text> to
+  <buddy/chat>` is long-standing, widely-used syntax). **Reading past
+  message content is deliberately NOT implemented here** — a real,
+  material finding, not an oversight: Messages.app's modern AppleScript
+  dictionary does not reliably expose message HISTORY content the way it
+  does sending; the only well-established way to read iMessage content
+  programmatically is direct SQLite access to `~/Library/Messages/chat.db`
+  (a different permission model — Full Disk Access, not Automation — and
+  an undocumented, version-fragile internal schema, notably
+  `attributedBody`'s NSAttributedString-archive encoding for message text
+  in modern macOS). This is a real open design decision, not scoped in
+  this pass — see PLAN.md's Phase 22 entry. Also could not be live-tested
+  end to end while building this (an `osascript` call against Messages.app
+  triggers a first-run Automation permission dialog needing the user's own
+  click, same category as the historical Calendar.app/Reminders TCC
+  grants) — treat `send_imessage` as UNVERIFIED against the real app until
+  confirmed live, same as any new allowlisted action historically was
+  before its own hands-on verification pass.
+- compose_whatsapp: `open "whatsapp://send?phone=<phone>&text=<message>"`
+  — ungated, identical reasoning to open_url_in_brave: WhatsApp's own
+  `whatsapp://send` scheme opens a PRE-FILLED compose draft in the
+  WhatsApp Desktop app; the human must still tap Send themselves inside
+  WhatsApp, so there is no autonomous-send code path to gate at all. No
+  reading capability exists or is planned — WhatsApp has no AppleScript/
+  API surface for that; see PLAN.md's Phase 22 entry for why that was
+  explicitly declined rather than pursued via an unofficial, ToS-violating
+  library.
 """
 
 from __future__ import annotations
 
 import subprocess
+import urllib.parse
 from datetime import datetime
 from typing import Annotated, NotRequired, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -351,6 +388,91 @@ def notes_create(title: str, body: str = "") -> str:
         body: Optional note body text.
     """
     return _run_osascript(_NOTES_CREATE, [title, body])
+
+
+# --- Photos (Photos.app search/export — Phase 23) ---------------------------
+#
+# Same read/export precedent as Reminders/Notes above — ungated (read-only
+# search + a local copy into workspace/, no external side effect). Uses
+# Photos.app's own `search for <text>` command (matches the same
+# people/places/objects/date-shaped search the app's own search bar
+# performs) rather than iterating `media items` directly, which is a
+# well-known slow operation over a large library. UNVERIFIED against the
+# real app (PLAN.md Phase 23) — could not be live-tested while building
+# this: any `osascript` call against Photos.app triggers the same
+# first-run Automation permission dialog Messages.app's did (STEPS.md
+# 105), needing the user's own click, which wasn't available while
+# building autonomously.
+
+_PHOTOS_SEARCH = """
+on run argv
+    set theQuery to item 1 of argv
+    tell application "Photos"
+        set foundItems to search for theQuery
+        set output to ""
+        set cnt to 0
+        repeat with m in foundItems
+            if cnt >= 30 then exit repeat
+            set output to output & (id of m) & "|" & (filename of m) & "|" & ((date of m) as string) & "\n"
+            set cnt to cnt + 1
+        end repeat
+        return output
+    end tell
+end run
+"""
+
+_PHOTOS_EXPORT_BY_ID = """
+on run argv
+    set theId to item 1 of argv
+    set exportPath to item 2 of argv
+    tell application "Photos"
+        set theItem to media item id theId
+        export {theItem} to POSIX file exportPath
+    end tell
+    return "Exported"
+end run
+"""
+
+
+@tool
+def photos_search(query: str) -> str:
+    """Search Photos.app by text (Photos' own built-in search — matches
+    people/places/objects/dates the way the app's own search bar does).
+    Read-only; lists up to 30 matching items' id/filename/date. Use
+    photos_export with an id from these results to actually export one
+    into the workspace so it can be viewed.
+
+    Args:
+        query: Search text (e.g. "beach 2023", "dog", "Sarah").
+    """
+    return _run_osascript(_PHOTOS_SEARCH, [query], empty_ok=True)
+
+
+@tool
+def photos_export(item_id: str, filename: str) -> str:
+    """Export a Photos.app item (by id, from photos_search's results)
+    into the workspace so it can be viewed — lands at
+    workspace/photos_export/<filename>, then usable like any other
+    workspace file (e.g. as a chat attachment for vision).
+
+    Args:
+        item_id: A Photos item id, from photos_search's output.
+        filename: Filename to save it as (e.g. "beach.jpg") — routed
+            through the same workspace-containment check every other
+            workspace-writing tool uses.
+    """
+    from assistant.tools import _resolve_in_workspace
+
+    rel_path = f"photos_export/{filename}"
+    try:
+        resolved = _resolve_in_workspace(rel_path)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    result = _run_osascript(_PHOTOS_EXPORT_BY_ID, [item_id, str(resolved)])
+    if result.startswith("Error:"):
+        return result
+    return f"Exported to workspace/{rel_path}"
 
 
 # --- Apple Calendar (Calendar.app — Phase 13) -------------------------------
@@ -849,6 +971,90 @@ def run_shortcut(name: str, *, state: Annotated[_AgentState, InjectedState]) -> 
     return result.stdout.strip() or f"Ran shortcut: {name}"
 
 
+# --- Messages (iMessage) — Phase 22 -----------------------------------------
+
+_IMESSAGE_SEND = """
+on run argv
+    set theRecipient to item 1 of argv
+    set theText to item 2 of argv
+    tell application "Messages"
+        set targetService to 1st service whose service type = iMessage
+        set targetBuddy to buddy theRecipient of targetService
+        send theText to targetBuddy
+    end tell
+    return "Sent"
+end run
+"""
+
+
+@tool
+def send_imessage(
+    recipient: str,
+    message: str,
+    *,
+    state: Annotated[_AgentState, InjectedState],
+) -> str:
+    """Send an iMessage via Messages.app. Requires the user's explicit
+    confirmation showing the exact recipient and message text before
+    sending, UNLESS the supervisor already got upfront confirmation for
+    "send_imessage" this turn (supervisor.py's
+    `request_gated_action_confirmation` / GATED_ACTIONS — see
+    sub_agents.py's module docstring). There is no way to read past
+    message content with this tool — only sending is supported (see this
+    module's own docstring for why).
+
+    Args:
+        recipient: Phone number or email address the recipient uses for
+            iMessage, exactly as it would be typed into Messages.app.
+        message: The message text to send.
+    """
+    if "send_imessage" not in (state.get("pre_approved_actions") or set()):
+        approved = interrupt(
+            {
+                "action": "send_imessage",
+                "recipient": recipient,
+                "message": message,
+                "voice_approvable": False,
+            }
+        )
+        if not approved:
+            return "Cancelled — user did not confirm."
+    return _run_osascript(_IMESSAGE_SEND, [recipient, message])
+
+
+# --- WhatsApp (compose-draft only) — Phase 22 -------------------------------
+
+
+@tool
+def compose_whatsapp(phone: str, message: str) -> str:
+    """Open a pre-filled WhatsApp compose draft on this Mac (WhatsApp
+    Desktop) via WhatsApp's own `whatsapp://send` URL scheme — the user
+    must tap Send themselves inside WhatsApp; nothing here can complete
+    the send. Ungated (same reasoning as open_url_in_brave): there is no
+    autonomous-send code path to gate. No reading capability exists.
+
+    Args:
+        phone: Recipient's phone number in international format, digits
+            only, no leading '+', spaces, or dashes (e.g. "15551234567").
+        message: The message text to pre-fill into the compose draft.
+    """
+    url = "whatsapp://send?phone=" + phone + "&text=" + urllib.parse.quote(message)
+    try:
+        result = subprocess.run(
+            ["open", url],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {_TIMEOUT_SECONDS}s"
+
+    if result.returncode != 0:
+        return f"Error: could not open WhatsApp: {result.stderr.strip()}"
+    return f"Opened a WhatsApp compose draft to {phone} — not sent, user must tap Send"
+
+
 UNGATED_TOOLS = [
     open_app,
     music_play,
@@ -862,12 +1068,22 @@ UNGATED_TOOLS = [
     reminders_create,
     notes_list,
     notes_create,
+    photos_search,
+    photos_export,
     create_shortcut,
     calendar_list_events,
     # Deliberately ungated — see this module's docstring, 2026-07-15 checkpoint.
     open_url_in_brave,
+    # Ungated — see this module's docstring, Phase 22: no autonomous-send
+    # code path exists to gate, the human always taps Send themselves.
+    compose_whatsapp,
 ]
 
-GATED_TOOLS = [run_shortcut, calendar_create_event, calendar_update_event]
+GATED_TOOLS = [
+    run_shortcut,
+    calendar_create_event,
+    calendar_update_event,
+    send_imessage,
+]
 
 TOOLS = UNGATED_TOOLS + GATED_TOOLS

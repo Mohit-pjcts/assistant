@@ -159,10 +159,12 @@ from assistant.compaction import (
     is_recalled_facts_message,
 )
 from assistant.memory_extraction import extract_and_propose_memory_node, recall_memory_node
+from assistant.phone_tools import PHONE_ACTION_KEY
 from assistant.sub_agents import (
     build_coding_agent,
     build_life_admin_agent,
     build_mac_control_agent,
+    build_phone_agent,
     build_research_agent,
 )
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
@@ -211,6 +213,12 @@ GATED_ACTIONS: dict[str, str] = {
     "run_shortcut": "mac_control_agent",
     "calendar_create_event": "mac_control_agent",
     "calendar_update_event": "mac_control_agent",
+    "send_imessage": "mac_control_agent",
+    "write_disk_file": "coding_agent",
+    "delete_disk_file": "coding_agent",
+    # run_shortcut_on_phone is deliberately NOT here — the user explicitly
+    # chose to leave it ungated (phone_tools.py's own module docstring),
+    # diverging from mac_tools.py's run_shortcut precedent on purpose.
 }
 
 # additional_kwargs marker key on the ToolMessage request_gated_action_
@@ -235,7 +243,10 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "specialist work yourself — you call the right specialist tool with a "
     "clear, self-contained instruction (it does not see the rest of this "
     "conversation, only what you put in that instruction). Use coding_agent "
-    "for file/shell tasks in the workspace, and also for any request to "
+    "for file/shell tasks in the workspace, for searching/reading/writing/ "
+    "deleting files ANYWHERE ELSE on the Mac's filesystem (full-disk access, "
+    "not just the workspace — e.g. 'find that PDF on my Desktop'), and also "
+    "for any request to "
     "send a test/demo notification; research_agent for web search / "
     "current-events questions; life_admin_agent for anything about email, "
     "GOOGLE Calendar (the user's Google account calendar), or the user's "
@@ -243,15 +254,25 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "ungated access, no confirmation needed for board changes); "
     "mac_control_agent "
     "for controlling this Mac directly — opening or focusing an "
-    "application, Music playback, Reminders, Notes, running a named "
+    "application, Music playback, Reminders, Notes, searching/exporting "
+    "Photos.app, running a named "
     "Shortcut, reading/creating/updating events on APPLE Calendar (the "
     "local/iCloud/Exchange calendar in the Mac's own Calendar app — a "
     "DIFFERENT calendar system from Google Calendar; if a request just says "
     "'calendar' with no other signal, prefer life_admin_agent's Google "
     "Calendar as the default unless the user specifically says 'Apple "
-    "Calendar', 'the Calendar app', or similar), or opening a URL in Brave "
-    "Browser. If the message is a plain greeting or doesn't need a "
-    "specialist, answer directly without calling a tool. Call only ONE "
+    "Calendar', 'the Calendar app', or similar), opening a URL in Brave "
+    "Browser, sending an iMessage (read is NOT supported, send only), or "
+    "opening a pre-filled WhatsApp compose draft (also send-only, and even "
+    "that needs the user to tap Send themselves); phone_agent for anything "
+    "specific to the iPhone the user is "
+    "currently messaging you FROM (this only ever applies when the request "
+    "arrived via the Action Button / Share Sheet phone channel, never from "
+    "the Mac dashboard/CLI/voice) — reading the latest synced health "
+    "snapshot, opening an app or URL on that same phone (including a "
+    "WhatsApp compose draft), or running a named Shortcut on that phone. "
+    "If the message is a plain greeting or doesn't "
+    "need a specialist, answer directly without calling a tool. Call only ONE "
     "specialist tool at a time, even for a request that spans multiple "
     "domains — after it returns, you will see its result and can call the "
     "next specialist the request needs. Keep doing this, one specialist "
@@ -501,7 +522,7 @@ async def _invoke_agent_graph(
     agent_name: str,
     messages: list[AnyMessage],
     pre_approved_actions: set[str],
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """The in-process specialist path: a fresh, isolated `ainvoke()` per
     call — see this module's docstring for why the specialist graph must
     stay checkpointer-less (sub_agents.py) for interrupt()/resume to work
@@ -515,8 +536,8 @@ async def _invoke_agent_graph(
     mac_tools, shell) from outside its own isolated graph, since this
     `ainvoke()` has no checkpointer/callbacks of its own otherwise and its
     message list is fully discarded once this function returns (same
-    reasoning as the A2UI-surface collection below, just for tool-activity
-    instead of rendered surfaces).
+    reasoning as the A2UI-surface/phone-action collection below, just for
+    tool-activity instead of rendered surfaces).
 
     Phase 18 (PLAN.md): also returns any A2UI surfaces the specialist
     rendered via its OWN render_ui call (a2ui.py's A2UI_SURFACE_KEY marker
@@ -531,7 +552,13 @@ async def _invoke_agent_graph(
     live stream and then simply vanish on the next reload. `call_specialist`
     below forwards whatever this returns onto the delegation ToolMessage's
     own additional_kwargs, same key, so server.py's /history finds it there
-    exactly like it finds the supervisor's own direct render_ui calls."""
+    exactly like it finds the supervisor's own direct render_ui calls.
+
+    PLAN.md Phase 21: identically collects any phone_agent.py phone_tools
+    marker (PHONE_ACTION_KEY) from a delegated phone_agent's own
+    open_app_on_phone/open_url_on_phone call — same reasoning, same
+    forwarding mechanism, just a different marker key/consumer
+    (server.py's `_run_turn`, not `/history`)."""
     result = await agent_graph.ainvoke(
         {"messages": messages, "pre_approved_actions": pre_approved_actions},
         config={"callbacks": [_AgentActivityRelay(agent_name)]},
@@ -540,20 +567,24 @@ async def _invoke_agent_graph(
     final = result_messages[-1]
     content = final.content if isinstance(final.content, str) else str(final.content)
     surfaces: list[dict[str, Any]] = []
+    phone_actions: list[dict[str, Any]] = []
     for m in result_messages:
+        phone_actions.extend(getattr(m, "additional_kwargs", {}).get(PHONE_ACTION_KEY) or [])
         surfaces.extend(getattr(m, "additional_kwargs", {}).get(A2UI_SURFACE_KEY) or [])
-    return content, surfaces
+    return content, surfaces, phone_actions
 
 
 async def _invoke_research_agent_via_http(
     messages: list[AnyMessage], pre_approved_actions: set[str]
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """`pre_approved_actions` accepted for a uniform call signature with
     `_invoke_agent_graph` (see `_make_specialist_tool`) but unused here —
     research_agent has no gated tools, GATED_ACTIONS owns none of them.
 
     **Accepted gap, Phase 18 (PLAN.md): always returns an empty surfaces
-    list.** `fa_service.py`'s `/research/stream` endpoint only ever forwards
+    list** (and, per the same reasoning, an always-empty phone_actions
+    list too — not that research_agent carries any phone_tools anyway).
+    `fa_service.py`'s `/research/stream` endpoint only ever forwards
     `type: "token"`/`"final"`/`"error"` payloads — it has no A2UI-aware
     event at all, so a render_ui call made by research_agent WHILE running
     under this HTTP path neither renders live (no custom-event relay for it,
@@ -618,11 +649,12 @@ async def _invoke_research_agent_via_http(
                 elif event_type == "final":
                     final_messages_raw = payload.get("messages", [])
                 elif event_type == "error":
-                    return f"Research request failed: {payload.get('detail', 'unknown error')}", []
+                    return f"Research request failed: {payload.get('detail', 'unknown error')}", [], []
     except httpx.HTTPError as exc:
         return (
             f"Research request failed: could not reach the research "
             f"service ({type(exc).__name__}).",
+            [],
             [],
         )
 
@@ -631,20 +663,24 @@ async def _invoke_research_agent_via_http(
             "Research request did not complete (the research service "
             "closed the connection without returning a result).",
             [],
+            [],
         )
 
     final_messages = convert_to_messages(final_messages_raw)
     if not final_messages:
-        return "Research request returned no result.", []
+        return "Research request returned no result.", [], []
     final = final_messages[-1]
     content = final.content if isinstance(final.content, str) else str(final.content)
-    return content, []
+    return content, [], []
 
 
 def _make_specialist_tool(
     tool_name: str,
     description: str,
-    invoke: Callable[[list[AnyMessage], set[str]], Awaitable[tuple[str, list[dict[str, Any]]]]],
+    invoke: Callable[
+        [list[AnyMessage], set[str]],
+        Awaitable[tuple[str, list[dict[str, Any]], list[dict[str, Any]]]],
+    ],
 ) -> BaseTool:
     """Build a tool that delegates to one specialist — the "agents as
     tools" replacement for the old `_make_handoff_tool`'s
@@ -666,13 +702,16 @@ def _make_specialist_tool(
     NEVER passed to the specialist — only `seed` and `pre_approved`.
 
     Returns a `Command`, not a plain string (Phase 18, PLAN.md) — `invoke`
-    now comes back with `(content, surfaces)`; any surfaces a delegated
-    specialist rendered via its OWN render_ui call get forwarded onto this
-    ToolMessage's `additional_kwargs[A2UI_SURFACE_KEY]`, the exact marker
-    server.py's /history already knows to read from render_ui's own direct
-    ToolMessages — see `_invoke_agent_graph`'s docstring for why this
-    forwarding step is necessary at all (the specialist's own message list
-    is otherwise discarded the moment `invoke` returns).
+    now comes back with `(content, surfaces, phone_actions)`; any surfaces
+    a delegated specialist rendered via its OWN render_ui call get
+    forwarded onto this ToolMessage's `additional_kwargs[A2UI_SURFACE_KEY]`,
+    the exact marker server.py's /history already knows to read from
+    render_ui's own direct ToolMessages — see `_invoke_agent_graph`'s
+    docstring for why this forwarding step is necessary at all (the
+    specialist's own message list is otherwise discarded the moment
+    `invoke` returns). PLAN.md Phase 21: `phone_actions` is forwarded the
+    identical way, under `additional_kwargs[PHONE_ACTION_KEY]`, for
+    server.py's `_run_turn` to read.
 
     PLAN.md Phase 19: dispatches the OUTER "supervisor is calling
     specialist X" boundary as an `agent_activity` custom event — same
@@ -697,12 +736,16 @@ def _make_specialist_tool(
             "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
         )
         try:
-            content, surfaces = await invoke(seed, pre_approved)
+            content, surfaces, phone_actions = await invoke(seed, pre_approved)
         finally:
             await adispatch_custom_event(
                 "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
             )
-        kwargs = {A2UI_SURFACE_KEY: surfaces} if surfaces else {}
+        kwargs: dict[str, Any] = {}
+        if surfaces:
+            kwargs[A2UI_SURFACE_KEY] = surfaces
+        if phone_actions:
+            kwargs[PHONE_ACTION_KEY] = phone_actions
         return Command(
             update={
                 "messages": [
@@ -737,6 +780,15 @@ _MAC_CONTROL_TOOL_DESCRIPTION = (
     "still pause for the user's own confirmation regardless of what you "
     "ask for."
 )
+_PHONE_TOOL_DESCRIPTION = (
+    "Delegate a request specific to the iPhone the user is currently "
+    "messaging you FROM (PLAN.md Phase 21) — reading the latest synced "
+    "health snapshot, opening an app or URL on that phone (including a "
+    "WhatsApp compose draft), or running a named Shortcut on it. "
+    "Only meaningful when this conversation "
+    "arrived via the Action Button / Share Sheet phone channel; give it a "
+    "clear, self-contained instruction."
+)
 
 
 def build_supervisor(
@@ -744,6 +796,7 @@ def build_supervisor(
     research_agent_graph: CompiledStateGraph,
     life_admin_agent_graph: CompiledStateGraph,
     mac_control_agent_graph: CompiledStateGraph,
+    phone_agent_graph: CompiledStateGraph,
 ) -> CompiledStateGraph:
     """Build the supervisor — a create_agent(...) ReAct loop whose tools
     delegate to each specialist's own compiled graph directly, rather than
@@ -773,6 +826,11 @@ def build_supervisor(
             "mac_control_agent",
             _MAC_CONTROL_TOOL_DESCRIPTION,
             partial(_invoke_agent_graph, mac_control_agent_graph, "mac_control_agent"),
+        ),
+        _make_specialist_tool(
+            "phone_agent",
+            _PHONE_TOOL_DESCRIPTION,
+            partial(_invoke_agent_graph, phone_agent_graph, "phone_agent"),
         ),
     ]
     return create_agent(
@@ -814,6 +872,7 @@ def build_graph(
     research_agent_graph = build_research_agent()
     life_admin_agent_graph = build_life_admin_agent(mcp_tools)
     mac_control_agent_graph = build_mac_control_agent()
+    phone_agent_graph = build_phone_agent()
 
     builder = StateGraph(GraphState)
     builder.add_node("compact_history", compact_history_node)
@@ -821,7 +880,11 @@ def build_graph(
     builder.add_node(
         "supervisor",
         build_supervisor(
-            coding_agent_graph, research_agent_graph, life_admin_agent_graph, mac_control_agent_graph
+            coding_agent_graph,
+            research_agent_graph,
+            life_admin_agent_graph,
+            mac_control_agent_graph,
+            phone_agent_graph,
         ),
     )
     # Phase 7 Part B: proposes 0+ durable facts from the CURRENT turn's user

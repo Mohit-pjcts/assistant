@@ -2000,3 +2000,442 @@ and live-verified via both submission paths against the real running app
 `tsc`/`ruff`/`prettier`/`build` all clean (2 pre-existing, unrelated ruff
 findings confirmed via `git stash`, identical to Phases 18/19's own, not
 introduced here) ✓; STEPS.md updated (97) ✓.
+
+---
+
+## Phase 21 — Phone conversational channel + phone_agent — CORE FLOW + BOTH PHONE_ACTIONS BRANCHES LIVE-VERIFIED INSIDE "ASK ONI" (opened + built 2026-07-25, STEPS.md 103–104; live-verified STEPS.md 108–110)
+
+**Status note:** the core Action Button flow AND both `phone_actions`
+branches (`open_url`, `open_app`) are genuinely live-verified inside
+the actual "Ask Oni" Shortcut on the real iPhone, not just code-complete
+(STEPS.md 108/110) — a real Dictate → POST → real graph → Speak round
+trip; a real `open_url` phone_action that actually opened Safari; and a
+real `open_app` phone_action that actually launched a named app,
+resolved via Shortcuts' "Ask Each Time" field (which turns `Open App`'s
+normally-fixed picker into a bindable variable). Note the process: the
+`open_app` mechanism was first proven in a separate standalone test
+(STEPS.md 109, at the time misreported as already integrated and
+corrected once the user clarified), THEN actually wired into "Ask Oni"
+itself and re-verified there (STEPS.md 110) — worth remembering that
+"the technique works" and "it's actually integrated" are different
+claims, don't conflate them again. Built interactively with the user,
+including one real on-device bug found and fixed along the way (an
+empty JSON body key). `phone_agent` also gained `run_shortcut_on_phone`
+(STEPS.md 111) — built GATED at first (mirroring `mac_tools.py`'s own
+`run_shortcut`), then **explicitly UNGATED at the user's direct request**
+(STEPS.md 112, same category of decision as `open_url_in_brave` in
+Phase 13 — a deliberate, documented weakening, not silent). Fixing its
+tests surfaced a real, live-diagnosed supervisor/model quirk (not a
+code bug): it sometimes retries a no-longer-gated action name against
+`request_gated_action_confirmation` using a similar-sounding still-gated
+one instead of just delegating — resolved with a deterministic,
+LLM-free unit test for the tool's own real guarantee plus a live test
+tolerant of that specific retry path. Still open, disclosed rather than
+assumed done: the confirmation-gate Speak/Dictate/`/phone/resume`
+branch (still needed for OTHER gated actions reachable via "Ask Oni",
+even though `run_shortcut_on_phone` itself no longer needs it), and
+Shortcuts 2-4 (Share to Oni, Sync Health, the geofence trigger) remain
+unbuilt on the device. Not flipped to full COMPLETE until those are
+either built or explicitly descoped.
+
+**Real scope correction found during the build, not assumed away:**
+"iPhone file search"/"iPhone photo search" as `phone_agent` TOOLS turned
+out not to be buildable — there's no synchronous channel for a tool call
+to pause mid-turn and ask the phone to run `Find Files`/`Find Photos`
+(the same "no remote push to the phone" constraint below applies exactly
+as hard mid-turn as between turns). The Shortcut itself pre-gathering
+results before calling `/phone/turn` is the only way this can work in
+practice — reflected in `phone_agent`'s system prompt and `PHONE_SETUP.md`
+rather than as dedicated tools. See STEPS.md 104 for the full reasoning.
+
+**Objective:** a new `phone_agent` specialist plus the conversational
+channel that reaches it from the iPhone — the Action Button (single
+press) as a voice-I/O trigger, Share Sheet photo/link intake, health
+data, location, and file/photo search on the phone. Scoped in a
+`/grill-with-docs` session before any code was written; nothing below is
+built yet.
+
+**Governing platform constraint (applies to every phone-related phase
+below, not just this one):** Apple does not allow a remote server to
+trigger a Shortcut, open an app, or open a URL on the iPhone
+unprompted — only a LOCAL trigger (button press, Share Sheet, Siri,
+automation) can invoke one. This means the backend can never push a
+command to the phone out of the blue. Every phone-side capability in
+Phases 21–22 executes only as the *reply* to a turn the phone itself
+initiated — never as a Mac-initiated push. This is the same
+local-trigger-only constraint that makes STEPS.md 100's existing
+Tailscale/PWA phone access read/write-from-phone rather than
+write-to-phone.
+
+**Voice capture mechanism (Action Button), decided over the record-audio
+alternative:** Shortcuts' `Dictate Text` action (on-device, auto-stops on
+silence — no second press needed) → POST to a new, non-streaming JSON
+endpoint (name TBD at build time, referred to here as `/phone/turn`) →
+`graph.ainvoke()` the same way `voice_daemon.py`'s `_process_turn` does →
+JSON reply → Shortcuts' `Speak Text` (on-device TTS) speaks it back.
+Deliberately NOT the `Record Audio` + `/voice/transcribe` path the PWA
+mic button uses (STEPS.md 100) — that needs a second press to stop
+recording (Shortcuts' Record Audio has no auto-silence-stop) and depends
+on `ffmpeg`/`mlx_whisper` being warm on the Mac; Dictate Text needs
+neither. No raw audio ever leaves the phone for this channel. Share Sheet
+intake (photo/link/screenshot) reuses the SAME endpoint, extended to
+accept an optional image, reusing Phase 20's existing multimodal
+`/uploads` downsampling pattern rather than inventing a second one.
+
+**Thread continuity:** follows `thread_store`'s active-thread pointer,
+re-resolved every turn — identical model to `voice_daemon.py`'s Phase 15
+behavior (module docstring), not a separate phone-specific thread.
+
+**Confirmation gate over this channel:** identical rule to
+`voice_daemon.py`'s existing `_process_turn` loop —
+`voice_approvable: True` gates (e.g. calendar delete) get a real
+speak-the-question / Dictate-the-answer / resume loop;
+`voice_approvable: False` gates (email, memory writes, filters, and per
+Phase 22 below, iMessage send) auto-decline with a spoken explanation,
+exactly like the Mac daemon does today. No new gate semantics — this
+channel reuses `interrupt()`/`Command(resume=...)` the same way every
+other client does.
+
+**`phone_agent` tool list (new specialist, wired into the supervisor same
+as the other four):**
+- **Health data** — read-only query over the LATEST snapshot pushed by
+  a user-triggered sync Shortcut. Deliberately NOT scheduled/automatic
+  (a "scheduled automation push" alternative was considered and declined
+  at the grilling checkpoint) — data is only as fresh as your last
+  manual sync; there is no way to answer "what's my heart rate right
+  now" live, and that's an accepted, deliberate limitation, not an
+  oversight. Needs a new small storage table (mirrors `board_store.py`'s
+  pattern of a dedicated sqlite file) to hold the latest pushed
+  snapshot.
+- **Location** — attached to phone-initiated turns by the Shortcut
+  itself (a `Get Current Location` step included in the turn-sending
+  Shortcut), not fetched independently by the backend — same
+  local-trigger-only reasoning as above. Feeds "restaurants near me"
+  -style queries via `research_agent`-style tools already available to
+  the graph.
+- **iPhone file search** — Shortcuts' `Find Files` action (Files/iCloud
+  Drive), read-only, results returned within the same phone-initiated
+  turn. This is a DIFFERENT mechanism from Phase 23's Mac-side full-disk
+  tool below — no code-sharing expected, different platforms entirely.
+- **iPhone photo search** — Shortcuts' `Find Photos` action, filterable
+  by date/album/favorite/screenshot. NOT content-based search ("find
+  photos of my dog") — Apple does not expose its on-device ML photo
+  search to automation on either platform; this was explicitly ruled out
+  at the grilling checkpoint as not feasible, not merely deferred.
+- **`open_app` / `open_url` on iPhone** — Shortcuts' `Open App` /
+  `Open URLs` actions (the latter respects whatever the user has set as
+  their iOS default browser — directly satisfies the original "open in
+  primary browser" ask with no extra config needed). **Ungated** —
+  matches the existing Mac precedent (`mac_tools.py`'s `open_app`,
+  Phase 13's `open_url_in_brave`), same reasoning: open-only, no
+  automation, reversible, immediately visible to the user. Decided
+  explicitly at the grilling checkpoint rather than defaulting to gated.
+- Only ever reachable via a phone-initiated turn's reply — `phone_agent`
+  has no channel to act on the phone on its own initiative from a Mac
+  dashboard/CLI/voice conversation.
+
+**Steps (not yet sequenced into checkpoints — do that at phase-open
+time):**
+1. New non-streaming JSON turn endpoint (text + optional image in,
+   JSON reply out — including any pending-interrupt payload, mirroring
+   what `voice_daemon.py`'s loop already handles locally).
+2. `phone_agent` graph (health/location/file-search/photo-search/
+   open_app/open_url tools) wired into the supervisor; routing prompt
+   update (the same "supervisor has no visibility into a specialist's
+   bound tools" class of bug hit render_ui/board routing in Phases 18/20
+   is a known risk here too — check for it explicitly, don't assume the
+   supervisor will route phone requests correctly by default).
+3. Health-sync storage (new small sqlite table/file) + a sync-receiving
+   endpoint the user-triggered Shortcut posts to.
+4. The Action Button Shortcut itself (Dictate → POST → Speak), the
+   Share Sheet Shortcut (image/link → POST → Speak or display), and the
+   health-sync Shortcut — built and installed on the actual phone, same
+   "user does the Console/App setup, code provides exact steps" pattern
+   Phase 2 used for Google Cloud.
+5. Live verification end-to-end on the real iPhone over Tailscale,
+   including at least one gated-action round trip (spoken confirm and
+   spoken decline) and one Share Sheet round trip.
+
+**Done-when:** a real Action Button press produces a real spoken reply
+from the live graph, thread-continuous with the Mac/dashboard
+conversation; a gated action reached via this channel behaves identically
+to the Mac voice daemon's existing behavior (text-only gates decline,
+voice-approvable gates get a real yes/no loop); Share Sheet round-trips a
+real photo through the vision pipeline; health/location/file/photo
+queries return real data from the phone, not mocked; `open_app`/
+`open_url` verified live; all existing tests still pass; STEPS.md
+updated; CLAUDE.md's Architecture section gains `phone_agent` and the new
+endpoint(s).
+
+---
+
+## Phase 22 — Messaging cluster: iMessage + WhatsApp, Mac + iPhone — CODE COMPLETE (send-only), READ DEFERRED (opened + built 2026-07-25, STEPS.md 105)
+
+**Objective:** iMessage read+send and WhatsApp send-only, reachable from
+both the Mac and the phone. Depends on Phase 21's phone-initiated-turn
+channel existing first (the phone-side halves of this phase are
+turn-reply actions on that same channel).
+
+**Status note (STEPS.md 105):** `send_imessage`/`compose_whatsapp` are
+built, unit-tested (mocked subprocess — this project's own convention for
+mac_tools.py), and wired into the supervisor/routing/InterruptGate —
+but **UNVERIFIED against the real Messages.app/WhatsApp**, since a live
+`osascript` probe against Messages.app hung on a first-run Automation
+permission dialog that needs the user's own click, genuinely blocking
+autonomous verification. **iMessage READ is not implemented at all** —
+a real finding, not an oversight: Messages.app's AppleScript dictionary
+does not reliably expose message history content in modern macOS (only
+sending is well-supported); the actual working alternative is direct
+SQLite access to `~/Library/Messages/chat.db` (Full Disk Access, not
+Automation; an undocumented, version-fragile schema). Left as an open
+decision for the user rather than guessed at. A real second gap surfaced
+while wiring this in, also fixed (STEPS.md 105): the supervisor had no
+signal distinguishing a phone-initiated turn from a Mac one, so an
+ambiguous "open Spotify"/"message on WhatsApp" could have routed to
+mac_control_agent's Mac-only tools instead of phone_agent's —
+`server.py`'s `_PHONE_CHANNEL_MARKER` fixes this, live-verified.
+
+**iMessage — Mac side (extends `mac_control_agent`):** Messages.app is
+AppleScript-scriptable (`tell application "Messages"`), the same pattern
+`mac_tools.py` already uses for Reminders/Notes/Calendar — real-time
+read+send, no push-model/staleness limitation (this is why Messages
+landed here rather than under `phone_agent`'s push-synced model, decided
+explicitly at the grilling checkpoint). Send is **gated**,
+`voice_approvable: False` (free-text body, same reasoning as email/
+memory-write gates — harder to vet by ear than a bare action verb),
+following `write_tools.py`'s local-wrapper-calls-`interrupt()`-itself
+pattern. Read is ungated.
+
+**iMessage — iPhone side:** reachable only within a phone-initiated turn
+(Phase 21's channel) — the JSON reply carries a structured "send this
+message" action that the Shortcut executes via its own native
+`Send Message` action. **Gated** the same way as the Mac side, using the
+SAME text-confirmation-in-Shortcuts loop Phase 21 already built for
+other gates on this channel — not a second gate mechanism.
+
+**WhatsApp — both platforms, send-only, no reading:** WhatsApp has no
+AppleScript or Shortcuts API for reading chat history at all; the only
+way to read it programmatically is an unofficial library (e.g. Baileys,
+whatsapp-web.js) that violates WhatsApp's Terms of Service and risks the
+account being banned. **Explicitly declined at the grilling
+checkpoint** — WhatsApp read access is not in scope for this project.
+Sending is different and safe: WhatsApp supports a `wa.me`/
+`whatsapp://send?phone=...&text=...` URL scheme that opens a pre-filled
+compose draft — the human must still tap Send inside the WhatsApp app
+itself; no code path can complete the send. Mac: WhatsApp Desktop via
+this URL scheme, same ungated "open, human finishes it" pattern as
+`open_url_in_brave` (Phase 13). iPhone: same URL scheme opened via a
+phone-initiated turn's `open_url` action (Phase 21) — no new phone-side
+mechanism needed, this is just `open_url` with a `whatsapp://` URL.
+**Ungated on both platforms** — there is no autonomous-send code path to
+gate; the human is structurally the final actor.
+
+**Steps:**
+1. Mac: `mac_tools.py` gains `read_imessages`/a `send_imessage` wrapper
+   (interrupt-gated, mirrors `write_tools.py`'s `send_email` shape) +
+   a `compose_whatsapp` tool (ungated, opens the URL via the existing
+   `open`-CLI bridge pattern).
+2. `mac_control_agent`'s system prompt updated to describe the new
+   Messages/WhatsApp capabilities (same routing-visibility risk as
+   Phase 21 step 2 — verify the supervisor actually delegates these
+   requests, don't assume).
+3. `InterruptGate.tsx` gains a renderer for the iMessage-send payload
+   (verbatim recipient + body, same verbatim-content requirement as
+   every other gated payload — no LLM re-summary).
+4. Phone-side: extend Phase 21's turn-reply action vocabulary with
+   `send_imessage` (gated, reuses that channel's existing confirmation
+   loop) and confirm `open_url` already covers WhatsApp's URL scheme
+   with no extra code.
+5. Live verification: a real iMessage sent and declined via both Mac and
+   phone; a real WhatsApp compose draft opened (not sent) on both
+   platforms.
+
+**Done-when:** iMessage read+send works live on the Mac, gated correctly,
+verbatim payload shown; iMessage send works live from the phone through
+the same gate semantics; WhatsApp compose-draft opens correctly on both
+platforms with zero autonomous-send path; all existing tests pass;
+STEPS.md updated.
+
+---
+
+## Phase 23 — Full-disk Mac file + photo access — FILE OPS COMPLETE + LIVE-VERIFIED; PHOTOS CODE COMPLETE, UNVERIFIED (opened + built 2026-07-25, STEPS.md 106)
+
+**Status note:** `search_disk`/`read_disk_file`/`write_disk_file`/
+`delete_disk_file` (`assistant/disk_tools.py`) are done, tested, AND
+live-verified through a real `/chat` → gate → `/resume` → real file
+write round trip (STEPS.md 106) — plain file I/O needs no macOS
+permission dialog, so this is fully verified, unlike most of Phases
+21-22. `photos_search`/`photos_export` are code-complete but UNVERIFIED
+against the real Photos.app (same Automation-permission-dialog wall as
+Messages.app, STEPS.md 105/106).
+
+**A real correction to this entry's own original plan, found before
+writing code:** the paragraph below originally said the new denylist
+should "extend — not replace" `tools.py`'s shell-tool denylist. Checking
+the actual code first (not assumed) showed that list blocks
+Desktop/Documents/Downloads/Pictures/Movies wholesale — reusing it would
+defeat this phase's own purpose. Built a narrower, credential-specific
+denylist instead; see STEPS.md 106 and `disk_tools.py`'s own docstring
+for the full reasoning.
+
+**Objective:** search/read/write access to the WHOLE Mac filesystem, not
+just `workspace/`, plus Photos.app search/export. **This is the largest
+security-model change in the project's history** — a deliberate,
+explicit, informed weakening of Phase 1's foundational file-sandboxing
+decision, reached only after the grilling session surfaced the
+prompt-injection blast-radius implications directly and the user
+confirmed the choice twice (once for read, once again for write/delete)
+with the trade-off stated plainly each time. Do not treat this phase as
+routine — re-read this section's reasoning before implementing, and
+re-confirm scope with the user before writing code if any ambiguity
+remains.
+
+**What's approved:**
+- Full-disk **read** (search + read contents) outside `workspace/`,
+  **except** a hard denylist of sensitive paths that stays enforced even
+  here: `.ssh`, `.aws`, Keychain-related paths, browser cookie/password
+  stores, `.env` files anywhere on disk (not just the project's own).
+  This extends — does not replace — the denylist `mac_tools.py`'s shell
+  tool already applies for argv execution; reuse those same path
+  patterns rather than inventing a second list that could drift out of
+  sync.
+- Full-disk **write/overwrite/delete** outside `workspace/`, but ONLY
+  behind the standing confirmation gate — same `interrupt()` pattern as
+  every other side-effectful tool in the project, showing the real path
+  and real content/diff verbatim before executing. This was the one
+  point in the grilling session where the user's answer ADDED a
+  guardrail beyond what was initially chosen (fully unsandboxed writes
+  were selected, then explicitly walked back to gated once the
+  side-effect framing was made concrete) — the gate here is
+  non-negotiable per that exchange, not optional.
+- Reads outside the denylist are ungated, matching how `workspace/`
+  reads already work today.
+- Writes/deletes WITHIN `workspace/` are unaffected by any of this —
+  they keep behaving exactly as they do today (ungated, sandboxed).
+
+**Mac Photos.app search/export:** AppleScript-scriptable (search/filter
+by date, album, favorite; export matched items), same
+`mac_control_agent`/`mac_tools.py` pattern as Reminders/Notes/Calendar.
+Exports land in `workspace/` so the existing vision pipeline (Phase 20's
+`/uploads` downsampling, `_resolve_in_workspace()`) can view them — do
+NOT bypass that containment check just because the source read came from
+outside `workspace/`; the exported COPY is a new file and goes through
+the normal path.
+
+**Steps:**
+1. New file tool(s): full-disk search (metadata, e.g. `mdfind`-based),
+   full-disk read (content), full-disk write/delete — the last one
+   calling `interrupt()` itself before touching anything outside
+   `workspace/`, verbatim path + content/diff in the payload.
+2. Extend the shared sensitive-path denylist (currently living in/near
+   `mac_tools.py`'s shell tool) so both the shell tool and this new file
+   tool reference the same list, not two copies.
+3. `InterruptGate.tsx` gains a renderer for the outside-workspace
+   write/delete payload.
+4. Mac Photos.app search/export tool in `mac_tools.py`.
+5. Live verification: a real full-disk search finds a real file outside
+   `workspace/`; a denylisted path (e.g. a file under `~/.ssh`) is
+   confirmed still blocked; a real write outside `workspace/` correctly
+   interrupts and shows the real diff; a real Photos search+export
+   round-trips through the vision pipeline.
+
+**Done-when:** full-disk search/read work live, denylist verified
+blocking the same paths the shell tool already blocks; a real
+outside-`workspace/` write/delete correctly gates and shows verbatim
+content; Photos search/export verified live end-to-end through the
+vision pipeline; all existing tests pass (including a regression test
+that `workspace/`-internal behavior is unchanged); STEPS.md updated.
+
+---
+
+## Phase 24 — Unattended pre-approved automations — CODE COMPLETE, CORE MECHANISM LIVE-VERIFIED (opened + built 2026-07-25, STEPS.md 107)
+
+**Status note:** the phase's own hardest, most central claim — that a
+registered automation can fire with NO live confirmation and NOT hang
+waiting for one — is proven, not assumed: a real automation fires
+through the real graph end to end with a `"fired"` outcome and zero
+`interrupt()` calls (STEPS.md 107's own test). What's NOT verified: an
+actual geofence Personal Automation on a real iPhone calling `/fire`
+(`PHONE_SETUP.md`'s new Shortcut 4), and a real `send_imessage` send
+succeeding (same Messages.app Automation-permission wall as Phase 22).
+
+**A real scope decision made while implementing, worth reading before
+touching this code again:** the fire endpoint invokes ONE specialist
+directly (`_invoke_agent_graph`, reused unchanged from supervisor.py),
+not a full supervisor-level ReAct turn — see STEPS.md 107 for why (an
+unverified structural question about whether `InjectedState` sees extra
+outer-graph state keys through a subgraph-node boundary, not worth
+resting the highest-risk feature in this plan on an unconfirmed
+assumption). `AUTOMATION_ELIGIBLE_ACTIONS` also narrows pre-approval to
+messaging-shaped actions only (`send_imessage`/`send_email`), not the
+full `GATED_ACTIONS` set — the phase's own concrete example was always
+"arrival/departure text," and letting an automation silently pre-approve
+something like `delete_disk_file` was never actually discussed.
+
+**Objective:** a new standing-exception class to the confirmation gate —
+geofence-triggered automations that execute WITHOUT a live human
+checkpoint at the moment they fire, because by construction there is no
+live session to answer one. This is a genuinely new risk category for
+the project, not an extension of an existing one: every gated action
+built through Phase 20 assumes a human is present in the same turn to
+approve it; this phase deliberately removes that assumption for a
+narrow, explicitly pre-approved set of automations.
+
+**What was decided, and the risk being knowingly accepted:** an
+automation is registered once (via a new dashboard UI panel — chosen
+over a hand-edited config file for auditability), and after that fires
+autonomously on its geofence trigger with **AI-decided content,
+generated fresh at trigger time, using the full tool access a live agent
+turn would have** (not a fixed macro, and not restricted to a narrow
+trusted-input set the way Phase 7 Part B's memory-extraction design
+restricts its own inputs). This means: a real, unattended LLM call, with
+real external side effects (e.g. sending a text to an actual person),
+runs with no human reading the output before it goes out, and with the
+same tool surface (web search, email reading, etc.) that makes
+prompt-injection a live concern everywhere else in this project's threat
+model. **This was chosen explicitly, twice, after the trade-off against
+a narrower/safer alternative was stated plainly at the grilling
+checkpoint — it is not an oversight and should not be quietly narrowed
+later without going back to the user.** First concrete automation:
+arrival/departure text to a specific person (e.g. "landed" /
+"leaving now" style).
+
+**Trigger mechanism:** a Shortcuts Personal Automation (geofence
+entry/exit) on the phone calls a new backend endpoint identifying which
+registered automation fired. No LLM call happens on the phone side —
+the phone's only job is detecting the geofence event and telling the
+backend which automation ID to run; all generation happens
+server-side, same as every other agent turn.
+
+**Steps:**
+1. New automation-registry storage (mirrors `board_store.py`'s
+   dedicated-sqlite-file pattern) — fields: trigger description
+   (location + enter/exit), target (e.g. a contact), a free-text goal/
+   prompt describing what the generated message should accomplish,
+   enabled/disabled flag.
+2. Dashboard panel: list/create/edit/disable registered automations.
+3. Backend: geofence-trigger endpoint → looks up the registered
+   automation → runs a full agent turn (full tool access, per the
+   decision above) seeded with the automation's stored goal → executes
+   the resulting side-effectful action directly (no `interrupt()` — this
+   IS the pre-approval, that's the entire point of this phase) →
+   logs the fired instance (input context, generated content, action
+   taken) somewhere reviewable after the fact, since there's no
+   before-the-fact review here.
+4. The geofence-detecting Shortcut itself, installed on the phone,
+   calling the new endpoint.
+5. Live verification: register the arrival/departure-text automation
+   for real, trigger it live via an actual geofence crossing (or the
+   closest practical simulation), confirm the generated message and the
+   actual send, confirm the fired-instance log captures what happened.
+
+**Done-when:** a real registered automation fires live off a real
+geofence event, generates real content, executes the real side effect,
+and produces a reviewable log entry of what it did and why; the
+dashboard registry panel works end-to-end (create/edit/disable); no
+`interrupt()` call exists anywhere in this specific execution path
+(that absence is intentional and should be visible in the diff, not
+accidental); all existing tests pass; STEPS.md updated; CLAUDE.md's
+Security model section gains an explicit note documenting this as a
+named, bounded exception to the standing confirmation rule (not a
+silent weakening of it).

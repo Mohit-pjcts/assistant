@@ -27,6 +27,7 @@ from assistant.sub_agents import (  # noqa: E402
     CODING_SYSTEM_PROMPT_FALLBACK,
     LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK,
     MAC_CONTROL_SYSTEM_PROMPT_FALLBACK,
+    PHONE_SYSTEM_PROMPT_FALLBACK,
     RESEARCH_SYSTEM_PROMPT_FALLBACK,
 )
 from assistant.supervisor import SUPERVISOR_SYSTEM_PROMPT_FALLBACK  # noqa: E402
@@ -38,6 +39,7 @@ _PROMPTS = [
     ("research-agent-system-prompt", RESEARCH_SYSTEM_PROMPT_FALLBACK),
     ("life-admin-agent-system-prompt", LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK),
     ("mac-control-agent-system-prompt", MAC_CONTROL_SYSTEM_PROMPT_FALLBACK),
+    ("phone-agent-system-prompt", PHONE_SYSTEM_PROMPT_FALLBACK),
     ("compaction-summary-prompt", _SUMMARY_PROMPT_FALLBACK),
 ]
 

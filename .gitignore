@@ -41,3 +41,10 @@ tokens.json
 # integration into dashboard/ (oniMatchaTheme, KanbanBoard, HomePage, etc.).
 # Not part of the shipped app; never intended to enter the repo history.
 oni/
+
+# Claude Code skill-install artifacts — same standing policy as Phase 11's
+# skill-vetting cleanup (CLAUDE.md's security model): a skill is untrusted,
+# instruction-bearing content loaded into agent context, and install
+# artifacts must never enter this portfolio repo's history.
+.agents/
+skills-lock.json

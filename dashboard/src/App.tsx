@@ -10,6 +10,7 @@ import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { CostPanel } from "@/components/cost/CostPanel";
 import { CostSummaryCard } from "@/components/cost/CostSummaryCard";
 import { KanbanBoard } from "@/components/board/KanbanBoard";
+import { AutomationsPanel } from "@/components/automations/AutomationsPanel";
 import { InProgressTasksCard } from "@/components/board/InProgressTasksCard";
 import { ThreadSidebar } from "@/components/threads/ThreadSidebar";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
@@ -157,6 +158,12 @@ function App() {
             >
               Board
             </TabsTrigger>
+            <TabsTrigger
+              value="automations"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
+              Automations
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="home" className="min-h-0 h-full">
             <HomePage greetingName="Mohit" onStartChat={startChatFromHome} />
@@ -180,6 +187,9 @@ function App() {
           </TabsContent>
           <TabsContent value="board" className="min-h-0 h-full">
             <KanbanBoard />
+          </TabsContent>
+          <TabsContent value="automations" className="min-h-0">
+            <AutomationsPanel />
           </TabsContent>
         </Tabs>
       </main>

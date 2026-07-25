@@ -20,10 +20,90 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
 
 ## Current Status
 
-- **No phase currently ACTIVE.** Phase 20 (Astryx redesign integration:
-  theme, chat, uploads, kanban board, landing page, STEPS.md 97) is the
-  most recently completed phase, opened, built, and documented in one
-  session (2026-07-24/25) — no next phase opened or scoped yet.
+- **Phase 21 — Phone conversational channel + `phone_agent`: CORE FLOW +
+  BOTH PHONE_ACTIONS BRANCHES LIVE-VERIFIED INSIDE "ASK ONI"** (opened +
+  built 2026-07-25, STEPS.md 103–104; live-verified on the real iPhone
+  STEPS.md 108–110). `/phone/turn`/`/phone/resume`/`/phone/health-sync`
+  (server.py), `phone_agent` (sub_agents.py/phone_tools.py/
+  phone_store.py) wired into the supervisor as a sixth specialist. The
+  Action Button flow AND both `phone_actions` branches are now
+  genuinely proven live inside the actual "Ask Oni" Shortcut, not just
+  tested: a real Dictate→POST→real graph→Speak round trip; a real
+  `open_url` phone_action that actually opened Safari; and a real
+  `open_app` phone_action that actually launched a named app (Shortcuts'
+  "Ask Each Time" field turns `Open App`'s normally-fixed picker into a
+  bindable variable). The `open_app` mechanism was first proven in a
+  separate standalone test (STEPS.md 109, at the time misreported as
+  already wired into "Ask Oni" and corrected once the user clarified),
+  then actually integrated and re-verified there (STEPS.md 110) — "the
+  technique works" and "it's integrated" are different claims, kept
+  distinct this time. Built interactively with the user, including a
+  real on-device bug found and fixed along the way (an empty JSON body
+  key in the Shortcut, diagnosed by checking `last_active_at` on the
+  server side before/after to confirm the request wasn't even arriving).
+  `phone_agent` also gained `run_shortcut_on_phone` (STEPS.md 111) —
+  built GATED at first (mirroring `mac_control_agent`'s own
+  `run_shortcut`), then **explicitly UNGATED at the user's direct
+  request** (STEPS.md 112, same category as `open_url_in_brave`'s own
+  Phase 13 decision — a deliberate, documented weakening). Fixing its
+  tests surfaced a real, live-diagnosed supervisor/model quirk (not a
+  code bug): it sometimes retries a no-longer-gated action name against
+  `request_gated_action_confirmation` using a similar-sounding
+  still-gated one instead of delegating directly — resolved with a
+  deterministic unit test for the tool's own guarantee plus a live test
+  tolerant of that specific path. Still open: the confirmation-gate
+  Speak/Dictate/`/phone/resume` branch (still needed for OTHER gated
+  actions reachable via "Ask Oni"), and Shortcuts 2-4 (Share to Oni,
+  Sync Health, the geofence trigger) — none built on the device yet.
+  Real scope correction found mid-build: "iPhone file/photo search"
+  turned out not to be buildable
+  as `phone_agent` tools at all (no synchronous mid-turn channel to the
+  phone) — see PLAN.md's Phase 21 entry.
+  **Phase 22 (messaging cluster) is CODE COMPLETE for send-only**
+  (`send_imessage`/`compose_whatsapp` in `mac_tools.py`, STEPS.md 105) —
+  unverified against the real apps (a live Automation-permission click is
+  needed, blocked while working autonomously), and iMessage READ
+  deliberately not built (Messages.app's AppleScript dictionary doesn't
+  reliably expose it; the real alternative, direct `chat.db` SQLite
+  access, is left as an open decision rather than guessed at). A real
+  routing gap found while wiring Phase 22 in — the supervisor had no way
+  to know a request came from the phone, risking "open Spotify" acting on
+  the Mac instead — is fixed (`_PHONE_CHANNEL_MARKER`, server.py) and
+  live-verified with a natural, non-explicit phrasing.
+  **Phase 23 (full-disk Mac file access) is FILE OPS COMPLETE and
+  LIVE-VERIFIED** (`assistant/disk_tools.py` — search/read/write/delete,
+  a real `/chat`→gate→`/resume`→real-file-write round trip proved live,
+  STEPS.md 106) — plain file I/O needs no macOS permission dialog, unlike
+  most of this session's other work. Photos.app search/export is code
+  complete but unverified (same Automation-permission wall). A real
+  correction to this phase's own written plan was found before coding:
+  the new credential-path denylist is deliberately NARROWER than
+  `tools.py`'s shell-tool denylist (which blocks Desktop/Documents/
+  Downloads wholesale — reusing it would have defeated this phase's own
+  purpose), not a superset of it as originally planned.
+  **Phase 24 (unattended pre-approved automations) is CODE COMPLETE
+  with its central mechanism LIVE-VERIFIED** (`assistant/
+  automation_store.py`, `server.py`'s `/automations`/`/automations/
+  {id}/fire`, dashboard Automations tab — STEPS.md 107): a real
+  registered automation fires through the real graph with a `"fired"`
+  outcome and genuinely zero `interrupt()` calls, proving the
+  `pre_approved_actions` bypass actually works rather than hanging
+  forever waiting for a confirmation nobody's there to give. Deliberately
+  scoped to invoke ONE specialist directly rather than a full supervisor
+  turn (an unverified `InjectedState`-across-subgraph-boundary question
+  wasn't worth resting the highest-risk feature in this plan on) and
+  restricted to messaging-shaped actions only
+  (`send_imessage`/`send_email`), not the full `GATED_ACTIONS` set — see
+  STEPS.md 107 for both decisions' full reasoning. **All four planned
+  phases (21-24) from the grilling session are now code-complete.**
+  Remaining work across all of them is exclusively real-device
+  verification the user needs to do by hand: building the Shortcuts in
+  `PHONE_SETUP.md`, clicking through Messages.app's/Photos.app's
+  one-time Automation permission dialogs, and arming a real geofence
+  trigger.
+  Phase 20 (Astryx redesign integration: theme, chat, uploads, kanban
+  board, landing page, STEPS.md 97) is the most recently fully-completed
+  phase, opened, built, and documented in one session (2026-07-24/25).
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -418,7 +498,16 @@ dashboard redesign) opened, built, and documented the same day,
 2026-07-24 (STEPS.md 96). Phase 20 (Astryx redesign integration: theme,
 chat, uploads, kanban board, landing page) opened and built the same
 day, 2026-07-24, spanning into 2026-07-25; documented in a closeout pass
-at the user's request (STEPS.md 97). See PLAN.md.
+at the user's request (STEPS.md 97). Phases 21–24 scoped 2026-07-25 via a
+`/grill-with-docs` session, ahead of any code: 21 phone conversational
+channel + `phone_agent` (Action Button voice trigger, Share Sheet intake,
+health/location, iPhone file+photo search, `open_app`/`open_url`), 22
+messaging cluster (iMessage read+send + WhatsApp send-only, Mac + iPhone),
+23 full-disk Mac file + Photos access (the largest security-model change
+in the project's history — see its own PLAN.md entry), 24 unattended
+pre-approved automations (a new, deliberately narrow exception to the
+standing confirmation gate). All four are PLANNED, not ACTIVE — see
+PLAN.md for full scope, none built yet. See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -440,7 +529,14 @@ assistant/
 ├── write_tools.py         # Phase 12: gated write-tool wrappers (send/label/calendar/filter) —
 │                             see its module docstring for the local-wrapper-not-raw-MCP-tool
 │                             architecture and why the gate can't sit on mcp_tools.py's tools
-├── mac_tools.py           # Mac-native control: osascript/open/shortcuts behind a hard allowlist
+├── mac_tools.py           # Mac-native control: osascript/open/shortcuts behind a hard allowlist;
+│                             Phase 22 added send_imessage (gated)/compose_whatsapp (ungated);
+│                             Phase 23 added photos_search/photos_export (ungated)
+├── disk_tools.py          # Phase 23: full-disk search/read (ungated, credential-path denylist)
+│                             + write/delete (gated) outside workspace/ — the largest
+│                             security-model change in the project's history; see its own
+│                             module docstring for why its denylist is deliberately NARROWER
+│                             than tools.py's shell-tool denylist, not a superset of it
 ├── interrupts.py          # confirmation-gated dummy tool demonstrating the interrupt mechanic
 ├── memory.py              # get_checkpointer() context manager over AsyncSqliteSaver
 │                             (conversation_memory.sqlite)
@@ -457,12 +553,27 @@ assistant/
 ├── board_tools.py         # Phase 20: kanban board tools for life_admin_agent — deliberately
 │                             UNGATED (local/reversible/in-app, not an external side effect;
 │                             see its module docstring against the Security model below)
+├── phone_store.py         # Phase 21: latest-snapshot-per-kind storage (phone_data.sqlite,
+│                             separate from every other SQLite file above) for data pushed
+│                             from the iPhone (currently just "health") — user-triggered
+│                             push only, never live/scheduled
+├── phone_tools.py         # Phase 21: phone_agent's own tools — open_app_on_phone/
+│                             open_url_on_phone (ungated, cannot execute anything directly;
+│                             stash a structured action for the calling Shortcut to carry
+│                             out — see its module docstring for the governing "no remote
+│                             push to the phone" platform constraint) + get_latest_health_snapshot
+├── automation_store.py    # Phase 24: pre-approved automation registry (automations.sqlite,
+│                             separate from every other SQLite file above) + an append-only
+│                             automation_runs log — the reviewable-AFTER-the-fact record this
+│                             execution path substitutes for a before-the-fact confirmation
 ├── voice_io.py            # Phase 5/8: mic capture, local STT (mlx-whisper), TTS (`say`)
 ├── voice_daemon.py        # Phase 5: always-on Option+Return hotkey daemon (menu bar app);
 │                             Phase 15: local trigger-phrase parsing for starting a new thread
 ├── server.py              # Phase 9: FastAPI wrapper over build_graph() for the dashboard app
-│                             (/chat, /resume, /history, /memory/facts, /cost, and Phase 15's
-│                             /threads endpoints) — shares the CLI/voice daemon's real
+│                             (/chat, /resume, /history, /memory/facts, /cost, Phase 15's
+│                             /threads endpoints, Phase 21's /phone/turn, /phone/resume,
+│                             /phone/health-sync, and Phase 24's /automations CRUD +
+│                             /automations/{id}/fire) — shares the CLI/voice daemon's real
 │                             checkpointer + thread_store's active pointer, NOT the separate
 │                             `langgraph dev` ephemeral store
 └── studio.py              # LangGraph Studio / `langgraph dev` entry point (dev-time graph
@@ -473,7 +584,7 @@ dashboard/                 # Phase 9: Tauri 2 + React + TypeScript desktop app (
 │                             specifically — see the oniMatchaTheme note below)
 ├── src/
 │   ├── App.tsx             # three-column shell: ThreadSidebar · tabs (home/chat/history/
-│   │                          memory/cost/board) · right context rail (Phase 19/20)
+│   │                          memory/cost/board/automations) · right context rail (Phase 19/20)
 │   ├── lib/api.ts          # typed client for assistant/server.py's endpoints
 │   ├── themes/oniMatcha/   # Phase 20: ember-recolored matcha theme (defineTheme, extends
 │   │                          matchaTheme) — app-wide via components/theme/AstryxThemeBridge.tsx
@@ -484,6 +595,10 @@ dashboard/                 # Phase 9: Tauri 2 + React + TypeScript desktop app (
 │       │                     Playground, wired to ChatPanel's real send pipeline
 │       ├── board/           # Phase 20: KanbanBoard + InProgressTasksCard — backed by
 │       │                     board_store.py/board_tools.py, full life_admin_agent access
+│       ├── automations/     # Phase 24: AutomationsPanel — register/enable/disable/delete
+│       │                     pre-approved automations + inline run history; never calls
+│       │                     /automations/{id}/fire itself (only the phone's geofence
+│       │                     Shortcut does, PHONE_SETUP.md)
 │       ├── history/        # HistoryPanel — full unfiltered /history feed
 │       ├── memory/         # MemoryPanel — view + delete (client-confirm, not interrupt-gated)
 │       ├── cost/           # CostPanel + CostSummaryCard — LangSmith aggregates
