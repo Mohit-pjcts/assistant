@@ -81,6 +81,7 @@ from pydantic import BaseModel  # noqa: E402
 from assistant import (  # noqa: E402
     automation_store,
     board_store,
+    memory_review_agent,
     memory_store,
     observability,
     phone_store,
@@ -802,6 +803,29 @@ def _serialize_thread(thread: thread_store.Thread) -> dict[str, Any]:
     }
 
 
+async def _memory_review_loop() -> None:
+    """Runs forever: sleeps until the next local midnight, then runs one
+    memory_review_agent pass. Local time (this Mac's own clock), not UTC —
+    the user's own known timezone fact is IST, and "00:00" means midnight
+    where they actually are. Exceptions inside a single pass are caught and
+    logged rather than left to propagate, so one bad run (e.g. a transient
+    Anthropic API error) doesn't kill the loop for the rest of the server
+    process's lifetime — the same "tool errors are data, not exceptions"
+    posture this project applies everywhere else, applied here to an
+    unattended background task instead of a tool call."""
+    while True:
+        now = datetime.now()
+        next_midnight = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        await asyncio.sleep((next_midnight - now).total_seconds())
+        try:
+            queued = await memory_review_agent.run_nightly_review(conversation_db_path=CONVERSATION_DB_PATH)
+            print(f"[memory-review] queued {queued} pending fact proposal(s)")
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            print(f"[memory-review] nightly run failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Own the checkpointer for the server's process lifetime, same
@@ -848,7 +872,11 @@ async def lifespan(app: FastAPI):
         # instead of a new sibling root. A plain dict, same reasoning as
         # active_tasks above.
         app.state.pending_trace_headers = {}
-        yield
+        review_task = asyncio.create_task(_memory_review_loop())
+        try:
+            yield
+        finally:
+            review_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1300,6 +1328,47 @@ async def list_memory_facts() -> dict[str, Any]:
     }
 
 
+class CreateMemoryFactRequest(BaseModel):
+    content: str
+
+
+class UpdateMemoryFactRequest(BaseModel):
+    content: str
+
+
+@app.post("/memory/facts")
+async def create_memory_fact(request: CreateMemoryFactRequest) -> dict[str, Any]:
+    """User-authored fact, typed directly into the Memory panel — not an
+    agent proposal, so this deliberately does NOT go through interrupt()
+    either (same reasoning as delete_memory_fact/update_memory_fact below:
+    the gate in memory_extraction.py exists for the agent's own autonomous
+    writes, not the user adding to their own store). provenance="user"
+    marks it apart from an agent-derived fact's None/"from X result" so the
+    panel can label its origin."""
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content must not be empty")
+    fact_id = await memory_store.save_fact(content, provenance="user")
+    return {
+        "id": fact_id,
+        "content": content,
+        "provenance": "user",
+    }
+
+
+@app.patch("/memory/facts/{fact_id}")
+async def update_memory_fact(fact_id: int, request: UpdateMemoryFactRequest) -> dict[str, Any]:
+    """User editing their own already-saved fact — same non-gated curation
+    category as delete_memory_fact below."""
+    content = request.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content must not be empty")
+    updated = await memory_store.update_fact(fact_id, content)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"No fact with id {fact_id}")
+    return {"id": fact_id, "content": content}
+
+
 @app.delete("/memory/facts/{fact_id}")
 async def delete_memory_fact(fact_id: int) -> dict[str, Any]:
     """User-initiated deletion of their own already-saved fact — curation,
@@ -1310,6 +1379,64 @@ async def delete_memory_fact(fact_id: int) -> dict[str, Any]:
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No fact with id {fact_id}")
     return {"deleted": True}
+
+
+# --- Nightly memory review queue (memory_review_agent.py) -------------------
+
+
+@app.get("/memory/pending")
+async def list_pending_memory_facts() -> dict[str, Any]:
+    """Cards for the Memory panel's review queue — candidates
+    memory_review_agent.py's nightly pass proposed, awaiting an explicit
+    approve/decline. This IS the confirmation gate for memory writes now
+    (see memory_extraction.py's module docstring); nothing here has been
+    saved as a real, recalled fact yet."""
+    pending = await memory_store.list_pending_facts()
+    return {
+        "pending": [
+            {
+                "id": p.id,
+                "content": p.content,
+                "provenance": p.provenance,
+                "created_at": p.created_at,
+            }
+            for p in pending
+        ]
+    }
+
+
+@app.post("/memory/pending/{pending_id}/approve")
+async def approve_pending_memory_fact(pending_id: int) -> dict[str, Any]:
+    """The actual confirmation click: moves a proposal into the real facts
+    table verbatim. Not behind interrupt() — this endpoint IS the human
+    approval, same as every other user-initiated memory_store call above."""
+    fact = await memory_store.approve_pending_fact(pending_id)
+    if fact is None:
+        raise HTTPException(status_code=404, detail=f"No pending fact with id {pending_id}")
+    return {
+        "id": fact.id,
+        "content": fact.content,
+        "provenance": fact.provenance,
+        "created_at": fact.created_at,
+    }
+
+
+@app.post("/memory/pending/{pending_id}/decline")
+async def decline_pending_memory_fact(pending_id: int) -> dict[str, Any]:
+    declined = await memory_store.decline_pending_fact(pending_id)
+    if not declined:
+        raise HTTPException(status_code=404, detail=f"No pending fact with id {pending_id}")
+    return {"declined": True}
+
+
+@app.post("/memory/review/run-now")
+async def run_memory_review_now() -> dict[str, Any]:
+    """Manual trigger for memory_review_agent's nightly pass — the same
+    function _memory_review_loop calls at midnight, exposed here as an
+    on-demand "check now" affordance and so this can be live-verified
+    without waiting for an actual midnight."""
+    queued = await memory_review_agent.run_nightly_review(conversation_db_path=CONVERSATION_DB_PATH)
+    return {"queued": queued}
 
 
 def _serialize_board_item(item: board_store.BoardItem) -> dict[str, Any]:

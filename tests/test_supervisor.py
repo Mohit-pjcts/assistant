@@ -63,9 +63,8 @@ def test_context_prefix_forwards_recalled_facts_from_current_turn() -> None:
     """Since a specialist call is now an isolated ainvoke() rather than a
     view onto shared graph state, this is what replaces the old
     SubAgentWindowMiddleware's implicit sharing — deliberately forwarding
-    the current turn's recalled-facts message (Phase 7 Part B) so a
-    specialist still gets the same background context it used to see for
-    free."""
+    the recalled-facts message (Phase 7 Part B) so a specialist still gets
+    the same background context it used to see for free."""
     recalled = HumanMessage(content="[Known facts about the user: ...]")
     tag_recalled_facts(recalled)
     state = {
@@ -78,22 +77,28 @@ def test_context_prefix_forwards_recalled_facts_from_current_turn() -> None:
     assert prefix == [recalled]
 
 
-def test_context_prefix_ignores_recalled_facts_from_an_earlier_turn() -> None:
-    """A recalled-facts message from a PAST turn must not be re-forwarded
-    into a specialist call made during a later, unrelated turn — scoped to
-    the current turn boundary the same way memory_extraction.py's own
-    `_current_turn_user_text` is."""
-    stale_recalled = HumanMessage(content="[Known facts about the user: stale]")
-    tag_recalled_facts(stale_recalled)
+def test_context_prefix_forwards_recalled_facts_from_an_earlier_turn_too() -> None:
+    """A real regression, found live (2026-07-28): once recall_memory_node
+    was changed to inject the recalled-facts message ONLY on a thread's
+    first genuine turn (not every turn), a specialist call made on any
+    LATER turn stopped receiving any memory context at all — a live
+    mac_control_agent delegation on turn 3 of a thread had zero visibility
+    into facts recalled back on turn 1. There is only ever one recalled-
+    facts message per thread now, so it must keep being forwarded no matter
+    how many turns have passed since it was added — this is the fix, not
+    the old (now-wrong) 'ignore anything outside the current turn'
+    behavior."""
+    recalled = HumanMessage(content="[Known facts about the user: from turn 1]")
+    tag_recalled_facts(recalled)
     state = {
         "messages": [
             HumanMessage(content="an earlier request"),
-            stale_recalled,
+            recalled,
             AIMessage(content="handled"),
-            HumanMessage(content="a brand new request"),
+            HumanMessage(content="a brand new, later request"),
         ]
     }
-    assert _context_prefix_messages(state) == []
+    assert _context_prefix_messages(state) == [recalled]
 
 
 def test_context_prefix_forwards_compaction_summary_when_present() -> None:
@@ -118,7 +123,12 @@ def test_build_graph_is_a_plain_unconditional_pipeline() -> None:
     "handed off" and "answered directly" — since specialists are tools
     now, the supervisor node always naturally completes with a final
     answer, so the graph is just compact_history -> recall_memory ->
-    supervisor -> extract_memory -> END."""
+    supervisor -> END.
+
+    `extract_memory` (the old per-turn, interrupt()-gated extraction node)
+    was removed 2026-07-28 in favor of memory_review_agent.py's nightly
+    batch pass, run outside this graph entirely — see that module's and
+    memory_extraction.py's docstrings."""
     graph = build_graph(checkpointer=None, coding_extra_tools=None, mcp_tools=[])
     nodes = set(graph.get_graph().nodes.keys())
     assert nodes == {
@@ -126,7 +136,6 @@ def test_build_graph_is_a_plain_unconditional_pipeline() -> None:
         "compact_history",
         "recall_memory",
         "supervisor",
-        "extract_memory",
         "__end__",
     }
     edges = graph.get_graph().edges
@@ -135,8 +144,7 @@ def test_build_graph_is_a_plain_unconditional_pipeline() -> None:
         ("__start__", "compact_history"),
         ("compact_history", "recall_memory"),
         ("recall_memory", "supervisor"),
-        ("supervisor", "extract_memory"),
-        ("extract_memory", "__end__"),
+        ("supervisor", "__end__"),
     }
 
 
@@ -159,8 +167,8 @@ if __name__ == "__main__":
     print("OK: test_no_parallel_specialist_calls_preserves_other_model_settings")
     test_context_prefix_forwards_recalled_facts_from_current_turn()
     print("OK: test_context_prefix_forwards_recalled_facts_from_current_turn")
-    test_context_prefix_ignores_recalled_facts_from_an_earlier_turn()
-    print("OK: test_context_prefix_ignores_recalled_facts_from_an_earlier_turn")
+    test_context_prefix_forwards_recalled_facts_from_an_earlier_turn_too()
+    print("OK: test_context_prefix_forwards_recalled_facts_from_an_earlier_turn_too")
     test_context_prefix_forwards_compaction_summary_when_present()
     print("OK: test_context_prefix_forwards_compaction_summary_when_present")
     test_context_prefix_empty_when_nothing_to_forward()

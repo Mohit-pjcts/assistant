@@ -9127,3 +9127,319 @@ unrelated Langfuse rate limit threaded through this whole session — a
 narrower re-run of just the phone/automation/cost tests confirmed
 nothing else was actually broken). Frontend suite shrank by one test
 (the deleted obsolete gate-render test) but otherwise unaffected.
+
+## 113. `execute_shell_command`'s system-path denylist relaxed to match
+`disk_tools.py`'s credential-only scope (2026-07-28)
+
+**Why:** the user asked, plainly, to "give coding agent permission to my
+whole mac except the very sensitive folders." Checked the actual code
+first (per CLAUDE.md's verification discipline) before proposing
+anything: `coding_agent` already had exactly this for file access —
+Phase 23's `disk_tools.py` (STEPS.md 106) gives it ungated
+`search_disk`/`read_disk_file` across the whole disk (blocked only on a
+credential/secret denylist) and gated `write_disk_file`/`delete_disk_file`
+everywhere else. The one thing NOT covered was `tools.py`'s
+`execute_shell_command`, which still carried its own, separately
+maintained, much broader denylist (`/etc`, `/usr`, `/bin`, `/sbin`,
+`/System`, `/Library`, `/private`, `/var`, `/Applications`, `/root`, plus
+the user's own Desktop/Documents/Downloads/Pictures/Movies) — a
+deliberate split documented in `disk_tools.py`'s own module docstring at
+Phase 23 time (STEPS.md 106), reasoned as appropriate caution for a
+general-purpose command-EXECUTION primitive versus a file-read/write one.
+Asked the user directly whether they wanted that shell-specific
+denylist relaxed too, spelling out the tradeoff (a real widening of
+`execute_shell_command`'s blast radius, not just file access) — they
+confirmed yes.
+
+**Built:**
+- **`assistant/tools.py`** — `_SENSITIVE_PATH_PREFIXES` (the old
+  broad system/personal-folder list) replaced with
+  `_CREDENTIAL_PATH_MARKERS`/`_CREDENTIAL_FILENAMES` + a new
+  `_is_credential_token()` helper, matching `disk_tools.py`'s own
+  `_is_credential_path` scope conceptually (SSH keys, cloud credentials,
+  Keychain files, browser cookie/password stores, `.env`-shaped files by
+  name) but implemented as argv-token substring/basename checks rather
+  than a resolved-`Path` prefix check, since a shell argument isn't
+  necessarily a valid filesystem path on its own. `_denial_reason()`
+  updated to call it; `_HOME_DIR` (only used by the removed
+  personal-folder entries) deleted as dead code.
+- **`assistant/disk_tools.py`** — module docstring's "deliberately
+  narrower" explanation rewritten to record that the two denylists were
+  aligned at this decision point, rather than leaving stale reasoning
+  that no longer matches the code.
+- **`tests/test_tools.py`** — `test_shell_blocks_sensitive_system_path`/
+  `test_shell_blocks_redirect_glued_to_sensitive_path`/
+  `test_shell_blocks_home_directory_desktop_path` (asserted the now-
+  relaxed behavior) replaced with `test_shell_allows_former_system_path`/
+  `test_shell_allows_home_directory_desktop_path` (prove the relaxation
+  landed) plus new `test_shell_blocks_ssh_key_path`/
+  `test_shell_blocks_redirect_glued_to_credential_path`/
+  `test_shell_blocks_env_file_by_name` (prove the credential-only line
+  still holds).
+
+**Net effect:** every `coding_agent` tool (file read/write/delete via
+`disk_tools.py`, and now shell execution via `tools.py`) draws the same
+line — credential/secret material is refused everywhere, everything else
+on the Mac (including former system paths and the user's personal
+folders) is reachable, gated by confirmation only where the original
+per-tool gating already required it (disk writes/deletes; nothing new
+gated on the shell tool itself). `rm`/`sudo`/`su`/`osascript` and the
+inline-interpreter (`-c`/`-e`) confirmation gate are untouched — this
+change only touched the path-argument denylist, not the
+executable-identity or metacharacter checks.
+
+24/24 `tests/test_tools.py` tests pass. Full-suite run in progress at
+time of writing; will note results if anything outside `test_tools.py`
+regressed.
+
+## 114. Memory panel: user can add and edit facts directly, not just view/delete (2026-07-28)
+
+**Why:** the user asked, plainly, to be able to update long-term memory
+themselves rather than only ever receiving facts the agent's own
+extraction gate (`memory_extraction.py`) proposed and the user approved.
+`MemoryPanel.tsx`/`server.py` already supported list+delete (PLAN.md
+Phase 9 step 5) with an explicit, documented precedent: deletion is user
+curation of their own already-saved data, not a new agent-authored side
+effect, so it deliberately does not go through `interrupt()`. Add/edit
+are the same category — a straight extension of that existing precedent,
+not a new security decision.
+
+**Built:**
+- **`assistant/memory_store.py`** — new `update_fact(fact_id, content,
+  db_path=None) -> bool`, mirroring `delete_fact`'s own shape and
+  docstring reasoning (returns whether a row actually existed to update).
+- **`assistant/server.py`** — `POST /memory/facts` (new fact, tagged
+  `provenance="user"` so it's distinguishable in the UI from an
+  agent-derived fact's `None`/`"from X result"` provenance) and
+  `PATCH /memory/facts/{fact_id}` (edit content in place). Both reject
+  empty/whitespace-only content with a 400; neither goes through
+  `interrupt()`, same reasoning as the existing `DELETE` endpoint's own
+  docstring.
+- **`dashboard/src/lib/api.ts`** — `createMemoryFact`/`updateMemoryFact`.
+- **`dashboard/src/components/memory/MemoryPanel.tsx`** — a composer
+  (`Textarea` + "Add fact" button) above the fact list, and a per-card
+  "Edit" affordance that swaps the card into an inline `Textarea` with
+  Save/Cancel. No new confirmation dialog for add/edit (unlike delete,
+  which keeps its existing AlertDialog) — both are trivially reversible
+  from the panel itself (edit again, or delete).
+- **Tests:** `tests/test_memory_store.py` gained
+  `test_update_fact_changes_content_in_place`/
+  `test_update_unknown_fact_returns_false`/`test_delete_fact_removes_it`
+  (the last was a real gap — `delete_fact` had no direct unit test before
+  this, only indirect coverage via `test_server.py`).
+  `tests/test_server.py` gained
+  `test_create_memory_fact_is_user_authored_and_ungated`/
+  `test_create_memory_fact_rejects_empty_content`/
+  `test_update_memory_fact_round_trip`/`test_update_unknown_fact_returns_404`/
+  `test_update_memory_fact_rejects_empty_content`.
+  `MemoryPanel.test.tsx` gained coverage for add, edit, and edit-cancel.
+
+**Verification:** 7/7 `tests/test_memory_store.py` pass; the 7 fact-related
+`tests/test_server.py` tests pass; 11/11 `MemoryPanel.test.tsx` pass;
+`tsc --noEmit` and `prettier --check` clean on the changed frontend files;
+`ruff check` clean on the changed Python files. A full `tests/test_server.py`
+run turned up one unrelated pre-existing failure,
+`test_threads_list_includes_the_bootstrapped_legacy_thread` — confirmed via
+`git stash` to fail identically on unmodified `main`, caused by state
+pollution in the real, shared `threads.sqlite` file from prior real usage
+(not test-isolated), not by this change.
+
+## 115. Memory re-architecture: per-turn extraction → nightly batch review queue; recall → thread's first turn only (2026-07-28)
+
+**Why:** the user asked for three related changes to Phase 7 Part B's
+memory system, plainly: (1) make extraction "a separate agent" that runs
+once a day at 00:00 instead of after every turn, checking for anything
+worth remembering and presenting it as approve/decline cards in the Memory
+section; (2) stop attaching the recalled-facts block to every single
+message — only the first prompt in a thread. The old design ran a Haiku
+extraction call after EVERY turn and, on a hit, blocked the live
+conversation on an interrupt()-based approve/decline before it could
+continue — real confirmation fatigue for a frequent user, plus a wasted
+extraction call on every turn with nothing to remember, plus the known-
+facts block getting silently re-sent on every turn of a long thread for no
+benefit once the assistant had already seen it earlier in the same
+conversation.
+
+**Built:**
+- **`assistant/memory_store.py`** — two new tables in the same
+  `long_term_memory.sqlite`: `pending_facts` (candidates awaiting human
+  review — `propose_pending_fact`/`list_pending_facts`/
+  `approve_pending_fact`/`decline_pending_fact`) and `review_cursor` (one
+  row per thread_id: how many of that thread's genuine human turns have
+  already been scanned — `get_review_cursor`/`set_review_cursor`, so a
+  repeat nightly run or a manual "check now" never re-proposes the same
+  turn's facts twice). `approve_pending_fact` is the actual confirmation
+  step: moves a row verbatim into the real `facts` table, same TOCTOU
+  discipline `save_fact`'s own docstring requires.
+- **`assistant/memory_extraction.py`** — rewritten. Removed entirely:
+  `extract_and_propose_memory_node` (the interrupt()-gated per-turn node),
+  `cites_tool_result`/`_most_recent_tool_result_this_turn`/
+  `_CITATION_SNIPPET_CHARS` (the citation-verification mechanism — see
+  "Scope cut" below), and the now-inaccurate `MAX_MEMORY_WRITES_PER_TURN`
+  name (renamed `MAX_PROPOSED_FACTS_PER_CALL`, since a call is no longer
+  strictly "per turn" — two comment-only references in `write_tools.py`
+  updated to match). Kept and made public: `propose_facts`/`ProposedFact`/
+  `ExtractionResult`/`_EXTRACTION_PROMPT` (simplified, no citation clause)
+  — `_text_only_content` renamed to `text_only_content` (dropped its
+  leading underscore) since `memory_review_agent.py` now reuses it too.
+  `recall_memory_node` gained `_is_first_genuine_turn` — counts genuine
+  human turns in state; recall is a clean no-op past the first one.
+- **`assistant/memory_review_agent.py`** (new) — "the separate agent": one
+  exported function, `run_nightly_review()`. For every thread
+  (`thread_store.list_threads()`), reads its accumulated `messages`
+  straight off the checkpointer (`AsyncSqliteSaver.aget_tuple` — cheaper
+  than building the full multi-agent graph just to read history), takes
+  the genuine human turns since that thread's own cursor, and if there's
+  anything new, calls `memory_extraction.propose_facts()` (module-
+  qualified, not `from ... import propose_facts` — a real bug caught live
+  in testing: a name-imported binding froze its own reference at import
+  time and silently ignored a later `monkeypatch.setattr(memory_extraction,
+  "propose_facts", ...)`, so the first version of this function's tests
+  were accidentally making REAL Haiku API calls instead of hitting the
+  fake) and queues each result via `propose_pending_fact`. Never calls
+  `memory_store.save_fact` directly — only a human approving a card does
+  that, via server.py.
+  **Scope cut, deliberate:** does not carry over the old flow's
+  `cites_tool_result` verification — that assumed a live single-turn
+  adjacency between "the user just asked to remember X" and "a tool result
+  showing X was visible moments earlier this exact turn," an assumption
+  that breaks once extraction runs retroactively over a whole day's,
+  possibly many, separate conversations. Nightly review only ever scans the
+  user's own words now.
+- **`assistant/supervisor.py`** — `extract_memory` node and its two edges
+  removed; `builder.add_edge("supervisor", END)` replaces
+  `"supervisor" -> "extract_memory" -> END`. The graph is now
+  `compact_history -> recall_memory -> supervisor -> END`.
+- **`assistant/server.py`** — `_memory_review_loop()`, an `asyncio.Task`
+  started in `lifespan()` (cancelled on shutdown): sleeps until the next
+  LOCAL midnight (the user's own known timezone fact is IST — this is this
+  Mac's own clock, not UTC), runs `memory_review_agent.run_nightly_review()`,
+  catches and logs any exception so one bad run doesn't kill the loop for
+  the rest of the process's life (same "tool errors are data" posture
+  applied to a background task instead of a tool call). New endpoints:
+  `GET /memory/pending`, `POST /memory/pending/{id}/approve`,
+  `POST /memory/pending/{id}/decline`, and `POST /memory/review/run-now` (a
+  manual trigger — the same function the midnight loop calls, exposed as an
+  on-demand "check now" affordance and so this could actually be
+  live-verified without waiting for a real midnight). Both call sites pass
+  `conversation_db_path=CONVERSATION_DB_PATH` explicitly — a real bug
+  caught before it shipped: `memory_review_agent`'s own default would
+  otherwise have ignored server.py's `ASSISTANT_CONVERSATION_DB_PATH` test
+  override and read the real `conversation_memory.sqlite` during tests.
+- **Dashboard:** `MemoryPanel.tsx` gained a "Pending review" section
+  (Approve/Decline per card, no extra confirm dialog needed — the card
+  itself, in its own dedicated section, IS the confirmation) and a "Check
+  now" button (`triggerMemoryReview`); `api.ts` gained
+  `PendingFact`/`fetchPendingFacts`/`approvePendingFact`/
+  `declinePendingFact`/`triggerMemoryReview`. `InterruptGate.tsx`'s
+  `isMemoryWrite` special case and its verbatim-fact renderer deleted
+  outright — a `save_memory`-shaped interrupt can never occur again, so
+  keeping the dead branch would have been misleading. The one test that
+  exercised it (`ChatPanel.test.tsx`) removed for the same reason.
+- **Tests:** `tests/test_memory_extraction.py` rewritten around the new
+  shape (recall's first-turn gating, the simplified extraction primitives);
+  `tests/test_memory_review_agent.py` (new, 4 tests: queues from a new
+  thread, never rescans already-processed turns, only scans NEW turns on a
+  later run, skips a thread with no history); `tests/test_memory_store.py`
+  gained pending/cursor CRUD tests; `tests/test_server.py` gained a real,
+  no-mocking end-to-end test (`test_nightly_review_queues_a_pending_fact_
+  the_user_can_approve` — real `/chat` turn, real Haiku extraction via
+  `/memory/review/run-now`, real approve round-trip) plus 404/decline/
+  empty-content tests; `tests/test_supervisor.py`'s graph-shape test
+  updated for the new edge list.
+
+**Verification:** 296/298 tests pass across the full suite (17 new/
+rewritten); the 2 failures are pre-existing and unrelated — a Langfuse
+`/cost` rate-limit 429, and `test_threads_list_includes_the_bootstrapped_
+legacy_thread`'s already-known `threads.sqlite` state-pollution flake
+(re-confirmed via `git stash` to fail identically on unmodified `main`).
+81/81 frontend tests pass (9 new); `tsc`/`prettier`/`npm run build` clean.
+`ruff check` clean on every changed file (2 pre-existing findings in
+`supervisor.py`/`test_supervisor.py`, unrelated to this change, confirmed
+via `git stash`).
+
+**CLAUDE.md updated**, not just STEPS.md: the Security model's Confirmation
+rule bullet and the Tech stack's Memory bullet both rewritten in place to
+describe the new architecture (memory writes are now a documented,
+deliberate exception to the interrupt() mechanism — the confirmation
+principle survives, only WHERE it happens moved), plus a new Current Status
+paragraph. Not filed as a new numbered PLAN.md phase — a same-session
+rework of an already-complete phase (7) at the user's direct request,
+same treatment Phase 19's startup/cost/voice fixes got.
+
+## 116. Group 115's own regression found and fixed live: memory stopped reaching specialist delegations entirely (2026-07-28)
+
+**Why:** the user reported, live, in the real running app: after group 115's
+recall change landed, a request delegated to a specialist (`text rishabh on
+whatsapp "hey"` → `mac_control_agent`) showed zero awareness of anything
+in long-term memory — not even a fact that would have directly answered
+the request. Diagnosed rather than guessed at: reproduced the exact
+scenario against the real running backend (a disposable test fact, a fresh
+thread, "hi" then the delegation request) and found TWO compounding bugs,
+both introduced by group 115's own change earlier the same day:
+
+1. **`assistant/supervisor.py`'s `_context_prefix_messages`** — the
+   function that forwards recalled facts into an isolated specialist
+   `ainvoke()` call — only ever looked for a recalled-facts message within
+   the CURRENT top-level turn's own message slice. That was correct back
+   when `recall_memory_node` re-ran every turn (so "this turn's" recalled-
+   facts message always existed fresh); once group 115 changed recall to
+   fire only on a thread's first turn, every LATER turn's own slice simply
+   never contains one, so every specialist call past the first turn got
+   forwarded nothing at all. **Fix:** search the whole thread's history for
+   the recalled-facts message instead of scoping to the current turn —
+   safe now because there is at most one such message per thread (recall
+   is a no-op past the first turn), so an unscoped search can't
+   accidentally resurrect a stale one from a different recall the way it
+   could when recall ran every turn.
+2. **`memory_extraction.recall_memory_node` itself** — even after fixing
+   (1), the live reproduction still failed. Root cause: the first-turn
+   recall call used `memory_store.recall_facts(query_text)`, which
+   keyword-scores stored facts against the CURRENT message's own text once
+   the store grows past its `_SMALL_STORE_THRESHOLD` (5) — and a thread's
+   opening message is very often a low-content greeting ("hi") that shares
+   no keyword with anything meaningful in the store. The real production
+   store had grown past that threshold since the morning's memory-panel
+   testing, so "hi" scored zero against every fact, including the exact
+   one (a contact's WhatsApp number) the later delegation needed.
+   `recall_facts`' keyword filtering was the right design for the OLD
+   per-turn-recall flow (a later, more specific message would eventually
+   surface the right facts on ITS OWN turn); it doesn't fit a one-time
+   injection keyed off whatever the opening message happened to be.
+   **Fix:** the first-turn call now loads the full profile
+   (`memory_store.list_facts`) unconditionally, not the keyword-scored
+   `recall_facts` — this only runs once per thread now instead of once per
+   turn, so the cost/noise concern `recall_facts`' own filtering exists for
+   is far smaller here.
+
+**Cleanup:** `memory_extraction._current_turn_user_text` (used only by the
+now-removed keyword-scoped recall path) had no remaining caller anywhere in
+the codebase after fix (2) — deleted outright along with its test, rather
+than left as dead code. `supervisor.py`'s `_pre_approved_actions_this_turn`
+docstring, which used to describe itself by analogy to both
+`_context_prefix_messages` and `_current_turn_user_text`'s turn-scoping,
+rewritten — those two functions now deliberately have OPPOSITE scoping
+(gated-action approvals stay turn-scoped; recalled facts are now
+unscoped), so the old analogy would have been actively misleading.
+
+**Tests:** `tests/test_supervisor.py`'s
+`test_context_prefix_ignores_recalled_facts_from_an_earlier_turn` (which
+literally asserted the old, now-wrong behavior) replaced with
+`test_context_prefix_forwards_recalled_facts_from_an_earlier_turn_too`,
+asserting the opposite. `tests/test_memory_extraction.py` gained
+`test_recall_returns_the_full_profile_even_when_the_opener_shares_no_keywords`
+— seeds 6 filler facts (above the small-store threshold) plus one real
+target fact, sends a bare "hi" as the opening message, and asserts the
+target fact still comes back; this test would have caught both bugs on its
+own and is the direct regression test for what the user hit live.
+
+**Verification:** re-ran the EXACT live reproduction against the real
+running backend after both fixes (a fresh thread, "hi", then "text
+Rishabh Testcontact on WhatsApp saying hey" with a disposable fact
+containing Rishabh's number already saved) — confirmed the fix live.
+31/31 tests pass across `test_memory_extraction.py`/
+`test_memory_review_agent.py`/`test_memory_store.py`/`test_supervisor.py`
+(2 new, 1 rewritten, 1 removed as dead). `ruff check` clean on every
+changed file (same 2 pre-existing, unrelated findings as group 115,
+confirmed via `git stash`).
+

@@ -128,35 +128,62 @@ _SHELL_EXECUTABLES = {"bash", "sh", "zsh", "csh", "tcsh", "ksh", "dash"}
 # delimiters by default — "ls&&rm -rf ~" parses to a single token "ls&&rm".
 _SHELL_METACHARACTERS = ("|", "&&", ";", "`", "$(")
 
-_HOME_DIR = str(Path.home())
-
-_SENSITIVE_PATH_PREFIXES = (
-    "/etc",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/System",
-    "/Library",
-    "/private",
-    "/var",
-    "/Applications",
-    "/root",
-    # Common personal-data folders outside the workspace sandbox — the shell
-    # tool's cwd is confined to workspace/, but a command's own arguments
-    # can still name a path anywhere; these catch the naive/literal cases,
-    # not a script that computes the path at runtime (os.path.expanduser),
-    # which is why _requires_confirmation() below exists as a second layer.
-    f"{_HOME_DIR}/Desktop",
-    f"{_HOME_DIR}/Documents",
-    f"{_HOME_DIR}/Downloads",
-    f"{_HOME_DIR}/Pictures",
-    f"{_HOME_DIR}/Movies",
-    "~/Desktop",
-    "~/Documents",
-    "~/Downloads",
-    "~/Pictures",
-    "~/Movies",
+# Credential/secret path markers — matched as substrings within any argv
+# token (not a resolved-path prefix check, since a shell argument isn't
+# necessarily a valid path on its own). Deliberately narrowed to mirror
+# disk_tools.py's own _is_credential_path (Phase 23/25): this used to be a
+# much broader denylist blocking /etc, /System, /Library, /private, /var,
+# /Applications, /usr, /bin, /sbin, /root, and the user's own Desktop/
+# Documents/Downloads/Pictures/Movies wholesale. That was relaxed at the
+# user's explicit request (giving coding_agent shell access to "the whole
+# Mac except the very sensitive folders", matching what disk_tools.py
+# already does for file read/write) — a real, deliberate weakening of this
+# tool's blast radius for a general-purpose command-execution primitive,
+# not an oversight. What stays blocked is credential/secret material
+# specifically: SSH keys, cloud credentials, Keychain files, browser
+# cookie/password stores, and .env-shaped files anywhere.
+_CREDENTIAL_PATH_MARKERS = (
+    "/.ssh",
+    "/.aws",
+    "/.gnupg",
+    "/.docker",
+    "/Library/Keychains",
+    "/System/Library/Keychains",
+    "/Library/Cookies",
+    "/Library/Safari",
+    "/Library/Application Support/Google/Chrome",
+    "/Library/Application Support/BraveSoftware",
+    "/Library/Application Support/Firefox",
 )
+
+# Credential-shaped FILENAMES, blocked regardless of directory — a stray
+# .env/id_rsa can live in any project folder, not just under the prefixes
+# above. Checked against the token's basename only (not a substring of the
+# whole token), same precision as disk_tools.py's own filename check.
+_CREDENTIAL_FILENAMES = {
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    ".netrc",
+    ".npmrc",
+    ".pgpass",
+    ".git-credentials",
+}
+
+
+def _is_credential_token(token: str) -> bool:
+    """True if `token` (a raw argv argument) names a credential/secret-shaped
+    path or filename — the one class of path this tool still refuses,
+    now that the broader system/personal-folder denylist has been relaxed."""
+    if any(marker in token for marker in _CREDENTIAL_PATH_MARKERS):
+        return True
+    name = Path(token).name
+    if name in _CREDENTIAL_FILENAMES:
+        return True
+    if name.startswith(".env"):
+        return True
+    return False
 
 # General-purpose interpreters invoked with inline code (-c/-e) rather than a
 # file: the one shell-tool pattern where the code about to run was never
@@ -185,7 +212,7 @@ def _denial_reason(argv: list[str]) -> str | None:
     -c (the back door around argument-list execution); shell metacharacters
     anywhere in any argument (pipes, chaining, substitution — inert under
     shell=False, but rejected explicitly rather than silently mangled);
-    any argument referencing a sensitive system path; and piping a download
+    any argument referencing a credential/secret path; and piping a download
     tool into a shell interpreter.
     """
     if not argv:
@@ -202,8 +229,8 @@ def _denial_reason(argv: list[str]) -> str | None:
     for token in argv:
         if any(meta in token for meta in _SHELL_METACHARACTERS):
             return "shell metacharacters (pipes, chaining, substitution) are not allowed"
-        if any(sensitive in token for sensitive in _SENSITIVE_PATH_PREFIXES):
-            return f"'{token}' targets a system path, which is not allowed"
+        if _is_credential_token(token):
+            return f"'{token}' targets a credential/secret path, which is not allowed"
 
     if executable in {"curl", "wget"} and any(
         Path(tok).name in _SHELL_EXECUTABLES for tok in argv

@@ -13,14 +13,6 @@ interface InterruptGateProps {
   disabled?: boolean;
 }
 
-// Mirrors memory_extraction.py's gate exactly: voice_approvable === false is
-// how that module marks a fact-write proposal (assistant/memory_extraction.py,
-// STEPS.md 54). Structural check, not a guess at the action name, so it
-// still works if the tool's `action` string ever changes.
-function isMemoryWrite(payload: InterruptPayload): boolean {
-  return payload.voice_approvable === false && typeof payload.fact === "string";
-}
-
 // Fixed, content-independent description text per action — deliberately
 // NEVER derived from the payload's own content (that would just be a
 // summary, the exact thing this gate exists to avoid). Phase 12 checkpoint
@@ -383,26 +375,30 @@ const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => Re
 
 // The confirmation-gate UI affordance PLAN.md's Phase 9 step 3 requires.
 // Renders whatever raw payload the gated tool constructed — never
-// re-summarized. For memory writes, email/calendar/filter writes, the
-// content is shown verbatim (no LLM paraphrase, no content-derived
-// description text) with no voice/speak affordance in this component at
-// all (voice approval is decided server-side by voice_daemon.py reading
-// voice_approvable off the same payload, independent of this GUI). Only a
-// genuinely unrecognized action falls back to a raw JSON dump — every known
-// gated action gets a dedicated, human-readable renderer.
+// re-summarized. For email/calendar/filter writes, the content is shown
+// verbatim (no LLM paraphrase, no content-derived description text) with
+// no voice/speak affordance in this component at all (voice approval is
+// decided server-side by voice_daemon.py reading voice_approvable off the
+// same payload, independent of this GUI). Only a genuinely unrecognized
+// action falls back to a raw JSON dump — every known gated action gets a
+// dedicated, human-readable renderer.
+//
+// Memory writes no longer reach this component at all (2026-07-28): the
+// per-turn interrupt()-gated fact proposal was replaced by
+// memory_review_agent.py's nightly batch pass, which queues candidates
+// into MemoryPanel's own approve/decline review section instead — see
+// memory_extraction.py's module docstring for the full reasoning.
 export function InterruptGate({ payload, onApprove, onDecline, disabled }: InterruptGateProps) {
-  const memoryWrite = isMemoryWrite(payload);
   const action = typeof payload.action === "string" ? payload.action : undefined;
   const ActionBody = action ? ACTION_BODIES[action] : undefined;
   const spokenPrompt = typeof payload.spoken_prompt === "string" ? payload.spoken_prompt : null;
 
-  const description = memoryWrite
-    ? "The assistant wants to save this as a long-term fact about you."
-    : action && ACTION_DESCRIPTIONS[action]
+  const description =
+    action && ACTION_DESCRIPTIONS[action]
       ? ACTION_DESCRIPTIONS[action]
       : (spokenPrompt ?? `Action: ${String(payload.action ?? "unknown")}`);
 
-  const source = memoryWrite ? "Memory" : action ? ACTION_SOURCE[action] : undefined;
+  const source = action ? ACTION_SOURCE[action] : undefined;
   // Structural, not a guess: voice_daemon.py treats an ABSENT voice_approvable
   // key as approvable-by-voice (True is the default) — mirror that exact
   // rule here rather than inventing a separate UI-side convention.
@@ -442,19 +438,7 @@ export function InterruptGate({ payload, onApprove, onDecline, disabled }: Inter
           </Text>
         </VStack>
         <div>
-          {memoryWrite ? (
-            <>
-              <blockquote
-                data-testid="interrupt-fact-verbatim"
-                className="whitespace-pre-wrap rounded-md border bg-muted p-3 font-mono text-sm"
-              >
-                {payload.fact as string}
-              </blockquote>
-              {typeof payload.provenance === "string" && payload.provenance && (
-                <p className="mt-2 text-xs text-muted-foreground">Source: {payload.provenance}</p>
-              )}
-            </>
-          ) : ActionBody ? (
+          {ActionBody ? (
             <ActionBody payload={payload} />
           ) : (
             !spokenPrompt && (

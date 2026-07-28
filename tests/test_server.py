@@ -655,6 +655,124 @@ async def test_delete_unknown_fact_returns_404() -> None:
         assert response.status_code == 404
 
 
+async def test_create_memory_fact_is_user_authored_and_ungated() -> None:
+    """POST /memory/facts is the user typing directly into the Memory
+    panel — no interrupt() round trip, immediate write, tagged
+    provenance="user" so it's distinguishable from an agent-derived fact."""
+    with TestClient(server.app) as client:
+        response = client.post("/memory/facts", json={"content": "user's favorite color is teal"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["content"] == "user's favorite color is teal"
+        assert body["provenance"] == "user"
+
+        listed = client.get("/memory/facts")
+        facts = listed.json()["facts"]
+        assert any(f["id"] == body["id"] and f["provenance"] == "user" for f in facts)
+
+
+async def test_create_memory_fact_rejects_empty_content() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/memory/facts", json={"content": "   "})
+        assert response.status_code == 400
+
+
+async def test_update_memory_fact_round_trip() -> None:
+    with TestClient(server.app) as client:
+        fact_id = await memory_store.save_fact("user's dog is named Rex", db_path=_MEMORY_DB_PATH)
+
+        response = client.patch(f"/memory/facts/{fact_id}", json={"content": "user's dog is named Max"})
+        assert response.status_code == 200, response.text
+        assert response.json()["content"] == "user's dog is named Max"
+
+        listed = client.get("/memory/facts")
+        facts = listed.json()["facts"]
+        assert any(f["id"] == fact_id and f["content"] == "user's dog is named Max" for f in facts)
+
+
+async def test_update_unknown_fact_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.patch("/memory/facts/999999", json={"content": "irrelevant"})
+        assert response.status_code == 404
+
+
+async def test_update_memory_fact_rejects_empty_content() -> None:
+    with TestClient(server.app) as client:
+        fact_id = await memory_store.save_fact("user's cat is named Whiskers", db_path=_MEMORY_DB_PATH)
+        response = client.patch(f"/memory/facts/{fact_id}", json={"content": ""})
+        assert response.status_code == 400
+
+
+async def test_nightly_review_queues_a_pending_fact_the_user_can_approve() -> None:
+    """End-to-end, against the REAL graph and REAL Haiku extraction (no
+    mocking, same convention as every other test in this file): a fresh
+    thread's first real /chat turn states a durable preference,
+    /memory/review/run-now (the manual trigger _memory_review_loop also
+    calls at midnight) should pick it up as a pending proposal, and
+    approving it is what actually makes it a real, recalled fact — proving
+    the new async review-queue confirmation path end to end, replacing the
+    old per-turn interrupt() gate this phase removed."""
+    with TestClient(server.app) as client:
+        thread = client.post("/threads", json={}).json()
+        chat = client.post(
+            "/chat",
+            json={
+                "message": (
+                    "For the record: I'm vegetarian. Just acknowledge that, "
+                    "don't ask me anything else."
+                ),
+                "thread_id": thread["id"],
+            },
+        )
+        assert chat.status_code == 200, chat.text
+
+        run = client.post("/memory/review/run-now")
+        assert run.status_code == 200, run.text
+        assert run.json()["queued"] >= 1
+
+        pending = client.get("/memory/pending").json()["pending"]
+        vegetarian_candidates = [p for p in pending if "vegetarian" in p["content"].lower()]
+        assert vegetarian_candidates, f"expected a vegetarian-shaped proposal, got: {pending}"
+        candidate = vegetarian_candidates[0]
+        assert candidate["provenance"] == "nightly review"
+
+        approved = client.post(f"/memory/pending/{candidate['id']}/approve")
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["content"] == candidate["content"]
+
+        facts = client.get("/memory/facts").json()["facts"]
+        assert any(f["id"] == approved.json()["id"] for f in facts)
+        still_pending = client.get("/memory/pending").json()["pending"]
+        assert all(p["id"] != candidate["id"] for p in still_pending)
+
+
+async def test_declining_a_pending_fact_discards_it_without_saving() -> None:
+    with TestClient(server.app) as client:
+        pending_id = await memory_store.propose_pending_fact(
+            "user likes jazz", provenance="nightly review", db_path=_MEMORY_DB_PATH
+        )
+        declined = client.post(f"/memory/pending/{pending_id}/decline")
+        assert declined.status_code == 200, declined.text
+        assert declined.json()["declined"] is True
+
+        pending = client.get("/memory/pending").json()["pending"]
+        assert all(p["id"] != pending_id for p in pending)
+        facts = client.get("/memory/facts").json()["facts"]
+        assert all("jazz" not in f["content"] for f in facts)
+
+
+async def test_approve_unknown_pending_fact_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/memory/pending/999999/approve")
+        assert response.status_code == 404
+
+
+async def test_decline_unknown_pending_fact_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/memory/pending/999999/decline")
+        assert response.status_code == 404
+
+
 async def test_cost_returns_real_langfuse_aggregates() -> None:
     """Against the REAL Langfuse project — no mocking, same convention as
     every other test in this file. Not a cost concern to run for real:
@@ -1165,6 +1283,24 @@ if __name__ == "__main__":
     print("OK: /memory/facts list + delete round-trip")
     asyncio.run(test_delete_unknown_fact_returns_404())
     print("OK: deleting an unknown fact id returns 404")
+    asyncio.run(test_create_memory_fact_is_user_authored_and_ungated())
+    print("OK: POST /memory/facts is user-authored and ungated")
+    asyncio.run(test_create_memory_fact_rejects_empty_content())
+    print("OK: POST /memory/facts rejects empty content")
+    asyncio.run(test_update_memory_fact_round_trip())
+    print("OK: PATCH /memory/facts/{id} round-trips")
+    asyncio.run(test_update_unknown_fact_returns_404())
+    print("OK: PATCH an unknown fact id returns 404")
+    asyncio.run(test_update_memory_fact_rejects_empty_content())
+    print("OK: PATCH /memory/facts/{id} rejects empty content")
+    asyncio.run(test_nightly_review_queues_a_pending_fact_the_user_can_approve())
+    print("OK: nightly review queues a pending fact the user can approve")
+    asyncio.run(test_declining_a_pending_fact_discards_it_without_saving())
+    print("OK: declining a pending fact discards it without saving")
+    asyncio.run(test_approve_unknown_pending_fact_returns_404())
+    print("OK: approving an unknown pending fact returns 404")
+    asyncio.run(test_decline_unknown_pending_fact_returns_404())
+    print("OK: declining an unknown pending fact returns 404")
     asyncio.run(test_cost_returns_real_langfuse_aggregates())
     print("OK: /cost returns real Langfuse aggregates across today/week/all_time")
     asyncio.run(test_history_response_carries_the_thread_id_it_read())

@@ -75,9 +75,10 @@ cross-turn-leakage bug class `SubAgentWindowMiddleware` was built to close
 (STEPS.md 48) is now structurally impossible rather than mitigated. What
 still needs forwarding on purpose is done on purpose, by
 `_context_prefix_messages()`: the compaction summary (if the thread has one)
-and the CURRENT turn's recalled-facts message (Phase 7 Part B), prepended to
-whatever instruction the supervisor's own model composed for that specialist
-call.
+and the recalled-facts message (Phase 7 Part B, now injected at most once
+per thread — see that function's own docstring for a 2026-07-28 regression
+this required fixing), prepended to whatever instruction the supervisor's
+own model composed for that specialist call.
 
 **Known, disclosed limitation carried over from this rewrite (not silently
 dropped):** `write_tools.py`'s `MAX_WRITES_PER_TURN` counts gated-write
@@ -158,7 +159,7 @@ from assistant.compaction import (
     is_genuine_human_turn,
     is_recalled_facts_message,
 )
-from assistant.memory_extraction import extract_and_propose_memory_node, recall_memory_node
+from assistant.memory_extraction import recall_memory_node
 from assistant.phone_tools import PHONE_ACTION_KEY
 from assistant.sub_agents import (
     build_coding_agent,
@@ -396,32 +397,41 @@ class NoParallelSpecialistCalls(AgentMiddleware):
 def _context_prefix_messages(state: GraphState) -> list[AnyMessage]:
     """What a fresh, isolated specialist call would otherwise miss, forwarded
     on purpose: the compaction summary (if this thread has been compacted)
-    and the CURRENT top-level turn's recalled-facts message (Phase 7 Part
-    B) — both previously visible to every specialist for free via shared
-    graph state (see this module's docstring for why that's gone). Recall
-    is scoped to the current turn boundary the same way
-    memory_extraction.py's own `_current_turn_user_text` is, so a stale
-    recalled-facts message from an earlier turn is never re-forwarded."""
+    and the recalled-facts message (Phase 7 Part B) — both previously
+    visible to every specialist for free via shared graph state (see this
+    module's docstring for why that's gone).
+
+    Searches the WHOLE history for the recalled-facts message, not just the
+    current turn's own slice (changed 2026-07-28, a real regression found
+    live: memory_extraction.recall_memory_node now injects that message
+    ONLY on a thread's first genuine turn, not every turn, so a turn-scoped
+    search here would find nothing on every later turn — silently starving
+    every specialist call past the first of any long-term-memory context at
+    all, even though the facts were recalled once and are still meant to
+    apply for the rest of the thread. There is at most one recalled-facts
+    message per thread now (recall_memory_node is a no-op past the first
+    turn), so an unscoped search can't accidentally forward a stale one from
+    a DIFFERENT, earlier recall the way it could when recall ran every
+    turn."""
     messages = state["messages"]
     prefix: list[AnyMessage] = []
     if messages and is_compaction_summary(messages[0]):
         prefix.append(messages[0])
-    turn_start = 0
-    for i, m in enumerate(messages):
-        if is_genuine_human_turn(m):
-            turn_start = i
-    for m in messages[turn_start:]:
+    for m in messages:
         if is_recalled_facts_message(m):
             prefix.append(m)
+            break
     return prefix
 
 
 def _pre_approved_actions_this_turn(state: GraphState) -> set[str]:
     """Which GATED_ACTIONS the supervisor already got upfront confirmation
-    for, THIS turn only — scanned the same turn-boundary way
-    `_context_prefix_messages` and memory_extraction.py's
-    `_current_turn_user_text` are, so an approval from an earlier,
-    unrelated turn is never carried forward. Reads a structured marker
+    for, THIS turn only — scoped to the current genuine-human-turn boundary
+    so an approval from an earlier, unrelated turn is never carried forward
+    (unlike `_context_prefix_messages`'s recalled-facts forwarding above,
+    which is now deliberately UNSCOPED — see that function's own docstring
+    for why a gated-action approval and a recalled fact need opposite
+    scoping). Reads a structured marker
     (`_GATED_ACTION_APPROVED_KEY` in additional_kwargs), not the
     ToolMessage's free-text content — deliberately, so this can't be
     fooled by a coincidentally-similar-looking string anywhere else in the
@@ -887,17 +897,15 @@ def build_graph(
             phone_agent_graph,
         ),
     )
-    # Phase 7 Part B: proposes 0+ durable facts from the CURRENT turn's user
-    # text only, each individually confirmed via interrupt() before being
-    # persisted. Unconditionally after "supervisor" now — every turn ends
-    # with the supervisor's own final answer, so there is no longer a
-    # separate "did it hand off or answer" branch to gate this on.
-    builder.add_node("extract_memory", extract_and_propose_memory_node)
-
+    # Phase 7 Part B's per-turn extraction node (extract_and_propose_memory_
+    # node, interrupt()-gated) was removed 2026-07-28 in favor of
+    # memory_review_agent.py's nightly batch pass — see that module's and
+    # memory_extraction.py's docstrings for the full reasoning. The graph
+    # no longer does anything memory-write-shaped after "supervisor"; it
+    # goes straight to END.
     builder.add_edge(START, "compact_history")
     builder.add_edge("compact_history", "recall_memory")
     builder.add_edge("recall_memory", "supervisor")
-    builder.add_edge("supervisor", "extract_memory")
-    builder.add_edge("extract_memory", END)
+    builder.add_edge("supervisor", END)
 
     return builder.compile(checkpointer=checkpointer)

@@ -735,7 +735,7 @@ export function KanbanBoard() {
               gap={2}
               startContent={
                 <>
-                  <Heading level={3}>Sprint Board</Heading>
+                  <Heading level={3}>Kanban Board</Heading>
                   <Badge label={items.length} variant="neutral" />
                   {error && (
                     <Text type="supporting" style={{color: 'var(--color-error)'}}>

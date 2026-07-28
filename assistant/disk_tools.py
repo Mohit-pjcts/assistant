@@ -14,26 +14,25 @@ standing rule as every other side-effectful tool in this project
 unaffected by any of this; use `tools.py`'s `read_file`/`write_file` for
 those, unchanged.
 
-**This module's denylist is DELIBERATELY NARROWER than `tools.py`'s
-shell-tool `_SENSITIVE_PATH_PREFIXES`** — a real, considered choice, not
-an oversight, and a correction to this phase's own original plan (which
-assumed the two lists could just be shared — checked against the actual
-code before implementing, per CLAUDE.md's verification discipline, and
-found not to hold): that list exists to broadly restrict a
-general-purpose command-EXECUTION primitive, so it blocks `/etc`,
-`/System`, `/Library`, `/private`, `/var`, `/Applications`, and even the
-user's own Desktop/Documents/Downloads/Pictures/Movies wholesale — the
-right level of caution for a tool that can run arbitrary allowlisted
-commands. This module's whole PURPOSE is the opposite: letting the user
-search/read their own real files ("find that PDF from last month on my
-Desktop"). Reusing the shell tool's list here would block the exact
-folders this feature exists to reach. Instead, this denylist targets
-actual CREDENTIAL/SECRET material specifically — SSH keys, cloud
-credentials, Keychain files, browser cookie/password stores, and `.env`-
-shaped files anywhere on disk (matched by name, not a fixed path, since a
-stray `.env` can live in any project folder). Reads/writes outside these
-specific paths — including Desktop/Documents/Downloads/Pictures — are
-intentionally allowed.
+**This module's denylist was ORIGINALLY DELIBERATELY NARROWER than
+`tools.py`'s shell-tool denylist** (that list used to broadly restrict a
+general-purpose command-EXECUTION primitive, blocking `/etc`, `/System`,
+`/Library`, `/private`, `/var`, `/Applications`, and even the user's own
+Desktop/Documents/Downloads/Pictures/Movies wholesale). At the user's
+explicit direct request (2026-07-28, "give coding_agent permission to my
+whole Mac except the very sensitive folders"), `tools.py`'s shell denylist
+was relaxed to match this module's scope exactly — both now target
+CREDENTIAL/SECRET material specifically: SSH keys, cloud credentials,
+Keychain files, browser cookie/password stores, and `.env`-shaped files
+anywhere on disk (matched by name, not a fixed path, since a stray `.env`
+can live in any project folder). Reads/writes/shell commands outside these
+specific paths — including Desktop/Documents/Downloads/Pictures and
+former system-path blocks like `/etc`/`/System`/`/Library` — are now
+intentionally allowed across all of `coding_agent`'s tools. The two
+denylists still aren't a single shared implementation (this module checks
+a resolved `Path`; `tools.py`'s shell tool checks raw argv token
+substrings, since a shell argument isn't necessarily a valid path on its
+own) — keep them in sync by hand if this credential list ever changes.
 """
 
 from __future__ import annotations

@@ -151,20 +151,39 @@ def test_shell_blocks_chaining_no_spaces() -> None:
         assert result.startswith("Error: command blocked")
 
 
-def test_shell_blocks_sensitive_system_path() -> None:
+def test_shell_allows_former_system_path() -> None:
+    """The old broad system-path denylist (/etc, /System, /Library,
+    /private, /var, /Applications) was relaxed to match disk_tools.py's
+    narrower credential-only scope, at the user's explicit request
+    (2026-07-28) — /etc/passwd is world-readable and not credential-shaped,
+    so it's no longer blocked."""
+    with _temp_workspace():
+        result = tools.execute_shell_command.invoke({"command": "cat /etc/passwd"})
+        assert not result.startswith("Error: command blocked")
+
+
+def test_shell_blocks_ssh_key_path() -> None:
     with _temp_workspace():
         result = tools.execute_shell_command.invoke(
-            {"command": "cat /etc/passwd"}
+            {"command": "cat ~/.ssh/id_rsa"}
         )
         assert result.startswith("Error: command blocked")
 
 
-def test_shell_blocks_redirect_glued_to_sensitive_path() -> None:
-    """No space around '>' still yields a token containing the sensitive
-    path substring, e.g. 'hi>/etc/passwd' as one shlex token."""
+def test_shell_blocks_redirect_glued_to_credential_path() -> None:
+    """No space around '>' still yields a token containing the credential
+    path substring, e.g. 'hi>~/.ssh/id_rsa' as one shlex token."""
     with _temp_workspace():
         result = tools.execute_shell_command.invoke(
-            {"command": "echo hi>/etc/passwd"}
+            {"command": "echo hi>~/.ssh/id_rsa"}
+        )
+        assert result.startswith("Error: command blocked")
+
+
+def test_shell_blocks_env_file_by_name() -> None:
+    with _temp_workspace():
+        result = tools.execute_shell_command.invoke(
+            {"command": "cat /Users/someone/some_project/.env"}
         )
         assert result.startswith("Error: command blocked")
 
@@ -180,12 +199,15 @@ def test_shell_blocks_osascript() -> None:
         assert result.startswith("Error: command blocked")
 
 
-def test_shell_blocks_home_directory_desktop_path() -> None:
+def test_shell_allows_home_directory_desktop_path() -> None:
+    """Desktop/Documents/Downloads/Pictures/Movies are no longer blocked —
+    only credential/secret paths are (see test_shell_allows_former_system_path).
+    rm itself is still blocked separately (test_shell_blocks_rm)."""
     with _temp_workspace():
         result = tools.execute_shell_command.invoke(
-            {"command": f"rm {tools._HOME_DIR}/Desktop/file.txt"}
+            {"command": f"ls {Path.home()}/Desktop"}
         )
-        assert result.startswith("Error: command blocked")
+        assert not result.startswith("Error: command blocked")
 
 
 # --- Shell tool: inline-interpreter confirmation gate -----------------------

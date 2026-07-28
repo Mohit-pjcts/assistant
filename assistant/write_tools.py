@@ -34,7 +34,7 @@ label-modify wrapper below fetches the REAL current content first
 bare ID, never a model paraphrase of what it thinks the ID refers to.
 
 Per-turn write cap: MAX_WRITES_PER_TURN mirrors supervisor.py's
-MAX_HANDOFFS_PER_TURN and memory_extraction.py's MAX_MEMORY_WRITES_PER_TURN —
+MAX_HANDOFFS_PER_TURN and memory_extraction.py's MAX_PROPOSED_FACTS_PER_CALL —
 enforced structurally by counting this turn's already-completed gated-write
 ToolMessages via InjectedState, not left to the model's own judgment. Checked
 BEFORE interrupt() so a capped-out call doesn't waste a confirmation
@@ -101,7 +101,7 @@ class _AgentState(TypedDict):
 
 
 # Structural cap on gated write-tool calls per top-level turn — mirrors
-# supervisor.MAX_HANDOFFS_PER_TURN / memory_extraction.MAX_MEMORY_WRITES_PER_TURN.
+# supervisor.MAX_HANDOFFS_PER_TURN / memory_extraction.MAX_PROPOSED_FACTS_PER_CALL.
 # Generous headroom (a real multi-action request needs at most a couple), not
 # a tuned limit — purely a runaway-loop / confirmation-fatigue guard.
 MAX_WRITES_PER_TURN = 3

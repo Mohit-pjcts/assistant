@@ -386,6 +386,38 @@ export async function fetchMemoryFacts(): Promise<MemoryFact[]> {
   return body.facts;
 }
 
+// User-authored fact, typed directly into the panel rather than proposed by
+// the agent's extraction gate. Deliberately NOT behind interrupt() either —
+// same reasoning as deleteMemoryFact below, this is the user adding to
+// their own store, not a new agent-authored side effect. The backend tags
+// it provenance="user" so the panel can show where it came from.
+export async function createMemoryFact(content: string): Promise<MemoryFact> {
+  const response = await fetch(`${API_BASE_URL}/memory/facts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    throw new Error(`create /memory/facts failed (${response.status}): ${await response.text()}`);
+  }
+  return (await response.json()) as MemoryFact;
+}
+
+// Editing an already-saved fact — same non-gated curation category as
+// deleteMemoryFact below.
+export async function updateMemoryFact(id: number, content: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/memory/facts/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `update /memory/facts/${id} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+}
+
 // Deliberately NOT behind the interrupt/confirmation gate on the backend
 // (server.py's own docstring: the user curating their own already-saved
 // data is not a new agent-authored side effect, so memory_extraction.py's
@@ -400,6 +432,65 @@ export async function deleteMemoryFact(id: number): Promise<void> {
       `delete /memory/facts/${id} failed (${response.status}): ${await response.text()}`,
     );
   }
+}
+
+// Nightly memory-review queue (2026-07-28): memory_review_agent.py's
+// batch pass, run once a day at midnight (or on demand via
+// triggerMemoryReview below), proposes candidates here instead of blocking
+// the live conversation with a per-turn interrupt() the way the old
+// extraction flow did. A PendingFact is NOT yet a known fact — approving
+// or declining it is the actual confirmation step.
+export interface PendingFact {
+  id: number;
+  content: string;
+  provenance: string | null;
+  created_at: string;
+}
+
+export async function fetchPendingFacts(): Promise<PendingFact[]> {
+  const response = await fetch(`${API_BASE_URL}/memory/pending`);
+  if (!response.ok) {
+    throw new Error(`/memory/pending failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { pending: PendingFact[] };
+  return body.pending;
+}
+
+// The actual confirmation click — moves the candidate into the real facts
+// table. Not behind interrupt(): this request IS the human approval.
+export async function approvePendingFact(id: number): Promise<MemoryFact> {
+  const response = await fetch(`${API_BASE_URL}/memory/pending/${id}/approve`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `approve /memory/pending/${id} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  return (await response.json()) as MemoryFact;
+}
+
+export async function declinePendingFact(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/memory/pending/${id}/decline`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `decline /memory/pending/${id} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+}
+
+// On-demand "check now" — the same nightly pass the midnight scheduler
+// runs automatically, exposed here so the user doesn't have to wait for an
+// actual midnight to see it work.
+export async function triggerMemoryReview(): Promise<number> {
+  const response = await fetch(`${API_BASE_URL}/memory/review/run-now`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`/memory/review/run-now failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { queued: number };
+  return body.queued;
 }
 
 // Token/cost tracking (PLAN.md Phase 9 step 6) — real Langfuse aggregates

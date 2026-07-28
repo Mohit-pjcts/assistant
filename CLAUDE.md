@@ -1,12 +1,11 @@
-# Project: Personal AI Assistant
+# Project: Personal AI Assistant - Oni
 
 ## Goal
 
 A general-purpose personal assistant, built on the Claude API + LangGraph: coding
 help, research, life admin (email/calendar), Mac-native control, and voice
 interaction. Personal project, published on GitHub — code quality, structure, and
-the README matter. Treat it as a portfolio piece. The package is named `assistant`
-(not "Jarvis" — deliberate).
+the README matter. Treat it as a portfolio piece. The package is named `assistant`.
 
 ## How to use this file (every session)
 
@@ -104,6 +103,26 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   Phase 20 (Astryx redesign integration: theme, chat, uploads, kanban
   board, landing page, STEPS.md 97) is the most recently fully-completed
   phase, opened, built, and documented in one session (2026-07-24/25).
+- **Memory re-architecture (2026-07-28, STEPS.md 115), not a numbered
+  phase — a same-session rework of Phase 7 Part B at the user's direct
+  request.** Per-turn extraction (the old interrupt()-gated
+  `extract_and_propose_memory_node`) replaced by
+  `assistant/memory_review_agent.py`, a once-a-day (midnight) batch pass
+  that queues candidates into a new `pending_facts` review queue
+  (`memory_store.py`) for approve/decline in the dashboard's Memory panel
+  (`GET /memory/pending`, `POST /memory/pending/{id}/approve|decline`, plus
+  an on-demand `POST /memory/review/run-now`) instead of blocking the live
+  conversation. Recall (`recall_memory_node`) now fires only on a thread's
+  first genuine turn instead of every turn. See the Security model
+  section's Confirmation rule bullet and the Tech stack section's Memory
+  bullet for the full architecture; `memory_extraction.py`'s module
+  docstring has the complete before/after reasoning including the
+  deliberate citation-verification scope cut this required. 296/298 tests
+  pass (17 new/rewritten across memory_store/memory_extraction/
+  memory_review_agent/server/supervisor + frontend); the 2 failures are
+  pre-existing and unrelated (a Langfuse rate-limit 429, and an
+  already-documented `threads.sqlite` state-pollution flake confirmed via
+  `git stash` to reproduce identically on unmodified `main`).
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -512,111 +531,6 @@ PLAN.md for full scope, none built yet. See PLAN.md.
 This block is the only part of this file that changes routinely; everything
 below is durable.
 
-## Architecture (as built - through phase 9)
-
-```
-assistant/
-├── main.py               # CLI loop; owns checkpointer lifetime; fixed THREAD_ID
-├── agent.py               # shared invocation-config helper (make_thread_config); graph
-│                             construction itself lives in supervisor.py/sub_agents.py (Phase 3)
-├── supervisor.py          # supervisor + outer StateGraph assembly; agents-as-tools design —
-│                             each specialist is a @tool calling ainvoke() on its own compiled
-│                             graph directly (superseded the original Command-handoff routing
-│                             in Phase 16 Part B finalization, STEPS.md 94)
-├── sub_agents.py          # coding/research/life-admin worker sub-agent graphs
-├── tools.py               # Phase 1 hand-secured tools: web search (Tavily), file r/w, shell exec
-├── mcp_tools.py           # Phase 2+ MCP-loaded tools (Gmail/Calendar), merged into TOOLS
-├── write_tools.py         # Phase 12: gated write-tool wrappers (send/label/calendar/filter) —
-│                             see its module docstring for the local-wrapper-not-raw-MCP-tool
-│                             architecture and why the gate can't sit on mcp_tools.py's tools
-├── mac_tools.py           # Mac-native control: osascript/open/shortcuts behind a hard allowlist;
-│                             Phase 22 added send_imessage (gated)/compose_whatsapp (ungated);
-│                             Phase 23 added photos_search/photos_export (ungated)
-├── disk_tools.py          # Phase 23: full-disk search/read (ungated, credential-path denylist)
-│                             + write/delete (gated) outside workspace/ — the largest
-│                             security-model change in the project's history; see its own
-│                             module docstring for why its denylist is deliberately NARROWER
-│                             than tools.py's shell-tool denylist, not a superset of it
-├── interrupts.py          # confirmation-gated dummy tool demonstrating the interrupt mechanic
-├── memory.py              # get_checkpointer() context manager over AsyncSqliteSaver
-│                             (conversation_memory.sqlite)
-├── compaction.py          # Phase 7 Part A: short-term context compaction
-├── memory_store.py        # Phase 7 Part B: durable cross-conversation facts storage
-│                             (long_term_memory.sqlite, separate from the checkpointer's file)
-├── memory_extraction.py   # Phase 7 Part B: extraction, confirmation gate, recall — see its
-│                             module docstring for the full security design
-├── thread_store.py        # Phase 15: active-thread pointer + registry (threads.sqlite,
-│                             separate from both other SQLite files above) — see the
-│                             Active-thread pointer load-bearing decision below
-├── board_store.py         # Phase 20: kanban board storage (board.sqlite, separate from every
-│                             other SQLite file above), mirrors thread_store.py's own pattern
-├── board_tools.py         # Phase 20: kanban board tools for life_admin_agent — deliberately
-│                             UNGATED (local/reversible/in-app, not an external side effect;
-│                             see its module docstring against the Security model below)
-├── phone_store.py         # Phase 21: latest-snapshot-per-kind storage (phone_data.sqlite,
-│                             separate from every other SQLite file above) for data pushed
-│                             from the iPhone (currently just "health") — user-triggered
-│                             push only, never live/scheduled
-├── phone_tools.py         # Phase 21: phone_agent's own tools — open_app_on_phone/
-│                             open_url_on_phone (ungated, cannot execute anything directly;
-│                             stash a structured action for the calling Shortcut to carry
-│                             out — see its module docstring for the governing "no remote
-│                             push to the phone" platform constraint) + get_latest_health_snapshot
-├── automation_store.py    # Phase 24: pre-approved automation registry (automations.sqlite,
-│                             separate from every other SQLite file above) + an append-only
-│                             automation_runs log — the reviewable-AFTER-the-fact record this
-│                             execution path substitutes for a before-the-fact confirmation
-├── voice_io.py            # Phase 5/8: mic capture, local STT (mlx-whisper), TTS (`say`)
-├── voice_daemon.py        # Phase 5: always-on Option+Return hotkey daemon (menu bar app);
-│                             Phase 15: local trigger-phrase parsing for starting a new thread
-├── server.py              # Phase 9: FastAPI wrapper over build_graph() for the dashboard app
-│                             (/chat, /resume, /history, /memory/facts, /cost, Phase 15's
-│                             /threads endpoints, Phase 21's /phone/turn, /phone/resume,
-│                             /phone/health-sync, and Phase 24's /automations CRUD +
-│                             /automations/{id}/fire) — shares the CLI/voice daemon's real
-│                             checkpointer + thread_store's active pointer, NOT the separate
-│                             `langgraph dev` ephemeral store
-└── studio.py              # LangGraph Studio / `langgraph dev` entry point (dev-time graph
-                              debugger only; checkpointer=None, unrelated to server.py)
-
-dashboard/                 # Phase 9: Tauri 2 + React + TypeScript desktop app (shadcn/ui +,
-│                             as of Phase 20, Astryx components on the Chat/Board/Home surfaces
-│                             specifically — see the oniMatchaTheme note below)
-├── src/
-│   ├── App.tsx             # three-column shell: ThreadSidebar · tabs (home/chat/history/
-│   │                          memory/cost/board/automations) · right context rail (Phase 19/20)
-│   ├── lib/api.ts          # typed client for assistant/server.py's endpoints
-│   ├── themes/oniMatcha/   # Phase 20: ember-recolored matcha theme (defineTheme, extends
-│   │                          matchaTheme) — app-wide via components/theme/AstryxThemeBridge.tsx
-│   └── components/
-│       ├── chat/           # ChatPanel + InterruptGate + A2UIRenderer — Astryx components as of
-│       │                     Phase 20, InterruptGate's verbatim-payload contract unchanged
-│       ├── home/            # Phase 20: HomePage — landing tab adapted from the Astryx
-│       │                     Playground, wired to ChatPanel's real send pipeline
-│       ├── board/           # Phase 20: KanbanBoard + InProgressTasksCard — backed by
-│       │                     board_store.py/board_tools.py, full life_admin_agent access
-│       ├── automations/     # Phase 24: AutomationsPanel — register/enable/disable/delete
-│       │                     pre-approved automations + inline run history; never calls
-│       │                     /automations/{id}/fire itself (only the phone's geofence
-│       │                     Shortcut does, PHONE_SETUP.md)
-│       ├── history/        # HistoryPanel — full unfiltered /history feed
-│       ├── memory/         # MemoryPanel — view + delete (client-confirm, not interrupt-gated)
-│       ├── cost/           # CostPanel + CostSummaryCard — LangSmith aggregates
-│       ├── threads/        # Phase 15: ThreadSidebar — new/switch/rename/delete
-│       ├── activity/       # Phase 19: AgentActivityGraph/ToolCallTimeline/StatusPill —
-│       │                     live agent_activity SSE frames, right context rail
-│       └── ui/             # shadcn/ui primitives (still the base for un-migrated panels)
-└── src-tauri/              # Rust shell — owns the Python backend's + voice daemon's process
-                               lifecycle end-to-end (spawn on launch, kill on quit; Phase 14)
-
-tests/                      # pytest-shaped, runnable with plain python; one test file per
-                               assistant/ module (test_server.py, test_supervisor.py, etc.)
-launchd/                    # com.mohitvuyyuru.assistant-voice.plist — voice_daemon.py autostart
-workspace/                  # the ONLY dir file/shell tools may touch (runtime-created)
-PLAN.md                     # the phase plans; read the active one each session
-STEPS.md                    # build log
-```
-
 ## Load-bearing decisions — do not undo without discussion
 
 - **Agent constructor:** `langchain.agents.create_agent` (NOT
@@ -739,24 +653,39 @@ filtering content.
   being a read-only-by-construction category: **sending an email**,
   **modifying Gmail labels on a message** (including archiving),
   **creating/updating/deleting a Google Calendar event**, **creating/
-  deleting a Gmail filter**, Mac control (`run_shortcut`), and writing a
-  durable long-term memory fact. Every one of these is a LOCAL wrapper tool
-  that calls `interrupt()` itself and shows the real content verbatim — see
-  `assistant/write_tools.py`'s module docstring for why the gate can't sit on
-  the raw Gmail/Calendar MCP tools directly (separate Node process, can't
-  call `interrupt()`), and `sub_agents.py`'s `_select_life_admin_tools` for
-  the actual enforcement point (raw write tool names are never added to a
-  model's tool list — only their gated wrappers are). Memory writes, email
-  sends, calendar create/update, and Gmail filter writes are all additionally
-  text-only, never voice-approvable (`voice_daemon.py` checks
-  `voice_approvable: False` on the interrupt payload) — free-text content
-  (a fact, an email body, an event description, a filter's forward target)
-  is harder to vet by ear than an action verb like "send". The one deliberate
-  exception is calendar event **delete**, which IS voice-approvable — it
-  carries no free-text payload to hide an injection in, unlike every other
-  gated action here (STEPS.md 63); Gmail filter delete does NOT get the same
-  exception, since identifying which filter is being removed requires
-  reading its forward-target/criteria content aloud (STEPS.md 64).
+  deleting a Gmail filter**, and Mac control (`run_shortcut`). Every one of
+  these is a LOCAL wrapper tool that calls `interrupt()` itself and shows the
+  real content verbatim — see `assistant/write_tools.py`'s module docstring
+  for why the gate can't sit on the raw Gmail/Calendar MCP tools directly
+  (separate Node process, can't call `interrupt()`), and `sub_agents.py`'s
+  `_select_life_admin_tools` for the actual enforcement point (raw write
+  tool names are never added to a model's tool list — only their gated
+  wrappers are). Email sends, calendar create/update, and Gmail filter
+  writes are all additionally text-only, never voice-approvable
+  (`voice_daemon.py` checks `voice_approvable: False` on the interrupt
+  payload) — free-text content (an email body, an event description, a
+  filter's forward target) is harder to vet by ear than an action verb like
+  "send". The one deliberate exception is calendar event **delete**, which
+  IS voice-approvable — it carries no free-text payload to hide an injection
+  in, unlike every other gated action here (STEPS.md 63); Gmail filter
+  delete does NOT get the same exception, since identifying which filter is
+  being removed requires reading its forward-target/criteria content aloud
+  (STEPS.md 64).
+  **Memory writes are a deliberate exception to the interrupt() mechanism
+  (re-architected 2026-07-28, at my direct request):** durable long-term
+  memory facts no longer go through a live, blocking interrupt() during the
+  conversation. `assistant/memory_review_agent.py` runs once a day (a
+  midnight background task in `server.py`, or an on-demand `POST
+  /memory/review/run-now`) and queues candidate facts into
+  `memory_store.py`'s `pending_facts` table; nothing becomes a real,
+  recalled fact until I explicitly approve a card in the dashboard's Memory
+  panel (`GET /memory/pending`, `POST /memory/pending/{id}/approve|
+  decline`). The confirmation principle is unchanged — no durable write
+  without my explicit approval — only WHERE that approval happens moved,
+  from a synchronous chat-blocking gate to an async review queue. See
+  `assistant/memory_extraction.py`'s module docstring for the full
+  before/after reasoning, including the deliberate citation-verification
+  scope cut this required.
 - New tools (MCP-loaded included) are evaluated against this threat model
   before joining the agent. MCP tools MERGE into TOOLS; they never replace
   Phase 1's hand-secured tools.
@@ -786,20 +715,52 @@ filtering content.
   `conversation_memory.sqlite`, memory.py) plus, as of Phase 7 Part B, a
   SEPARATE plain SQLite table for durable cross-conversation facts
   (`long_term_memory.sqlite`, memory_store.py — deliberately not sharing
-  the checkpointer's own file/schema). This reverses the earlier
-  "long-term/vector memory is out of scope" line: it's now in scope,
-  automatic-write (agent decides what's worth saving, not user-asked-for),
-  and deliberately NOT a vector store — Chroma was considered and rejected
-  at Phase 7's scope-time checkpoint in favor of plain keyword/recency
-  retrieval, since a single user's fact count is expected to stay small
-  enough that embedding-based recall would be premature complexity: revisit
-  if that assumption stops holding. Retrieval is selective (memory_store.
-  recall_facts), never a full context dump. See memory_extraction.py's
-  module docstring for the full security design (source-restricted
-  extraction, isolated extraction channel, scoped tool-content citation,
-  universal confirmation gate) — this is the load-bearing part of Part B,
-  not an implementation detail; do not weaken it without discussion, same
-  standing as the Security model section below.
+  the checkpointer's own file/schema, now also holding `pending_facts` and
+  a per-thread `review_cursor`, both added 2026-07-28). This reverses the
+  earlier "long-term/vector memory is out of scope" line: it's now in
+  scope, and deliberately NOT a vector store — Chroma was considered and
+  rejected at Phase 7's scope-time checkpoint in favor of plain
+  keyword/recency retrieval, since a single user's fact count is expected
+  to stay small enough that embedding-based recall would be premature
+  complexity: revisit if that assumption stops holding.
+  `memory_store.recall_facts`'s keyword-scored selective retrieval (never a
+  full context dump) is still exactly as described — it's just no longer
+  what `recall_memory_node` calls. As of 2026-07-28, recall
+  (`memory_extraction.recall_memory_node`) fires only on a thread's first
+  genuine turn (`_is_first_genuine_turn`) rather than being re-injected on
+  every single message — repeating the same known-facts block on every turn
+  was pure duplication once the assistant had already seen it earlier in
+  the same thread, at my direct request. That first-turn call loads the
+  FULL profile (`memory_store.list_facts`), not the keyword-scored
+  `recall_facts` — a real bug found live the same day: a thread's opening
+  message is very often a low-content greeting ("hi") sharing no keyword
+  with anything in the store once it grows past `recall_facts`' own
+  small-store threshold, so keyword-scoring the opener silently recalled
+  nothing even with directly relevant facts present (a real live
+  reproduction: asking to text a saved contact right after "hi" opened the
+  thread got zero memory context — mac_control_agent had no way to know the
+  contact's number). Since this now runs once per thread instead of once
+  per turn, the cost concern `recall_facts`' own filtering exists for is
+  far smaller here. `assistant/supervisor.py`'s `_context_prefix_messages`
+  (which forwards recalled facts into an isolated specialist call) needed
+  a matching fix the same day: it used to only forward a recalled-facts
+  message found within the CURRENT top-level turn's own slice, correct back
+  when recall re-ran every turn but silently starving every specialist call
+  past a thread's first turn once recall stopped doing that — it now
+  searches the whole thread's history instead, since there is at most one
+  recalled-facts message per thread now.
+  **Extraction is no longer per-turn or agent-initiated-mid-conversation
+  (re-architected 2026-07-28, superseding the original "automatic-write"
+  description):** `assistant/memory_review_agent.py` runs once a day
+  instead, scanning every thread's genuine human turns since its own
+  last-scanned cursor and queuing 0+ candidates into `pending_facts` for me
+  to approve/decline in the Memory panel — see the Security model section's
+  Confirmation rule bullet for the full reasoning and what this changed vs.
+  what stayed the same. See memory_extraction.py's module docstring for the
+  full security design (source-restriction, isolated extraction channel) —
+  this is the load-bearing part of Part B, not an implementation detail; do
+  not weaken it without discussion, same standing as the Security model
+  section below.
 - Packaging: pyproject.toml is the source of truth (provides the `assistant`
   console script); requirements.txt is a flat mirror. Keep both in sync.
 
@@ -821,9 +782,6 @@ message content shape; STEPS.md 5.2 / 6.2 / 3.2 / 8.2).
 - Type hints on signatures; docstrings on public functions/classes.
 - Separate modules for agent/tool/graph/CLI (as scaffolded) so Phase 3's
   multi-agent split doesn't force a rewrite.
-- No premature abstraction — current phase's needs only. No generic "plugin
-  systems."
-- Small, testable functions over monoliths.
 - Secrets: `.env` (gitignored) holds real values; `.env.example` (committed)
   holds placeholders ONLY — real keys landed in .env.example once before
   (STEPS.md 5.1), so check which file you're writing to. OAuth credential and

@@ -365,48 +365,6 @@ describe("ChatPanel", () => {
     expect(screen.queryByTestId("interrupt-gate")).not.toBeInTheDocument();
   });
 
-  it("shows a memory-write interrupt's fact VERBATIM, with no voice affordance, and resolves on decline", async () => {
-    const user = userEvent.setup();
-    const verbatimFact = "User prefers window seats when flying, especially on long-haul routes.";
-    mockedSendChat.mockResolvedValue({
-      type: "interrupt",
-      payload: {
-        action: "save_memory",
-        fact: verbatimFact,
-        provenance: null,
-        voice_approvable: false,
-      },
-    });
-    mockedResumeChat.mockResolvedValue({ type: "message", content: "Not saved." });
-
-    render(<ChatPanel />);
-    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
-
-    await user.type(screen.getByPlaceholderText(/message the assistant/i), "remember something");
-    await user.click(screen.getByRole("button", { name: /send/i }));
-
-    const factElement = await screen.findByTestId("interrupt-fact-verbatim");
-    // Exact string match, not "contains" — this is the load-bearing
-    // requirement (STEPS.md 54): no re-summarization, no truncation, no
-    // markdown reinterpretation of the approved fact text.
-    expect(factElement.textContent).toBe(verbatimFact);
-
-    // The Phase 7 red-team requirement this gate must never violate: no
-    // speak/voice affordance for a memory-write confirmation.
-    expect(screen.queryByText(/speak/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/voice/i)).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /decline/i }));
-
-    expect(mockedResumeChat).toHaveBeenCalledWith(
-      false,
-      expect.any(Function),
-      expect.any(Function),
-      expect.any(Function),
-    );
-    expect(await screen.findByText("Not saved.")).toBeInTheDocument();
-  });
-
   it("shows a send_email interrupt with verbatim body, bcc always visible, and a fixed description", async () => {
     const user = userEvent.setup();
     mockedSendChat.mockResolvedValue({

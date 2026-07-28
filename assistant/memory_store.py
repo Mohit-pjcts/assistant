@@ -38,6 +38,32 @@ CREATE TABLE IF NOT EXISTS facts (
 )
 """
 
+# Candidates the nightly memory_review_agent proposes — never recalled,
+# never treated as known facts, until a human approves them (approve_
+# pending_fact moves a row into `facts` above; decline_pending_fact just
+# deletes it). This table is the actual confirmation gate for memory writes
+# now that extraction runs unattended overnight instead of inline in a live
+# conversation — see memory_review_agent.py's module docstring for the full
+# reasoning for the switch away from the old per-turn interrupt() gate.
+_CREATE_PENDING_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS pending_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    provenance TEXT,
+    created_at TEXT NOT NULL
+)
+"""
+
+# One row per thread: how many of that thread's genuine human turns
+# memory_review_agent has already scanned, so a repeat nightly run (or a
+# manual "check now") never re-proposes the same turn's facts twice.
+_CREATE_REVIEW_CURSOR_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS review_cursor (
+    thread_id TEXT PRIMARY KEY,
+    human_turns_processed INTEGER NOT NULL
+)
+"""
+
 # Facts at or below this count are always all recalled (cheap enough that
 # keyword filtering would just add noise for no benefit) — see recall_facts.
 _SMALL_STORE_THRESHOLD = 5
@@ -53,10 +79,20 @@ class Fact:
     created_at: str
 
 
+@dataclass(frozen=True)
+class PendingFact:
+    id: int
+    content: str
+    provenance: str | None
+    created_at: str
+
+
 @asynccontextmanager
 async def _connect(db_path: Path | str) -> AsyncIterator[aiosqlite.Connection]:
     async with aiosqlite.connect(str(db_path)) as db:
         await db.execute(_CREATE_TABLE_SQL)
+        await db.execute(_CREATE_PENDING_TABLE_SQL)
+        await db.execute(_CREATE_REVIEW_CURSOR_TABLE_SQL)
         await db.commit()
         yield db
 
@@ -97,6 +133,25 @@ async def list_facts(db_path: Path | str | None = None) -> list[Fact]:
         return [Fact(**dict(row)) for row in rows]
 
 
+async def update_fact(
+    fact_id: int,
+    content: str,
+    db_path: Path | str | None = None,
+) -> bool:
+    """Edit an already-saved fact's content in place. Same category as
+    delete_fact below — the USER curating their own already-saved data, not
+    a new agent-authored side effect — so this deliberately does not go
+    through interrupt() either. Returns whether a row was actually updated,
+    so callers can tell an already-gone id apart from a real edit."""
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        cursor = await db.execute(
+            "UPDATE facts SET content = ? WHERE id = ?", (content, fact_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def delete_fact(fact_id: int, db_path: Path | str | None = None) -> bool:
     """Delete a stored fact by id. Phase 9's memory-review panel: the USER
     curating their own already-saved data, not a new agent-authored side
@@ -109,6 +164,99 @@ async def delete_fact(fact_id: int, db_path: Path | str | None = None) -> bool:
         cursor = await db.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def propose_pending_fact(
+    content: str,
+    provenance: str | None = None,
+    db_path: Path | str | None = None,
+) -> int:
+    """Queue a candidate fact for human review — called only by
+    memory_review_agent.py's nightly pass, never directly saved to `facts`.
+    Mirrors save_fact's own shape/db_path convention."""
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    created_at = datetime.now(UTC).isoformat()
+    async with _connect(db_path) as db:
+        cursor = await db.execute(
+            "INSERT INTO pending_facts (content, provenance, created_at) VALUES (?, ?, ?)",
+            (content, provenance, created_at),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def list_pending_facts(db_path: Path | str | None = None) -> list[PendingFact]:
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            "SELECT id, content, provenance, created_at FROM pending_facts ORDER BY created_at DESC"
+        )
+        return [PendingFact(**dict(row)) for row in rows]
+
+
+async def approve_pending_fact(pending_id: int, db_path: Path | str | None = None) -> Fact | None:
+    """The actual confirmation step for a nightly-proposed fact: moves it
+    from `pending_facts` into the real `facts` table, verbatim — same
+    TOCTOU discipline save_fact's own docstring requires (no re-extraction
+    or re-rendering between what was shown and what gets saved). Returns
+    the newly saved Fact, or None if `pending_id` no longer exists (already
+    approved/declined, or never existed)."""
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT content, provenance FROM pending_facts WHERE id = ?", (pending_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        content, provenance = row["content"], row["provenance"]
+        created_at = datetime.now(UTC).isoformat()
+        insert_cursor = await db.execute(
+            "INSERT INTO facts (content, provenance, created_at) VALUES (?, ?, ?)",
+            (content, provenance, created_at),
+        )
+        await db.execute("DELETE FROM pending_facts WHERE id = ?", (pending_id,))
+        await db.commit()
+        return Fact(id=insert_cursor.lastrowid, content=content, provenance=provenance, created_at=created_at)
+
+
+async def decline_pending_fact(pending_id: int, db_path: Path | str | None = None) -> bool:
+    """Discard a nightly-proposed fact without ever saving it. Returns
+    whether a row was actually deleted, same already-gone-id convention as
+    delete_fact above."""
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        cursor = await db.execute("DELETE FROM pending_facts WHERE id = ?", (pending_id,))
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_review_cursor(thread_id: str, db_path: Path | str | None = None) -> int:
+    """How many of `thread_id`'s genuine human turns memory_review_agent has
+    already scanned. 0 for a thread never scanned before."""
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT human_turns_processed FROM review_cursor WHERE thread_id = ?", (thread_id,)
+        )
+        row = await cursor.fetchone()
+        return row["human_turns_processed"] if row is not None else 0
+
+
+async def set_review_cursor(
+    thread_id: str, human_turns_processed: int, db_path: Path | str | None = None
+) -> None:
+    db_path = db_path if db_path is not None else DEFAULT_DB_PATH
+    async with _connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO review_cursor (thread_id, human_turns_processed) VALUES (?, ?) "
+            "ON CONFLICT(thread_id) DO UPDATE SET human_turns_processed = excluded.human_turns_processed",
+            (thread_id, human_turns_processed),
+        )
+        await db.commit()
 
 
 def _keywords(text: str) -> set[str]:
