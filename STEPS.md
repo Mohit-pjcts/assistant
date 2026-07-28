@@ -9443,3 +9443,90 @@ containing Rishabh's number already saved) — confirmed the fix live.
 changed file (same 2 pre-existing, unrelated findings as group 115,
 confirmed via `git stash`).
 
+## 117. Phase 25 scoped: cross-app workflow chaining (2026-07-28)
+
+**What:** the user asked which of six "make Oni smarter" ideas from a
+brainstorm were actually feasible; two were picked to build (#2 cross-app
+workflow chaining, #4 multi-modal packing reasoning). First pass scoped
+this too narrowly — designed to a single flight-confirmation example
+instead of the general capability the user actually asked for ("I want
+my system to be able to handle cross-app workflows well") — corrected
+once the user pushed back, then run through a full `/grill-with-docs`
+session (`/grilling` skill; the paired `/domain-modeling` skill it also
+names isn't installed on this machine — decisions and rationale
+captured directly in this log and in PLAN.md's Phase 25 entry instead of
+a separate ADR file, no unvetted skill installed to fill the gap per
+CLAUDE.md's skill-vetting policy).
+
+**Real structural finding, not assumed:** three parallel Explore agents
+plus direct reads of `supervisor.py`/`server.py`/`mac_tools.py` surfaced
+that since the Phase 16 Part B agents-as-tools rewrite, every specialist
+call is an isolated `ainvoke()` seeded only by `_context_prefix_messages()`
+— which forwards exactly the compaction summary and the recalled-facts
+message, nothing a prior specialist call in the SAME turn produced. A
+3-hop cross-app request has always required the supervisor to re-type
+every concrete value (a time, an address, a phone number) into each next
+instruction by hand. Invisible in single-app use; exactly where a
+multi-app chain would silently corrupt data. This is the actual defect
+Phase 25 fixes — the flight/packing scenarios are proof cases for it,
+not the feature itself.
+
+**Two other real findings from direct verification, not guessed:**
+- Live-probed Reminders.app's actual AppleScript dictionary (`osascript
+  -e 'tell application "Reminders" to return properties of (make new
+  reminder ...)'`) — accidentally created a real reminder doing so,
+  deleted it immediately after. Confirmed `due date`/`allday due date`/
+  `remind me date` exist but there is no location/geofence property at
+  all — a location-triggered reminder is a platform-level impossibility,
+  not a scope choice, so the phase's write-chain proof workflow uses a
+  time-based reminder instead.
+- That same probe ran with no Automation permission dialog — Calendar/
+  Reminders automation is already granted on this Mac, unlike Messages/
+  Photos/Contacts. This is why Phase 25's own done-when criteria split
+  verification: the mechanism itself is live-provable now, but
+  `send_imessage`/`photos_search`/the new `contacts_search` stay
+  code-complete-UNVERIFIED until the user runs one permission session.
+
+**Decisions reached (see PLAN.md's Phase 25 entry for full reasoning on
+each):** done-when is a generic mechanism plus two differently-shaped
+proof workflows; bundled pre-approval clears action NAMES not exact
+payloads (user's explicit choice against the recommendation — amplifies
+an already-accepted "supervisor display vs. specialist construction
+could diverge" risk documented in `supervisor.py`'s own docstring); an
+audit log of approved-vs-executed with NO per-workflow step cap (also
+against the recommendation — requires an explicit `recursion_limit`
+above LangGraph's default 25 as the only remaining backstop); reads run
+before a plan is proposed; prior specialist results forward VERBATIM
+with provenance labels, not supervisor-summarized (accepted consequence:
+untrusted content can now reach `mac_control_agent`'s ungated
+`open_url_in_brave`); partial failure stops and reports honestly with no
+rollback attempted; the new bundled-plan tool coexists with
+`request_gated_action_confirmation` under a mechanical 1-vs-2+ rule
+rather than replacing it; a new dashboard Workflows tab, not folded into
+History.
+
+**Process:** Phase 25 opened and marked ACTIVE in PLAN.md with the
+user's approval (via plan-mode `ExitPlanMode`, not a status edit made
+unilaterally) before any implementation code was written, per this
+project's own standing rule. The pending memory-re-architecture work
+(groups 115-116) was committed as its own clean boundary FIRST, ahead of
+Phase 25's diff — the user explicitly authorized committing and pushing
+mid-session ("commit and push yourself... I approve it"), a deliberate,
+one-time widening of the standing "I commit myself" rule for this
+session only, given while stepping away. Since this PLAN.md/STEPS.md/
+CLAUDE.md edit itself landed in the same three files as the memory
+work's own doc updates, the two were separated by temporarily reverting
+this entry's own additions, committing the memory work alone, then
+reapplying and committing this entry separately — so the two pieces of
+work stay distinguishable in git history exactly as scoped, rather than
+landing as one mixed commit.
+
+**Held back from the push:** `workspace/user_profile.md` (untracked,
+containing the user's real name, phone numbers, family members' phone
+numbers, and location) was deliberately NOT staged or committed, even
+under the broad authorization above — this repo's remote is a public
+GitHub repo (CLAUDE.md: "published on GitHub... treat it as a portfolio
+piece"), and pushing real family contact info to a public repo is not
+something a general "commit and push" instruction should be read as
+covering without it being named explicitly. Left untracked for the user
+to decide on (redact, gitignore, or explicitly confirm) once back.

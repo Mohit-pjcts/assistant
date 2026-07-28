@@ -2439,3 +2439,180 @@ accidental); all existing tests pass; STEPS.md updated; CLAUDE.md's
 Security model section gains an explicit note documenting this as a
 named, bounded exception to the standing confirmation rule (not a
 silent weakening of it).
+
+---
+
+## Phase 25 — Cross-app workflow chaining — ACTIVE (opened 2026-07-28, scoped via a `/grill-with-docs` session, STEPS.md 117)
+
+**Objective:** a general mechanism for a single user request that needs
+2+ side-effectful actions across specialists (not one hardcoded flight
+scenario) — propose a concrete plan once reads are done, approve once,
+execute, report honestly on partial failure, and keep an after-the-fact
+audit of what was approved vs. what actually ran. Proven by two
+differently-shaped workflows, not just built and hoped for.
+
+**The structural defect this phase actually fixes, found before any
+code was written:** since the Phase 16 Part B agents-as-tools rewrite,
+each specialist runs in its own isolated `ainvoke()`, seeded only by
+`_context_prefix_messages()` (`supervisor.py`) — which forwards exactly
+two things (the compaction summary, the recalled-facts message). A
+specialist at step 3 of a chain cannot see what steps 1-2 returned, so
+the supervisor has always had to re-type every datetime/address/phone
+number into each next instruction string by hand. This is invisible in
+single-app use (why nothing caught it before) and is exactly where a
+multi-app chain silently corrupts data. Fixing this handoff gap is the
+real content of this phase; the two proof workflows exist to prove the
+fix, not the other way around.
+
+**Decisions, reached via grilling, each put to the user individually —
+see the session's own plan file for full ADR-style reasoning (this
+PLAN.md entry is the durable summary; the plan file itself is not
+version-controlled):**
+
+- Done-when is a generic mechanism PLUS two proof workflows of different
+  shapes (one write-chain, one read-chain) — a mechanism with no proven
+  workflow is exactly the "looks finished, silently isn't" pattern
+  Phase 18's `render_ui` and Phase 20's board both hit (supervisor
+  routing blindness).
+- **Upfront pre-approval for a bundled plan clears ACTION NAMES, not
+  exact payloads** — chosen by the user against the recommendation.
+  `supervisor.py`'s own docstring already documents single-action
+  upfront confirmation as "a real, accepted weakening" where what the
+  supervisor shows and what the specialist actually constructs "could
+  diverge." Bundling N actions behind one approval amplifies that
+  accepted risk rather than introducing a new category — one card can
+  now authorize N unverified constructions. Accepted explicitly, not an
+  oversight, same category as Phase 13's ungated `open_url_in_brave`.
+- **An audit log records approved-plan-vs-actually-executed, with NO cap
+  on steps per workflow** (user modified the recommendation to drop the
+  cap) — same after-the-fact-review answer Phase 24 already used
+  (`automation_store.log_run`) where a before-the-fact gate isn't
+  possible. Cost/risk this creates: unbounded chain length is unbounded
+  token spend AND raises `GraphRecursionError` exposure against
+  LangGraph's default `recursion_limit` (25) — this phase must set an
+  explicit higher limit as the only backstop, since no step cap exists.
+- Reads run first (ungated, already free), THEN a concrete plan — with
+  real values, not placeholders — is proposed for approval.
+- Prior specialists' results are forwarded to the next specialist
+  VERBATIM (not supervisor-summarized — summarizing was rejected as
+  self-defeating, since it's the exact lossy re-transcription being
+  fixed), wrapped in provenance labels naming origin/untrusted status.
+  Security consequence, accepted: untrusted content (email bodies, web
+  results, OCR'd screenshot text) now reaches `mac_control_agent`, which
+  holds `send_imessage`/`run_shortcut`/the deliberately-ungated
+  `open_url_in_brave`. Labels are a behavioral nudge, not a structural
+  control (CLAUDE.md's threat model: mitigation lives on the execution
+  side, not content filtering).
+- Partial failure: stop at the first failed step, report exactly what
+  completed (with real side effects that stand) vs. what failed vs.
+  what never ran. No rollback attempted or claimed — most of these
+  actions are irreversible (you cannot unsend an iMessage).
+- Two new primitives, both required to unblock the write-chain proof
+  workflow: `reminders_create` gains a due date/alert (today it only
+  sets name+body — verified live against the real Reminders.app
+  AppleScript dictionary before deciding this), and a new read-only
+  `contacts_search` (Contacts.app has zero integration today).
+- **Location-triggered reminders are not buildable — a platform limit
+  found, not a scope choice.** A live probe of Reminders.app's real
+  AppleScript dictionary returned `due date`/`allday due date`/
+  `remind me date` and no location/geofence property at all. Reminders
+  in this phase are time-based only; geofencing stays exclusively the
+  phone-side mechanism Phase 24 already built
+  (`/automations/{id}/fire`).
+- Workflows are **dashboard-only**; a workflow plan is inherently
+  free-text-heavy so it must be `voice_approvable: False`, and
+  `_run_turn` (server.py, the `/phone/turn` path) auto-declines every
+  such gate today — silently, reporting nothing happened. This phase
+  makes that explicit (the phone replies that the workflow needs
+  dashboard approval) rather than leaving the silent auto-decline as
+  the only phone-side behavior for this feature.
+- The new bundled-plan tool **coexists** with
+  `request_gated_action_confirmation` rather than replacing it, under a
+  mechanical rule the supervisor prompt states plainly: exactly one
+  side effect uses the existing tool unchanged; two or more use the new
+  one. Keeps the existing, security-critical single-action gate path
+  byte-identical and untouched.
+- The approved-vs-executed audit surfaces in a **new dashboard Workflows
+  tab** (same reasoning as Phase 24 getting its own Automations tab for
+  the same after-the-fact-review purpose), not folded into History and
+  not log-only.
+- **Verification is split honestly, not deferred wholesale:** the
+  mechanism itself (propose → approve → execute → report → audit) is
+  live-verified end to end using Calendar + Reminders, which a live
+  probe confirmed are already permission-granted on this Mac. The two
+  proof workflows' app-dependent steps — `send_imessage` (never live-
+  verified since Phase 22), `photos_search` (never live-verified since
+  Phase 23), and the new `contacts_search` — each sit behind their own
+  first-run macOS Automation permission dialog and ship code-complete,
+  UNVERIFIED until the user runs one session granting all three.
+
+**Steps:**
+1. `propose_workflow` tool (supervisor.py) — `steps: list[{action,
+   summary}]` + `goal`; validates every action against the closed
+   `GATED_ACTIONS` dict (no new implicit gated-action category); one
+   `interrupt()` for the whole plan; approval stamps
+   `_GATED_ACTION_APPROVED_KEY` with a LIST of action names.
+   `_pre_approved_actions_this_turn` must accept both the existing
+   single-string marker and this new list form.
+2. Cross-specialist handoff: extend `call_specialist`'s seed with this
+   turn's prior specialist ToolMessages (turn-scoped, same boundary
+   `_pre_approved_actions_this_turn` already uses), each wrapped in a
+   provenance label. `_context_prefix_messages`'s existing two forwards
+   (compaction summary, recalled facts) stay untouched.
+3. Executed-argument capture: gated tools stamp their REAL executed
+   arguments onto their own ToolMessage's `additional_kwargs` under a
+   new marker key; `_invoke_agent_graph`/`call_specialist` forward it
+   across the specialist boundary — the same mechanism already proven
+   for `A2UI_SURFACE_KEY` (Phase 18) and `PHONE_ACTION_KEY` (Phase 21).
+   This is what makes the audit log real rather than aspirational.
+4. `assistant/workflow_store.py` + `workflows.sqlite` — same dedicated-
+   file pattern as `thread_store`/`board_store`/`automation_store`/
+   `phone_store`. Stores the approved plan, executed steps with real
+   args + per-step outcome, and overall result per run.
+5. `mac_tools.py`: `reminders_create` gains `due`/`remind_at` (ISO) +
+   `timezone`, converted via the existing `_iso_datetime_argv` numeric-
+   components pattern (avoids locale-dependent AppleScript date
+   parsing, same reason Calendar already uses it); new `contacts_search`
+   (ungated, read-only, fixed AppleScript template, argv-only).
+6. server.py: persist workflow runs from the collected markers,
+   `GET /workflows` for the dashboard; `_run_turn` detects a workflow-
+   plan payload and returns an explicit "approve this on the dashboard"
+   reply instead of silently auto-declining it.
+7. `InterruptGate.tsx`: renderer for the bundled-plan payload — every
+   step shown verbatim, in order, with its owning specialist; registered
+   in `ACTION_BODIES`/`ACTION_DESCRIPTIONS`/`ACTION_SOURCE` alongside the
+   existing single-action renderers. New Workflows dashboard tab:
+   approved-vs-executed side by side, divergences visibly flagged,
+   per-step outcomes.
+8. Supervisor prompt: the mechanical 1-vs-2+ routing rule, read-then-
+   propose ordering, and explicit naming of the new cross-specialist
+   capability — assume the Phase 18/20 "supervisor can't see a
+   specialist's bound tools" routing-blindness bug will recur here too,
+   don't assume it won't. Re-sync to Langfuse
+   (`scripts/sync_prompts_to_langfuse.py`) per Phase 18's own lesson
+   that a stale remote "production" prompt silently wins over an edited
+   local fallback. Set an explicit `recursion_limit` above LangGraph's
+   default 25, since this phase deliberately carries no step cap.
+9. Two proof workflows: a write-chain (screenshot → parse → calendar
+   event + timed reminder + message draft, one plan, one approval) and
+   a read-chain (calendar destination → weather via `web_search` →
+   `photos_search` → reasoned packing advice) — deliberately different
+   shapes, per this phase's own done-when criteria.
+
+**Done-when:** a real `/chat` → real bundled plan card → real `/resume`
+→ real Calendar.app event + real timed Reminders.app reminder, both
+confirmed by reading them back; a real induced mid-workflow failure
+(e.g. a bad Reminders list name) stops and reports precisely what
+completed vs. failed vs. never ran, with no rollback claimed; the audit
+log shows approved-vs-executed for both live runs; a single-action
+request still resolves through the existing, untouched
+`request_gated_action_confirmation` path (regression proof the two
+mechanisms don't collide); a workflow reached via `/phone/turn` returns
+the explicit "approve on the dashboard" reply rather than silently doing
+nothing; all existing tests pass plus new coverage for all of the above;
+`ruff check .`/`tsc`/`prettier`/frontend build clean (pre-existing,
+unrelated findings confirmed via `git stash`, not newly introduced);
+STEPS.md updated. `send_imessage`/`photos_search`/`contacts_search`
+remain explicitly labeled UNVERIFIED (not silently assumed working)
+until the user completes one permission-granting session on the real
+Mac.
