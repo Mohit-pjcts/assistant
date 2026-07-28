@@ -48,3 +48,11 @@ oni/
 # artifacts must never enter this portfolio repo's history.
 .agents/
 skills-lock.json
+
+# The user's own real profile (name, phone numbers, family members' phone
+# numbers, location) — the assistant reads this locally for memory/context,
+# but this repo is public on GitHub (CLAUDE.md: "treat it as a portfolio
+# piece"), so it must never be committed. Found untracked and deliberately
+# excluded from a commit during Phase 25's build (STEPS.md 117-118); added
+# here so it can't land in history by accident later.
+workspace/user_profile.md

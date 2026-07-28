@@ -86,6 +86,7 @@ from assistant import (  # noqa: E402
     observability,
     phone_store,
     thread_store,
+    workflow_store,
 )
 from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
@@ -141,6 +142,10 @@ if "ASSISTANT_PHONE_DB_PATH" in os.environ:
 # Same redirect story again, for Phase 24's automation-registry DB.
 if "ASSISTANT_AUTOMATIONS_DB_PATH" in os.environ:
     automation_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_AUTOMATIONS_DB_PATH"]
+
+# Same redirect story again, for Phase 25's workflow-run DB.
+if "ASSISTANT_WORKFLOWS_DB_PATH" in os.environ:
+    workflow_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_WORKFLOWS_DB_PATH"]
 
 # PLAN.md Phase 24: which GATED_ACTIONS an automation may be pre-approved
 # for — a deliberate NARROWING of the full GATED_ACTIONS set, not full
@@ -573,6 +578,25 @@ async def _run_turn(
                     _collect_phone_actions(result["messages"][seen:])
                     seen = len(result["messages"])
                     observability.fire_score_gate_outcome(thread_id, False, auto_action)
+                    if auto_action == "propose_workflow":
+                        # PLAN.md Phase 25, decision D8: a multi-step workflow
+                        # plan can only be approved on the dashboard (its own
+                        # card needs to show every step verbatim, which this
+                        # channel has no way to do) — auto-declining silently,
+                        # like every other text-only gate here, would let the
+                        # phone falsely imply nothing was even attempted.
+                        # Return a deterministic message instead of letting
+                        # the model's own follow-up text (after its own
+                        # decline instruction) stand in for one.
+                        response = {
+                            "type": "message",
+                            "content": (
+                                "This needs a multi-step confirmation, which only works "
+                                "from the dashboard — open Oni there to review and "
+                                "approve the plan."
+                            ),
+                        }
+                        break
                     continue
                 app.state.pending_trace_headers[thread_id] = observability.inject_trace_headers()
                 response = {"type": "interrupt", "payload": payload}
@@ -1683,7 +1707,7 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
         "confirmation from you."
     )
     try:
-        content, _surfaces, _phone_actions = await _invoke_agent_graph(
+        content, _surfaces, _phone_actions, _executed_actions = await _invoke_agent_graph(
             specialist_graph,
             specialist_name,
             [HumanMessage(content=instruction)],
@@ -1696,6 +1720,57 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
 
     await automation_store.log_run(automation_id, outcome="fired", detail=content)
     return {"outcome": "fired", "detail": content}
+
+
+# --- Workflow runs (PLAN.md Phase 25) --------------------------------------
+#
+# Read-only from this API's side — a workflow run is only ever CREATED by
+# supervisor.py's propose_workflow tool (via a real /chat -> gate -> /resume
+# round trip) and only ever UPDATED by supervisor.py's own
+# _record_workflow_progress as specialist calls actually execute. There is
+# no POST/PATCH/DELETE here by design: this endpoint exists purely to
+# surface the approved-vs-executed audit (decision D3) in the dashboard's
+# new Workflows tab (decision D10), not to let the dashboard drive workflow
+# execution directly.
+
+
+def _serialize_workflow_step(s: workflow_store.WorkflowStep) -> dict[str, Any]:
+    return {
+        "step_index": s.step_index,
+        "action": s.action,
+        "planned_summary": s.planned_summary,
+        "executed_args": s.executed_args,
+        "outcome": s.outcome,
+        "detail": s.detail,
+        "executed_at": s.executed_at,
+        "diverged": s.diverged,
+    }
+
+
+def _serialize_workflow_run(r: workflow_store.WorkflowRun) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "thread_id": r.thread_id,
+        "goal": r.goal,
+        "status": r.status,
+        "created_at": r.created_at,
+        "completed_at": r.completed_at,
+        "steps": [_serialize_workflow_step(s) for s in r.steps],
+    }
+
+
+@app.get("/workflows")
+async def list_workflows(thread_id: str | None = None) -> dict[str, Any]:
+    runs = await workflow_store.list_runs(thread_id=thread_id)
+    return {"workflows": [_serialize_workflow_run(r) for r in runs]}
+
+
+@app.get("/workflows/{run_id}")
+async def get_workflow(run_id: str) -> dict[str, Any]:
+    run = await workflow_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"No workflow run with id {run_id}")
+    return _serialize_workflow_run(run)
 
 
 @app.get("/cost")

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ChatPanel } from "./ChatPanel";
 import * as api from "@/lib/api";
@@ -694,5 +694,66 @@ describe("ChatPanel", () => {
     expect(screen.getByText("/Users/test/Desktop/old_report.pdf.txt")).toBeInTheDocument();
     const contentBlock = await screen.findByTestId("interrupt-disk-file-delete-content");
     expect(contentBlock.textContent).toBe("the actual file content, in full");
+  });
+
+  it("shows a propose_workflow interrupt with every step verbatim, in order, with its owning specialist", async () => {
+    const user = userEvent.setup();
+    mockedSendChat.mockResolvedValue({
+      type: "interrupt",
+      payload: {
+        action: "propose_workflow",
+        goal: "Flight check-in",
+        steps: [
+          {
+            action: "calendar_create_event",
+            summary: "Create 'Flight to SF' on July 30, 9am-11am",
+            specialist: "mac_control_agent",
+          },
+          {
+            action: "send_imessage",
+            summary: "Text Rishabh: landed, see you soon",
+            specialist: "mac_control_agent",
+          },
+        ],
+        voice_approvable: false,
+      },
+    });
+    mockedResumeChat.mockResolvedValue({ type: "message", content: "Done." });
+
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(
+      screen.getByPlaceholderText(/message the assistant/i),
+      "plan my flight check-in",
+    );
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(
+      await screen.findByText("The assistant wants to run this multi-step workflow:"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Flight check-in")).toBeInTheDocument();
+
+    const step0 = await screen.findByTestId("interrupt-workflow-step-0");
+    expect(within(step0).getByText("calendar_create_event")).toBeInTheDocument();
+    expect(within(step0).getByText(/via mac_control_agent/)).toBeInTheDocument();
+    const step0Summary = await screen.findByTestId("interrupt-workflow-step-0-summary");
+    expect(step0Summary.textContent).toBe("Create 'Flight to SF' on July 30, 9am-11am");
+
+    const step1 = await screen.findByTestId("interrupt-workflow-step-1");
+    expect(within(step1).getByText("send_imessage")).toBeInTheDocument();
+    const step1Summary = await screen.findByTestId("interrupt-workflow-step-1-summary");
+    expect(step1Summary.textContent).toBe("Text Rishabh: landed, see you soon");
+
+    // No source badge for the whole card — it spans multiple specialists,
+    // shown per-step instead (InterruptGate.tsx's ACTION_SOURCE comment).
+    expect(screen.queryByText("Mac Control")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /approve/i }));
+    expect(mockedResumeChat).toHaveBeenCalledWith(
+      true,
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
 });

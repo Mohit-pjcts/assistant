@@ -529,6 +529,81 @@ def test_compose_whatsapp_url_encodes_special_characters_in_the_message() -> Non
     assert "&text=50%25%20off%3F%20yes%20%26%20no%20%23deal" in url
 
 
+def test_reminders_create_without_remind_at_uses_original_two_property_template() -> None:
+    """Backward compatibility: a plain reminders_create call (no remind_at)
+    must still use the ORIGINAL template — every pre-Phase-25 caller stays
+    byte-identical."""
+    with _capture_subprocess_calls() as calls:
+        mac_tools.reminders_create.invoke({"title": "Buy milk", "list_name": "", "notes": ""})
+
+    assert calls == [["osascript", "-e", mac_tools._REMINDERS_CREATE, "", "Buy milk", ""]]
+
+
+def test_reminders_create_with_remind_at_requires_timezone() -> None:
+    with _capture_subprocess_calls() as calls:
+        result = mac_tools.reminders_create.invoke(
+            {"title": "Check in", "remind_at": "2026-07-30T08:00:00"}
+        )
+
+    assert calls == [], "must never invoke osascript without a timezone to interpret remind_at"
+    assert "timezone is required" in result
+
+
+def test_reminders_create_with_remind_at_passes_numeric_date_components() -> None:
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    with _capture_subprocess_calls() as calls:
+        mac_tools.reminders_create.invoke(
+            {
+                "title": "Check in for flight",
+                "list_name": "Travel",
+                "remind_at": "2026-07-30T08:00:00",
+                "timezone": "America/Los_Angeles",
+            }
+        )
+
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0:3] == ["osascript", "-e", mac_tools._REMINDERS_CREATE_WITH_REMINDER]
+    assert argv[3:6] == ["Travel", "Check in for flight", ""]
+    expected = (
+        _dt.fromisoformat("2026-07-30T08:00:00")
+        .replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+        .astimezone()
+    )
+    expected_seconds = expected.hour * 3600 + expected.minute * 60 + expected.second
+    assert argv[6:] == [
+        str(expected.year),
+        str(expected.month),
+        str(expected.day),
+        str(expected_seconds),
+    ]
+
+
+def test_reminders_create_with_remind_at_bad_timezone_reported_not_raised() -> None:
+    with _capture_subprocess_calls() as calls:
+        result = mac_tools.reminders_create.invoke(
+            {"title": "X", "remind_at": "2026-07-30T08:00:00", "timezone": "Not/AZone"}
+        )
+
+    assert calls == []
+    assert "Error" in result
+
+
+def test_contacts_search_passes_query_as_argv() -> None:
+    with _capture_subprocess_calls() as calls:
+        mac_tools.contacts_search.invoke({"query": "Rishabh"})
+
+    assert calls == [["osascript", "-e", mac_tools._CONTACTS_SEARCH, "Rishabh"]]
+
+
+def test_contacts_search_is_ungated_no_interrupt_needed() -> None:
+    """Read-only, same precedent as photos_search/reminders_list."""
+    assert mac_tools.contacts_search in mac_tools.UNGATED_TOOLS
+    assert mac_tools.contacts_search not in mac_tools.GATED_TOOLS
+
+
 def test_photos_search_passes_query_as_argv() -> None:
     with _capture_subprocess_calls() as calls:
         mac_tools.photos_search.invoke({"query": "beach 2023"})

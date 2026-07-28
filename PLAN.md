@@ -2442,7 +2442,45 @@ silent weakening of it).
 
 ---
 
-## Phase 25 — Cross-app workflow chaining — ACTIVE (opened 2026-07-28, scoped via a `/grill-with-docs` session, STEPS.md 117)
+## Phase 25 — Cross-app workflow chaining — MECHANISM CODE COMPLETE + LIVE-VERIFIED (opened 2026-07-28, scoped via a `/grill-with-docs` session, STEPS.md 117; built same day, STEPS.md 118)
+
+**Status note:** Steps 1-8 (the mechanism itself — `propose_workflow`,
+cross-specialist handoff, executed-argument capture, `workflow_store`,
+the `reminders_create`/`contacts_search` primitives, server endpoints,
+the dashboard's InterruptGate renderer + new Workflows tab, and the
+supervisor prompt update) are done and LIVE-VERIFIED against the real
+graph — not just unit-tested: a real `/chat` → one real bundled
+interrupt covering two real gated actions → `/resume` → both real side
+effects (a real file write, then a real delete) → a real recorded
+`workflow_store` audit showing the executed arguments next to the
+approved plan, all through the actual running backend
+(`tests/test_server.py::test_propose_workflow_bundles_two_gated_actions_into_one_confirmation`).
+Deliberately used `write_disk_file`/`delete_disk_file` (both already-
+permission-granted, coding_agent-owned) rather than
+`calendar_create_event`/`send_imessage` for this proof, per decision D11.
+The phone-channel behavior (decision D8 — a workflow plan reached via
+`/phone/turn` gets an explicit "approve on the dashboard" message rather
+than silently auto-declining) is also live-verified
+(`test_phone_turn_propose_workflow_gets_explicit_dashboard_message`).
+Prompts re-synced to Langfuse (`scripts/sync_prompts_to_langfuse.py`) —
+Phase 18's own lesson confirmed again live: the first run of the new
+prompt-guard test failed against the STALE remote production prompt
+until re-synced. 330/332 backend tests pass (2 pre-existing, unrelated
+failures — a Langfuse rate-limit 429 and the documented `threads.sqlite`
+flake); 86/86 frontend tests pass (5 new); `ruff check .`/`tsc`/
+`prettier`/frontend build all clean (1 pre-existing, unrelated ruff
+finding; 7 pre-existing, unrelated prettier findings — both confirmed
+via `git stash`, not introduced here).
+
+**Still open — Step 9's two ORIGINAL proof workflows (the write-chain:
+screenshot → parse → calendar event + timed reminder + message draft;
+the read-chain: calendar destination → weather → `photos_search` →
+packing advice) have not been run live.** Both depend on
+`send_imessage`/`photos_search`/`contacts_search`, none of which have
+ever been live-verified against the real Messages.app/Photos.app/
+Contacts.app — each sits behind its own first-run macOS Automation
+permission dialog only the user can click (decision D11). Not blocked on
+any further code; blocked purely on that one permission-granting session.
 
 **Objective:** a general mechanism for a single user request that needs
 2+ side-effectful actions across specialists (not one hardcoded flight

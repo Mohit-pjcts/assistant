@@ -42,6 +42,7 @@ os.environ.setdefault("ASSISTANT_THREADS_DB_PATH", os.path.join(_tmpdir, "thread
 os.environ.setdefault("ASSISTANT_BOARD_DB_PATH", os.path.join(_tmpdir, "board.sqlite"))
 os.environ.setdefault("ASSISTANT_PHONE_DB_PATH", os.path.join(_tmpdir, "phone_data.sqlite"))
 os.environ.setdefault("ASSISTANT_AUTOMATIONS_DB_PATH", os.path.join(_tmpdir, "automations.sqlite"))
+os.environ.setdefault("ASSISTANT_WORKFLOWS_DB_PATH", os.path.join(_tmpdir, "workflows.sqlite"))
 # Bound here, not re-read from os.environ inside the test function itself —
 # same reasoning, belt-and-suspenders: this constant is fixed at the exact
 # instant this module resolved the (possibly-already-set) env var, so nothing
@@ -381,6 +382,72 @@ async def test_write_disk_file_gated_round_trip_through_the_real_graph() -> None
         assert f.read() == "phase 23 verified"
 
 
+async def test_propose_workflow_bundles_two_gated_actions_into_one_confirmation() -> None:
+    """PLAN.md Phase 25's central live-verification requirement: the
+    propose_workflow -> approve -> execute -> audit mechanism, proven
+    end-to-end against the REAL graph. Deliberately uses two SAFE,
+    already-permission-granted gated actions (write_disk_file +
+    delete_disk_file, both coding_agent-owned) rather than
+    calendar_create_event/send_imessage — those need Messages.app/Photos.app
+    permission grants only the user can click (Phase 25's own decision D11
+    splits verification this way: the mechanism is provable now, the
+    app-dependent proof workflows are not). Proves: ONE interrupt covers
+    BOTH steps (not two separate gates); approval clears both actions at
+    once via pre_approved_actions; both real side effects actually happen,
+    in order; workflow_store records the approved-vs-executed audit for
+    both, with the REAL executed arguments, not just the planned summary.
+    Uses a tempfile-safe target path, never a real user file."""
+    target = os.path.join(_tmpdir, "phase25_workflow_test.txt")
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/chat",
+            json={
+                "message": (
+                    "Call propose_workflow with exactly these two steps, in this order: "
+                    f"1) write_disk_file to write the exact content 'workflow test' to "
+                    f"the exact path {target!r}; 2) delete_disk_file to delete that exact "
+                    "same file. Do not do anything else first."
+                )
+            },
+        )
+        body = _final_sse_event(response)
+        assert body["type"] == "interrupt", f"expected an interrupt, got {body}"
+        assert body["payload"]["action"] == "propose_workflow"
+        step_actions = [s["action"] for s in body["payload"]["steps"]]
+        assert step_actions == ["write_disk_file", "delete_disk_file"], (
+            f"expected exactly these two steps bundled into ONE gate, got {body['payload']}"
+        )
+        assert not os.path.exists(target), "must not write before approval"
+
+        resumed = client.post("/resume", json={"approved": True})
+        assert resumed.status_code == 200, resumed.text
+        resumed_body = _final_sse_event(resumed)
+        assert resumed_body["type"] == "message", (
+            f"expected a final message with no second gate (both actions were "
+            f"pre-approved by the one workflow confirmation), got {resumed_body}"
+        )
+
+        # Both real side effects happened, in order, with no second
+        # confirmation needed for either — write then delete nets out to
+        # "file does not exist," which alone would also be true if NEITHER
+        # step ran, so the workflow_store audit below is what actually
+        # proves both executed rather than neither.
+        assert not os.path.exists(target)
+
+        workflows = client.get("/workflows").json()["workflows"]
+        run = next(
+            (r for r in workflows if [s["action"] for s in r["steps"]] == ["write_disk_file", "delete_disk_file"]),
+            None,
+        )
+        assert run is not None, f"expected a recorded workflow run, got {workflows}"
+        assert run["status"] == "completed"
+        assert all(s["outcome"] == "success" for s in run["steps"])
+        write_step, delete_step = run["steps"]
+        assert write_step["executed_args"]["content"] == "workflow test"
+        assert target in write_step["executed_args"]["path"]
+        assert target in delete_step["executed_args"]["path"]
+
+
 async def test_phone_turn_round_trips_through_the_real_graph() -> None:
     """PLAN.md Phase 21: /phone/turn is the non-streaming sibling of /chat —
     same real-graph round trip, single JSON body back instead of SSE."""
@@ -481,6 +548,33 @@ async def test_phone_turn_auto_declines_text_only_gate() -> None:
             f"a voice_approvable: False gate must never surface as an interrupt "
             f"on this channel, got {body}"
         )
+
+
+async def test_phone_turn_propose_workflow_gets_explicit_dashboard_message() -> None:
+    """PLAN.md Phase 25 decision D8: unlike every OTHER text-only gate on
+    this channel (which auto-declines silently, per the test above), a
+    propose_workflow plan gets a DETERMINISTIC, explicit message telling
+    the user to approve it on the dashboard instead — the phone must never
+    silently imply nothing happened when it actually declined a whole
+    multi-step plan. Directs the request at propose_workflow's own upfront
+    path by naming it explicitly, same sidestep of non-determinism as the
+    test above."""
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/phone/turn",
+            json={
+                "message": (
+                    "Call propose_workflow directly with goal='phone workflow test' and "
+                    "these two steps: 1) action='write_disk_file', summary='write a test "
+                    "file'; 2) action='delete_disk_file', summary='delete that test file'. "
+                    "Do not do anything else."
+                )
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["type"] == "message"
+        assert "dashboard" in body["content"].lower()
 
 
 async def test_phone_turn_run_shortcut_on_phone_is_ungated() -> None:

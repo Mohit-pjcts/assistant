@@ -123,17 +123,17 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   pre-existing and unrelated (a Langfuse rate-limit 429, and an
   already-documented `threads.sqlite` state-pollution flake confirmed via
   `git stash` to reproduce identically on unmodified `main`).
-- **Phase 25 — Cross-app workflow chaining: ACTIVE, just opened
-  (2026-07-28, STEPS.md 117), no code written yet.** Scoped via a
-  `/grill-with-docs` session after an initial pass over-narrowed the ask
-  to a single flight-confirmation example; corrected once the user
-  pushed back to the actual ask — a general mechanism for a request
-  needing 2+ side-effectful actions across specialists, not one demo
-  scenario. The real defect this phase fixes: since the Phase 16 Part B
-  agents-as-tools rewrite, every specialist call is an isolated, fresh
-  `ainvoke()` that can't see what an earlier specialist call in the SAME
-  turn returned — the supervisor has always had to re-type every
-  concrete value (time, address, phone number) into each next
+- **Phase 25 — Cross-app workflow chaining: MECHANISM CODE COMPLETE +
+  LIVE-VERIFIED (opened + built 2026-07-28, STEPS.md 117-118).** Scoped
+  via a `/grill-with-docs` session after an initial pass over-narrowed
+  the ask to a single flight-confirmation example; corrected once the
+  user pushed back to the actual ask — a general mechanism for a
+  request needing 2+ side-effectful actions across specialists, not one
+  demo scenario. The real defect this phase fixes: since the Phase 16
+  Part B agents-as-tools rewrite, every specialist call is an isolated,
+  fresh `ainvoke()` that can't see what an earlier specialist call in
+  the SAME turn returned — the supervisor has always had to re-type
+  every concrete value (time, address, phone number) into each next
   instruction, invisibly, until a multi-app chain actually needs it.
   Load-bearing decisions locked at the grilling checkpoint, each the
   user's own explicit call (full ADR-style reasoning in PLAN.md's Phase
@@ -144,17 +144,44 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   single-action upfront path, rather than introducing a new risk
   category; an audit log records approved-vs-executed with NO cap on
   steps per workflow — also against the recommendation, requiring an
-  explicit `recursion_limit` above LangGraph's default 25 as the only
-  remaining backstop; prior specialists' results forward to the next one
-  VERBATIM with provenance labels rather than being supervisor-
-  summarized (summarizing was rejected as self-defeating — it's the
-  exact lossy re-transcription being fixed), with the accepted
-  consequence that untrusted content can now reach `mac_control_agent`'s
-  deliberately-ungated `open_url_in_brave`. A live probe of Reminders.app's
-  real AppleScript dictionary (during scoping, before any code) found
-  location-triggered reminders are a genuine platform impossibility, not
-  a scope choice — no location/geofence property exists on a reminder at
-  all — so the phase's proof workflows use time-based reminders instead.
+  explicit `recursion_limit` (`agent.py`'s `make_thread_config`, 50, up
+  from LangGraph's default 25) as the only remaining backstop; prior
+  specialists' results forward to the next one VERBATIM with provenance
+  labels rather than being supervisor-summarized (summarizing was
+  rejected as self-defeating — it's the exact lossy re-transcription
+  being fixed), with the accepted consequence that untrusted content can
+  now reach `mac_control_agent`'s deliberately-ungated
+  `open_url_in_brave`. A live probe of Reminders.app's real AppleScript
+  dictionary (during scoping, before any code) found location-triggered
+  reminders are a genuine platform impossibility, not a scope choice —
+  no location/geofence property exists on a reminder at all — so the
+  phase's proof workflows use time-based reminders instead.
+  **Built the same day** (STEPS.md 118): `assistant/workflow_store.py`
+  (new dedicated-file store), `supervisor.py`'s `propose_workflow` tool
+  + cross-specialist handoff (`_prior_specialist_results_this_turn`) +
+  executed-argument capture (`_extract_gated_action_executions`,
+  requiring ZERO changes to any existing gated tool's own code) +
+  `_record_workflow_progress`, two new `mac_tools.py` primitives
+  (`reminders_create` gained a due-date/alert, new `contacts_search`),
+  `server.py`'s `GET /workflows` + the phone channel's explicit
+  dashboard-approval message (decision D8), and a new dashboard
+  Workflows tab. **Live-verified against the real graph, not just unit-
+  tested:** a real `/chat` → ONE interrupt bundling two real gated
+  actions → `/resume` → both real side effects executed → a real
+  recorded audit showing executed args next to the approved plan —
+  deliberately proven with `write_disk_file`/`delete_disk_file` (already
+  permission-granted) rather than `calendar_create_event`/
+  `send_imessage`, per decision D11. Prompts re-synced to Langfuse
+  (Phase 18's exact lesson reproduced live again: a new prompt-guard
+  test failed against the stale remote "production" prompt until
+  re-synced). 330/332 backend tests pass, 86/86 frontend (2 pre-existing
+  unrelated backend failures; all lint/build clean modulo already-
+  documented pre-existing findings).
+  **Still open, blocked purely on the user, not on more code:** the two
+  ORIGINAL proof workflows (flight-chain, packing-chain) depend on
+  `send_imessage`/`photos_search`/`contacts_search`, none ever
+  live-verified against the real Messages.app/Photos.app/Contacts.app —
+  each needs its own first-run macOS Automation permission click.
   See PLAN.md's Phase 25 entry for the full decision set, steps, and
   done-when criteria.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
@@ -561,11 +588,13 @@ in the project's history — see its own PLAN.md entry), 24 unattended
 pre-approved automations (a new, deliberately narrow exception to the
 standing confirmation gate). All four are PLANNED, not ACTIVE — see
 PLAN.md for full scope, none built yet. Phase 25 (cross-app workflow
-chaining) opened 2026-07-28 via its own `/grill-with-docs` session
-(STEPS.md 117), ahead of any code — the first pass over-narrowed to a
-single flight-confirmation example, corrected once the user clarified
-they wanted the general cross-app-chaining capability itself, not one
-demo scenario. See PLAN.md.
+chaining) opened AND built 2026-07-28 via its own `/grill-with-docs`
+session (STEPS.md 117-118) — the first pass over-narrowed to a single
+flight-confirmation example, corrected once the user clarified they
+wanted the general cross-app-chaining capability itself, not one demo
+scenario. Its mechanism is code-complete and live-verified; its two
+original proof workflows remain blocked on the user's own permission
+grants (Messages/Photos/Contacts), not on any further code. See PLAN.md.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

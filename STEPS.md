@@ -9530,3 +9530,120 @@ piece"), and pushing real family contact info to a public repo is not
 something a general "commit and push" instruction should be read as
 covering without it being named explicitly. Left untracked for the user
 to decide on (redact, gitignore, or explicitly confirm) once back.
+
+## 118. Phase 25 built: cross-app workflow chaining mechanism (2026-07-28)
+
+**What:** built the mechanism scoped in group 117's grilling session,
+autonomously, while the user was away (explicitly authorized to commit
+and push this session only — "commit and push yourself for this time i
+approve it"). Steps 1-8 of the phase's own PLAN.md entry, in order:
+
+1. `assistant/workflow_store.py` + `workflows.sqlite` — same dedicated-
+   file pattern as `thread_store`/`board_store`/`automation_store`/
+   `phone_store`. Two tables (`workflow_runs`/`workflow_steps`); each
+   step row holds BOTH the approved `planned_summary` and the real
+   `executed_args`/`outcome` side by side, so the audit is a single-row
+   read, not a reconstructed diff. 8/8 direct unit tests.
+2. `mac_tools.py`: `reminders_create` gained `remind_at`/`timezone`
+   (backward-compatible — no `remind_at` still uses the exact original
+   two-property AppleScript template), via the same `_iso_datetime_argv`
+   numeric-components conversion Calendar already uses. New
+   `contacts_search` (ungated, read-only). Both UNVERIFIED against the
+   real apps — Reminders is fine (see below), Contacts needs its own
+   first-run Automation permission.
+3. `supervisor.py`: `propose_workflow` (new tool, coexists with
+   `request_gated_action_confirmation` under a structurally-enforced
+   1-vs-2+ rule — rejects fewer than 2 steps with a message pointing at
+   the other tool); `_prior_specialist_results_this_turn` (forwards this
+   turn's earlier specialist ToolMessages, verbatim, with provenance
+   labels — correlates via the preceding AIMessage's own `tool_calls`,
+   never `ToolMessage.name`, so zero changes needed to
+   `call_specialist`'s own message construction);
+   `_extract_gated_action_executions` (classifies a specialist's own
+   internal tool_calls as executed/declined/errored by reading the
+   fixed `"Cancelled — user did not confirm."` string — confirmed
+   byte-identical across every gated tool in the codebase before relying
+   on it — and any `"Error"`-prefixed result, with ZERO changes to any
+   gated tool's own return shape); `_record_workflow_progress` (matches
+   executed actions to the approved plan's step list, finalizes the run
+   the moment one step fails — remaining steps marked `never_ran` right
+   there, since there's no separate "workflow finished" graph hook).
+   `agent.py`'s `make_thread_config` gained an explicit `recursion_limit`
+   (50, up from LangGraph's default 25) — the only backstop against a
+   runaway chain now that the phase's own decision (D3, against the
+   recommendation) carries no per-workflow step cap.
+4. `server.py`: `GET /workflows`/`GET /workflows/{id}` (read-only —
+   runs are only ever created/updated by the graph itself);
+   `ASSISTANT_WORKFLOWS_DB_PATH` env-var redirect, same convention as
+   every other store. A real, pre-existing gap found while adding
+   this: `tests/test_a2ui.py` (not `test_server.py`) is the file whose
+   env-var block actually takes effect, since pytest collects it first
+   alphabetically and it's the one that imports `assistant.server` —
+   `test_server.py`'s own board/phone/automations env vars are dead
+   code for that reason, a pre-existing issue in Phases 20/21/24's own
+   test setup, NOT fixed here (out of this phase's scope) — only
+   `ASSISTANT_WORKFLOWS_DB_PATH` was added to `test_a2ui.py`'s actual
+   first-importing block, so this phase's own tests don't join that
+   same gap. `_run_turn`'s auto-decline loop special-cased
+   `action == "propose_workflow"` (decision D8): returns a deterministic
+   "approve this on the dashboard" message instead of the generic
+   silent auto-decline every other text-only gate gets on this channel.
+5. `InterruptGate.tsx`: `WorkflowPlanGateBody` — every step shown
+   verbatim, in order, with its owning specialist; registered in
+   `ACTION_BODIES`/`ACTION_DESCRIPTIONS` (a `tsc` compile error caught a
+   real miss: the component was written but never actually registered
+   in `ACTION_BODIES`, so it would have silently fallen through to the
+   raw-JSON fallback). New `WorkflowsPanel.tsx` + `Workflows` dashboard
+   tab (`App.tsx`) — read-only, approved-plan-vs-executed-args side by
+   side per step, diverged steps flagged with a visible badge.
+6. Supervisor system prompt: explicit paragraph naming `propose_workflow`
+   and the 1-vs-2+ rule, read-then-propose ordering, and the stop-at-
+   failure instruction — assumed the Phase 18/20 "supervisor can't see a
+   capability it wasn't told about" routing-blindness bug would recur
+   here too. It did, in a testing sense: the new prompt-guard test
+   initially failed even after editing the local fallback, because
+   `prompts.get_prompt()` was still serving the STALE Langfuse
+   "production" prompt — the exact Phase 18 lesson, reproduced live
+   again. Fixed by re-running `scripts/sync_prompts_to_langfuse.py`
+   (all 7 prompts), after which the test passed.
+
+**Live verification (real graph, real Anthropic API calls, not
+mocked):**
+- `test_propose_workflow_bundles_two_gated_actions_into_one_confirmation`
+  — a real `/chat` call with an explicit instruction produced ONE
+  interrupt bundling `write_disk_file` + `delete_disk_file` (not two
+  separate gates); approving it via `/resume` executed BOTH real side
+  effects (a real file written, then really deleted) with no second
+  confirmation; `GET /workflows` afterward showed a `completed` run
+  with both steps' real executed arguments recorded, distinct from
+  their planned summaries. Deliberately used these two safe,
+  already-permission-granted actions rather than
+  `calendar_create_event`/`send_imessage`, per decision D11.
+- `test_phone_turn_propose_workflow_gets_explicit_dashboard_message` —
+  a workflow plan reached via `/phone/turn` returns the deterministic
+  dashboard-approval message, not a silent auto-decline.
+- Re-ran both AFTER the Langfuse re-sync to confirm the new prompt
+  text didn't change the outcome — still passed.
+
+**Not yet run live (genuinely blocked on the user, not on more code,
+per decision D11):** the two ORIGINAL proof workflows from the
+grilling session (the flight-chain and the packing-chain) — both need
+`send_imessage`/`photos_search`/`contacts_search`, none of which have
+ever executed against the real Messages.app/Photos.app/Contacts.app.
+Each needs its own first-run macOS Automation permission click.
+
+**Held back from this session's commit/push:**
+`workspace/user_profile.md` (see group 117) — still untracked,
+unresolved.
+
+**Tests:** 330/332 backend (2 new store-only files:
+`tests/test_workflow_store.py` 8 tests, plus additions to
+`test_mac_tools.py`/`test_supervisor.py`/`test_server.py`/
+`test_a2ui.py`) — the 2 failures are the same pre-existing, unrelated
+ones (Langfuse rate-limit 429, `threads.sqlite` state-pollution flake).
+86/86 frontend (5 new: 1 `ChatPanel.test.tsx` addition, 4
+`WorkflowsPanel.test.tsx`). `ruff check .` clean (1 pre-existing,
+unrelated finding); `tsc --noEmit` clean; `prettier --check` clean
+(7 pre-existing, unrelated findings); `npm run build` succeeds. All
+pre-existing findings confirmed via `git stash` against unmodified
+`main`, not introduced here.

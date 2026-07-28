@@ -11,6 +11,7 @@ import { CostPanel } from "@/components/cost/CostPanel";
 import { CostSummaryCard } from "@/components/cost/CostSummaryCard";
 import { KanbanBoard } from "@/components/board/KanbanBoard";
 import { AutomationsPanel } from "@/components/automations/AutomationsPanel";
+import { WorkflowsPanel } from "@/components/workflows/WorkflowsPanel";
 import { InProgressTasksCard } from "@/components/board/InProgressTasksCard";
 import { ThreadSidebar } from "@/components/threads/ThreadSidebar";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
@@ -164,6 +165,12 @@ function App() {
             >
               Automations
             </TabsTrigger>
+            <TabsTrigger
+              value="workflows"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
+              Workflows
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="home" className="min-h-0 h-full">
             <HomePage greetingName="Mohit" onStartChat={startChatFromHome} />
@@ -190,6 +197,9 @@ function App() {
           </TabsContent>
           <TabsContent value="automations" className="min-h-0">
             <AutomationsPanel />
+          </TabsContent>
+          <TabsContent value="workflows" className="min-h-0">
+            <WorkflowsPanel />
           </TabsContent>
         </Tabs>
       </main>

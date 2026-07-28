@@ -149,6 +149,15 @@ _tmpdir = tempfile.mkdtemp(prefix="assistant_test_a2ui_")
 os.environ.setdefault("ASSISTANT_CONVERSATION_DB_PATH", os.path.join(_tmpdir, "conversation_memory.sqlite"))
 os.environ.setdefault("ASSISTANT_MEMORY_DB_PATH", os.path.join(_tmpdir, "long_term_memory.sqlite"))
 os.environ.setdefault("ASSISTANT_THREADS_DB_PATH", os.path.join(_tmpdir, "threads.sqlite"))
+# PLAN.md Phase 25: this file imports assistant.server below, and pytest
+# collects test_*.py alphabetically — test_a2ui.py runs before
+# test_server.py, so THIS is the block whose env vars actually take effect
+# (server.py's DB-path redirection only runs once, at that first import).
+# Board/phone/automations DB paths are pre-existing gaps in this same
+# block (not set here or anywhere collected before this file), which this
+# change does not attempt to fix — out of Phase 25's scope — but workflows
+# would join that same gap if left unset here, so it's added.
+os.environ.setdefault("ASSISTANT_WORKFLOWS_DB_PATH", os.path.join(_tmpdir, "workflows.sqlite"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 

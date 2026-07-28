@@ -695,3 +695,38 @@ export async function deleteAutomation(automationId: string): Promise<void> {
     );
   }
 }
+
+// Cross-app workflow runs (PLAN.md Phase 25) — read-only from this API's
+// side. A run is only ever created by supervisor.py's propose_workflow
+// tool (a real /chat -> gate -> /resume round trip) and only ever updated
+// by supervisor.py's own _record_workflow_progress as specialist calls
+// actually execute; there is no create/update/delete endpoint here to call.
+export interface WorkflowStep {
+  step_index: number;
+  action: string;
+  planned_summary: string;
+  executed_args: Record<string, unknown> | null;
+  outcome: "success" | "failed" | "never_ran" | null;
+  detail: string;
+  executed_at: string | null;
+  diverged: boolean;
+}
+
+export interface WorkflowRun {
+  id: string;
+  thread_id: string;
+  goal: string;
+  status: "running" | "completed" | "failed";
+  created_at: string;
+  completed_at: string | null;
+  steps: WorkflowStep[];
+}
+
+export async function fetchWorkflows(): Promise<WorkflowRun[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/workflows`);
+  if (!response.ok) {
+    throw new Error(`/workflows failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { workflows: WorkflowRun[] };
+  return body.workflows;
+}

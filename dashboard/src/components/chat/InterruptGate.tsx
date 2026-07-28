@@ -36,6 +36,9 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   send_imessage: "The assistant wants to send this iMessage:",
   write_disk_file: "The assistant wants to write this file OUTSIDE the workspace:",
   delete_disk_file: "The assistant wants to DELETE this file OUTSIDE the workspace:",
+  // PLAN.md Phase 25: one confirmation covering an entire multi-step,
+  // cross-specialist plan, not a single action — see WorkflowPlanGateBody.
+  propose_workflow: "The assistant wants to run this multi-step workflow:",
   // run_shortcut_on_phone is deliberately absent here — the user chose to
   // leave phone_tools.py's run_shortcut_on_phone ungated, so it never
   // gates and this entry would be dead/misleading code.
@@ -59,6 +62,9 @@ const ACTION_SOURCE: Record<string, string> = {
   send_imessage: "Messages",
   write_disk_file: "Full-disk access",
   delete_disk_file: "Full-disk access",
+  // propose_workflow is deliberately absent here — it spans MULTIPLE
+  // specialists (one per step), so no single source badge fits; each
+  // step shows its own owning specialist inline instead (WorkflowPlanGateBody).
 };
 
 function str(v: unknown, fallback = ""): string {
@@ -356,6 +362,43 @@ function DeleteDiskFileGateBody({ payload }: { payload: InterruptPayload }) {
   );
 }
 
+// supervisor.py's propose_workflow (PLAN.md Phase 25) — ONE confirmation
+// bundling 2+ gated actions across specialists, decision D2's own
+// tradeoff: this card shows the SUPERVISOR's own summary of each step,
+// not necessarily byte-identical to what the specialist ends up actually
+// constructing (same accepted gap as every single-action upfront
+// confirmation already has — see supervisor.py's module docstring).
+// Every step rendered verbatim, in order, with its owning specialist —
+// no step may be summarized away or collapsed.
+function WorkflowPlanGateBody({ payload }: { payload: InterruptPayload }) {
+  const steps = Array.isArray(payload.steps) ? (payload.steps as Record<string, unknown>[]) : [];
+  return (
+    <div className="space-y-3" data-testid="interrupt-workflow-steps">
+      <Field label="Goal" value={str(payload.goal, "(none)")} />
+      <div className="space-y-2">
+        {steps.map((step, i) => (
+          <div
+            key={i}
+            className="rounded-md border p-2"
+            data-testid={`interrupt-workflow-step-${i}`}
+          >
+            <div className="mb-1 flex items-center gap-2">
+              <Badge variant="neutral" label={`Step ${i + 1}`} />
+              <span className="text-sm font-medium">{str(step.action, "(unknown action)")}</span>
+              {typeof step.specialist === "string" && step.specialist && (
+                <span className="text-xs text-muted-foreground">via {step.specialist}</span>
+              )}
+            </div>
+            <VerbatimBlock testId={`interrupt-workflow-step-${i}-summary`}>
+              {str(step.summary)}
+            </VerbatimBlock>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => React.ReactElement> =
   {
     send_email: EmailGateBody,
@@ -371,6 +414,7 @@ const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => Re
     send_imessage: IMessageGateBody,
     write_disk_file: WriteDiskFileGateBody,
     delete_disk_file: DeleteDiskFileGateBody,
+    propose_workflow: WorkflowPlanGateBody,
   };
 
 // The confirmation-gate UI affordance PLAN.md's Phase 9 step 3 requires.

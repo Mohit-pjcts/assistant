@@ -39,7 +39,20 @@ def make_thread_config(thread_id: str) -> dict[str, Any]:
         thread_id: Identifier for the conversation thread (e.g. a UUID
             generated once per CLI session).
     """
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    config: dict[str, Any] = {
+        "configurable": {"thread_id": thread_id, "checkpoint_ns": ""},
+        # PLAN.md Phase 25: cross-app workflows deliberately carry NO cap on
+        # steps per run (decision D3, the user's own explicit choice against
+        # the recommendation) — this recursion_limit is the only remaining
+        # backstop against a runaway multi-specialist chain, since
+        # LangGraph's own default (25) was sized for ordinary single-hop
+        # turns, not a supervisor loop that may now call
+        # propose_workflow + N specialist delegations + N confirmation
+        # round-trips in one turn. Raised, not removed — a genuinely
+        # unbounded chain should still hit a real (if generous) ceiling
+        # rather than run forever.
+        "recursion_limit": 50,
+    }
     callbacks = observability.langfuse_callbacks()
     if callbacks:
         config["callbacks"] = callbacks

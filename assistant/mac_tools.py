@@ -326,6 +326,44 @@ on run argv
 end run
 """
 
+# PLAN.md Phase 25: reminders_create's original two-property shape (name +
+# optional body) can't express "remind me before X" at all — a live probe of
+# Reminders.app's real AppleScript dictionary during Phase 25's scoping
+# confirmed `due date` and `remind me date` both exist as settable
+# properties (no location/geofence property exists at all, which is why
+# this project's location-triggered-reminder idea was ruled out as a
+# platform impossibility rather than built). Both are set to the SAME value
+# here — Reminders.app's own UI ties "the date shown on a reminder" and
+# "when it actually alerts" together when both are set this way, so setting
+# only one of the two leaves the reminder either silently non-alerting or
+# alerting with no visible date in the list view.
+_REMINDERS_CREATE_WITH_REMINDER = """
+on run argv
+    set listName to item 1 of argv
+    set theTitle to item 2 of argv
+    set theNotes to item 3 of argv
+    set remindDate to current date
+    set day of remindDate to 1
+    set year of remindDate to (item 4 of argv) as integer
+    set month of remindDate to (item 5 of argv) as integer
+    set day of remindDate to (item 6 of argv) as integer
+    set time of remindDate to (item 7 of argv) as integer
+    tell application "Reminders"
+        if listName is "" then
+            set targetList to default list
+        else
+            set targetList to list listName
+        end if
+        if theNotes is "" then
+            make new reminder in targetList with properties {name:theTitle, due date:remindDate, remind me date:remindDate}
+        else
+            make new reminder in targetList with properties {name:theTitle, body:theNotes, due date:remindDate, remind me date:remindDate}
+        end if
+    end tell
+    return "Created reminder: " & theTitle
+end run
+"""
+
 
 @tool
 def reminders_list(list_name: str = "") -> str:
@@ -338,15 +376,40 @@ def reminders_list(list_name: str = "") -> str:
 
 
 @tool
-def reminders_create(title: str, list_name: str = "", notes: str = "") -> str:
-    """Create a new reminder.
+def reminders_create(
+    title: str,
+    list_name: str = "",
+    notes: str = "",
+    remind_at: str = "",
+    timezone: str = "",
+) -> str:
+    """Create a new reminder, optionally with a due date/alert time — use
+    this whenever the request is "remind me at/before <time>", not just a
+    plain checklist item.
 
     Args:
         title: The reminder's title.
         list_name: The Reminders list to add it to, or empty for the default list.
         notes: Optional notes/body text.
+        remind_at: Optional ISO 8601 date/time (e.g. '2026-07-30T08:00:00')
+            to set as the reminder's due date AND alert time — Reminders.app
+            will notify at this time. Leave empty for a plain reminder with
+            no due date/alert (this tool's original behavior).
+        timezone: IANA timezone name (e.g. 'America/Los_Angeles') that
+            remind_at is expressed IN — REQUIRED if remind_at is given,
+            converted to this Mac's own system timezone before creating
+            (Reminders.app has no separate per-reminder timezone field,
+            same reasoning as this module's Apple Calendar tools).
     """
-    return _run_osascript(_REMINDERS_CREATE, [list_name, title, notes])
+    if not remind_at:
+        return _run_osascript(_REMINDERS_CREATE, [list_name, title, notes])
+    if not timezone:
+        return "Error: timezone is required when remind_at is provided."
+    try:
+        components = _iso_datetime_argv(remind_at, timezone)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        return f"Error: could not parse remind_at/timezone: {exc}"
+    return _run_osascript(_REMINDERS_CREATE_WITH_REMINDER, [list_name, title, notes, *components])
 
 
 # --- Notes --------------------------------------------------------------
@@ -473,6 +536,55 @@ def photos_export(item_id: str, filename: str) -> str:
     if result.startswith("Error:"):
         return result
     return f"Exported to workspace/{rel_path}"
+
+
+# --- Contacts (Contacts.app search — Phase 25) ------------------------------
+#
+# Same read-only precedent as Reminders/Notes/Photos above — ungated. Added
+# specifically to unblock cross-app workflows that need to resolve a name to
+# a phone number without that number already being saved in this project's
+# own long-term memory (memory already covers saved contacts; this covers
+# everyone else in the user's real address book). Read-only, no create/
+# update/delete — Contacts.app write access was never asked for and isn't
+# built here. UNVERIFIED against the real app (same as Messages.app/
+# Photos.app before it): an osascript call against Contacts.app triggers its
+# own first-run Automation permission dialog, needing the user's own click.
+
+_CONTACTS_SEARCH = """
+on run argv
+    set theQuery to item 1 of argv
+    tell application "Contacts"
+        set matchedPeople to (every person whose name contains theQuery)
+        set output to ""
+        set cnt to 0
+        repeat with p in matchedPeople
+            if cnt >= 10 then exit repeat
+            set phoneList to ""
+            repeat with ph in phones of p
+                if phoneList is not "" then set phoneList to phoneList & ";"
+                set phoneList to phoneList & (label of ph) & ":" & (value of ph)
+            end repeat
+            set output to output & (name of p) & "|" & phoneList & "\n"
+            set cnt to cnt + 1
+        end repeat
+        return output
+    end tell
+end run
+"""
+
+
+@tool
+def contacts_search(query: str) -> str:
+    """Search Contacts.app by name. Read-only; lists up to 10 matching
+    people with their saved phone numbers (label:number, semicolon-
+    separated for a person with more than one number). Use this only when
+    a name isn't already known from memory — check what you already know
+    first, since this is a slower, less certain source than a saved fact.
+
+    Args:
+        query: Name (or substring) to search for, e.g. "Rishabh".
+    """
+    return _run_osascript(_CONTACTS_SEARCH, [query], empty_ok=True)
 
 
 # --- Apple Calendar (Calendar.app — Phase 13) -------------------------------
@@ -1070,6 +1182,7 @@ UNGATED_TOOLS = [
     notes_create,
     photos_search,
     photos_export,
+    contacts_search,
     create_shortcut,
     calendar_list_events,
     # Deliberately ungated — see this module's docstring, 2026-07-15 checkpoint.
