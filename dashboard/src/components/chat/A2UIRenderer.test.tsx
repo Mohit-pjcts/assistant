@@ -70,11 +70,11 @@ describe("A2UIRenderer", () => {
     expect(container.querySelector('[data-orientation="vertical"]')).toBeInTheDocument();
   });
 
-  it("renders an Image with its url and alt text", () => {
+  it("renders an Image with its url and description as alt text", () => {
     const surface: A2UISurface = {
       surfaceId: "s1",
       components: [
-        { id: "root", component: "Image", url: "data:image/png;base64,AAAA", alt: "a chart" },
+        { id: "root", component: "Image", url: "data:image/png;base64,AAAA", description: "a chart" },
       ],
     };
     render(<A2UIRenderer surface={surface} />);
@@ -106,17 +106,22 @@ describe("A2UIRenderer", () => {
     const surface: A2UISurface = {
       surfaceId: "form-1",
       components: [
-        { id: "root", component: "Column", children: ["name", "attending", "meal", "go"] },
-        { id: "name", component: "TextField", label: "Guest name", path: "/name" },
-        { id: "attending", component: "CheckBox", label: "Attending?", path: "/attending" },
+        { id: "root", component: "Column", children: ["name", "attending", "meal", "go_label", "go"] },
+        { id: "name", component: "TextField", label: "Guest name", value: { path: "/name" } },
+        { id: "attending", component: "CheckBox", label: "Attending?", value: { path: "/attending" } },
         {
           id: "meal",
           component: "ChoicePicker",
           label: "Meal",
-          path: "/meal",
-          options: ["Veg", "Meat"],
+          value: { path: "/meal" },
+          options: [
+            { label: "Veg", value: "Veg" },
+            { label: "Meat", value: "Meat" },
+          ],
+          displayStyle: "chips",
         },
-        { id: "go", component: "Button", text: "RSVP", action: { name: "rsvp" } },
+        { id: "go_label", component: "Text", text: "RSVP" },
+        { id: "go", component: "Button", child: "go_label", action: { name: "rsvp" } },
       ],
     };
     render(<A2UIRenderer surface={surface} onAction={onAction} />);
@@ -129,7 +134,9 @@ describe("A2UIRenderer", () => {
     expect(onAction).toHaveBeenCalledWith("form-1", "rsvp", {
       "/name": "Ada Lovelace",
       "/attending": true,
-      "/meal": "Meat",
+      // Real A2UI's ChoicePicker.value is always a DynamicStringList
+      // (bound to a string array), even in mutuallyExclusive mode.
+      "/meal": ["Meat"],
     });
   });
 
@@ -139,16 +146,22 @@ describe("A2UIRenderer", () => {
     const surface: A2UISurface = {
       surfaceId: "form-2",
       components: [
-        { id: "root", component: "Column", children: ["toppings", "go"] },
+        { id: "root", component: "Column", children: ["toppings", "go_label", "go"] },
         {
           id: "toppings",
           component: "ChoicePicker",
           label: "Toppings",
-          path: "/toppings",
-          options: ["Cheese", "Olives", "Mushrooms"],
-          variant: "multiSelect",
+          value: { path: "/toppings" },
+          options: [
+            { label: "Cheese", value: "Cheese" },
+            { label: "Olives", value: "Olives" },
+            { label: "Mushrooms", value: "Mushrooms" },
+          ],
+          variant: "multipleSelection",
+          displayStyle: "chips",
         },
-        { id: "go", component: "Button", text: "Order", action: { name: "order" } },
+        { id: "go_label", component: "Text", text: "Order" },
+        { id: "go", component: "Button", child: "go_label", action: { name: "order" } },
       ],
     };
     render(<A2UIRenderer surface={surface} onAction={onAction} />);
@@ -166,7 +179,10 @@ describe("A2UIRenderer", () => {
     const user = userEvent.setup();
     const surface: A2UISurface = {
       surfaceId: "form-3",
-      components: [{ id: "root", component: "Button", text: "Go", action: { name: "go" } }],
+      components: [
+        { id: "label", component: "Text", text: "Go" },
+        { id: "root", component: "Button", child: "label", action: { name: "go" } },
+      ],
     };
     render(<A2UIRenderer surface={surface} />);
     await user.click(screen.getByRole("button", { name: "Go" }));
@@ -179,7 +195,10 @@ describe("A2UIRenderer", () => {
     const onAction = vi.fn();
     const surface: A2UISurface = {
       surfaceId: "form-4",
-      components: [{ id: "root", component: "Button", text: "Go", action: { name: "go" } }],
+      components: [
+        { id: "label", component: "Text", text: "Go" },
+        { id: "root", component: "Button", child: "label", action: { name: "go" } },
+      ],
     };
     render(<A2UIRenderer surface={surface} onAction={onAction} disabled />);
     const button = screen.getByRole("button", { name: "Go" });

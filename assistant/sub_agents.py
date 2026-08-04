@@ -78,10 +78,11 @@ from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
 from assistant import prompts
-from assistant.a2ui import build_render_ui_tool
+from assistant.a2ui import build_render_form_tool, build_render_ui_tool
 from assistant.board_tools import build_board_tools
 from assistant.disk_tools import build_disk_tools
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
+from assistant.media_tools import render_local_media, render_web_media
 from assistant.phone_tools import build_phone_action_tools
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
 from assistant.tools import execute_shell_command, read_file, web_search, write_file
@@ -130,7 +131,14 @@ CODING_SYSTEM_PROMPT_FALLBACK = (
     "Keychain files, browser cookie/password stores, .env-shaped files "
     "anywhere) are refused by all four of these tools even though you "
     "otherwise have full-disk access — if one of them returns that kind "
-    "of refusal, say so plainly rather than trying a workaround."
+    "of refusal, say so plainly rather than trying a workaround.\n\n"
+    "When the dashboard is the client and the user wants to actually SEE an "
+    "image or video file (not just find it), call render_local_media with "
+    "its path — it reads and embeds the file directly. Never try to read "
+    "an image/video's bytes yourself (via read_disk_file or a shell "
+    "command) and pass them along as text — a real photo's data is far "
+    "larger than you can generate in a single reply and will come back "
+    "truncated, producing a broken image."
 )
 
 CODING_SYSTEM_PROMPT = prompts.get_prompt(
@@ -170,6 +178,7 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
         write_file,
         execute_shell_command,
         *build_disk_tools(),
+        render_local_media,
         *(extra_tools or []),
     ]
     model = ChatAnthropic(model=CODING_MODEL_NAME, thinking={"type": "adaptive"})
@@ -203,9 +212,26 @@ RESEARCH_SYSTEM_PROMPT_FALLBACK = (
     "comparative, or list-shaped content (a comparison, a short list of "
     "sources or results) that would be awkward as plain prose, call "
     "render_ui to present it as a rich card/list alongside your reply — "
-    "not for every answer, only when it genuinely helps. render_ui never "
-    "itself performs an action; it has no effect at all outside the "
-    "dashboard."
+    "not for every answer, only when it genuinely helps. If what you need "
+    "instead is a few labeled fields plus a submit button, use render_form "
+    "instead — a simpler flat field-list contract for the same kind of "
+    "interactive form. Neither tool ever performs an action; neither has "
+    "any effect at all outside the dashboard.\n\n"
+    "When you do render_ui, structure it deliberately rather than dumping "
+    "a flat list: give the surface a clear one-line title, group each "
+    "distinct item (each source, each option being compared) into its own "
+    "Card, use Badge for short tags (a date, a rating, a count) instead of "
+    "folding them into a Text sentence, and use Row for a side-by-side "
+    "comparison of a few items vs. Column/List for a longer list. You are "
+    "the one holding the raw results — no one downstream will reorganize "
+    "this for you, so make the structure worth rendering.\n\n"
+    "When the dashboard is the client and the user wants to actually SEE a "
+    "real image or video from the web (not a description of one), call "
+    "render_web_media with its direct URL — it fetches and embeds the file "
+    "itself server-side. Never put a live http(s) URL directly into "
+    "render_ui's Image/Video url field (it's rejected — only base64 data "
+    "is accepted, specifically so a rendered surface can never phone home "
+    "to an external server on its own)."
 )
 
 RESEARCH_SYSTEM_PROMPT = prompts.get_prompt(
@@ -225,7 +251,7 @@ def build_research_agent() -> CompiledStateGraph:
     model = ChatAnthropic(model=RESEARCH_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
-        tools=[web_search, build_render_ui_tool()],
+        tools=[web_search, build_render_ui_tool(), build_render_form_tool(), render_web_media],
         system_prompt=RESEARCH_SYSTEM_PROMPT,
         middleware=[ThinkingBlockRepairMiddleware()],
         state_schema=GatedAgentState,
@@ -273,23 +299,36 @@ LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK = (
     "comparative, or list-shaped content (a set of calendar events, a list "
     "of emails, a comparison) that would be awkward as plain prose, call "
     "render_ui to present it as a rich card/list alongside your reply — "
-    "not for every answer, only when it genuinely helps. render_ui can "
-    "also render a small interactive form (TextField/CheckBox/ChoicePicker/"
-    "Button) when you need the user to supply a few specific values rather "
-    "than typing free text back — submitting it arrives as a normal new "
-    "message from them, which you handle like any other request. Either "
-    "way render_ui never itself performs an action or substitutes for a "
+    "not for every answer, only when it genuinely helps. When what you "
+    "need instead is a few labeled fields plus a submit button (asking the "
+    "user to supply a few specific values rather than typing free text "
+    "back), use render_form instead of render_ui — it takes a much "
+    "simpler flat field list (label/path/input type) rather than a full "
+    "component tree. Either way, submitting the form arrives as a normal "
+    "new message from them, which you handle like any other request, and "
+    "neither tool ever performs an action or substitutes for a "
     "confirmation gate — a write action still always goes through its own "
     "gated tool exactly as described above.\n\n"
+    "When you do render_ui, structure it deliberately rather than dumping "
+    "a flat list: give the surface a clear one-line title, group related "
+    "items into their own Card (one card per calendar event, one per "
+    "email, one per board column), use Badge for short tags (a time, a "
+    "priority, a sender, an unread count) instead of folding them into a "
+    "Text sentence, and use Row to lay a few cards side by side vs. "
+    "Column/List for a longer vertical list. You are the one holding the "
+    "raw data — no one downstream will reorganize this for you, so make "
+    "the structure worth rendering.\n\n"
     "You also have full, UNGATED access to the user's kanban board: "
-    "list_board_tasks, create_board_task, update_board_task, "
-    "move_board_task, delete_board_task. Unlike email/calendar/filter "
-    "writes above, board changes never need the user's confirmation first "
-    "— just act on board requests directly (create a task, move it to "
-    "done, delete it, etc.) the same turn they're asked for. Refer to "
-    "tasks by their ref (e.g. 'ONI-3') as shown in list_board_tasks' "
-    "output. When showing the board's current state, prefer render_ui "
-    "(a List or grouped Column layout) over a plain-text dump."
+    "list_board_tasks, render_board_ui, create_board_task, "
+    "update_board_task, move_board_task, delete_board_task. Unlike "
+    "email/calendar/filter writes above, board changes never need the "
+    "user's confirmation first — just act on board requests directly "
+    "(create a task, move it to done, delete it, etc.) the same turn "
+    "they're asked for. Refer to tasks by their ref (e.g. 'ONI-3') as "
+    "shown in list_board_tasks' output. When showing the board's current "
+    "state, call render_board_ui instead of render_ui — it takes no "
+    "arguments and renders the real board data directly, so you never "
+    "have to retype task titles/priorities yourself."
 )
 
 LIFE_ADMIN_SYSTEM_PROMPT = prompts.get_prompt(
@@ -378,6 +417,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
         tools=[
             *_select_life_admin_tools(mcp_tools),
             build_render_ui_tool(),
+            build_render_form_tool(),
             *build_board_tools(),
         ],
         system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
@@ -401,8 +441,11 @@ MAC_CONTROL_SYSTEM_PROMPT_FALLBACK = (
     "playlist by exact name); read and create Reminders; read and create "
     "Notes; search Photos.app by text (photos_search — matches people/"
     "places/objects/dates the way the app's own search bar does) and "
-    "export a found item into the workspace (photos_export) so it can be "
-    "viewed; open a "
+    "export a found item into the workspace (photos_export); when the "
+    "dashboard is the client and the user wants to actually SEE that item "
+    "(not just know its filename), call render_local_media on the path "
+    "photos_export returned — it reads and embeds the file directly, so "
+    "you never describe an image in text when you could just show it; open a "
     "blank Shortcut in the Shortcuts editor for the user to build and save "
     "themselves (you cannot pre-fill a name or actions, or finish creating "
     "one — there is no scriptable way to author a Shortcut's actual logic, "
@@ -497,7 +540,7 @@ def build_mac_control_agent() -> CompiledStateGraph:
     model = ChatAnthropic(model=MAC_CONTROL_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
-        tools=MAC_CONTROL_TOOLS,
+        tools=[*MAC_CONTROL_TOOLS, render_local_media],
         system_prompt=MAC_CONTROL_SYSTEM_PROMPT,
         middleware=[NoParallelMacWrites(), ThinkingBlockRepairMiddleware()],
         state_schema=GatedAgentState,

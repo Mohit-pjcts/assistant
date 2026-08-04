@@ -2654,3 +2654,108 @@ STEPS.md updated. `send_imessage`/`photos_search`/`contacts_search`
 remain explicitly labeled UNVERIFIED (not silently assumed working)
 until the user completes one permission-granting session on the real
 Mac.
+
+---
+
+## Phase 26 — A2UI full Basic Catalog parity, `render_form`, and media rendering — CODE COMPLETE, UNVERIFIED, TEST COVERAGE GAP (built 2026-08-04, STEPS.md 119)
+
+**Not opened via its own scoping session ahead of code, unlike Phases
+21-25** — found as uncommitted working-tree changes at the start of the
+session that wrote this entry, on top of Phase 25's already-committed
+HEAD. This entry, and STEPS.md 119, are reconstructed from the diff and
+from the extensive in-code rationale each new piece already carries in
+its own docstrings/comments (cited by file below) — not from a prior
+plan or a live conversation record, since neither exists for this work.
+
+**Objective:** replace Phase 17/18's ad-hoc, project-invented `render_ui`
+vocabulary with Google's real A2UI v0.9 Basic Catalog (18 component
+types, real field names, real `dataModel`/path-binding), add a simpler
+flat-field contract (`render_form`) for the common "labeled fields plus
+a submit button" case so the model stops hand-assembling that structure
+from scratch every call, and add a way to get real image/video bytes
+into a rendered surface without a model ever handling them as text
+(`media_tools.py`) — the last one fixing a real, live-diagnosed failure
+(a shelled-out `base64` call silently truncating a real screenshot's
+bytes, confirmed independently via a failed Langfuse-side decode).
+
+**Delivered — full detail in STEPS.md 119, summarized here:**
+- `assistant/a2ui.py`: full 18-type Basic Catalog parity
+  (`Icon`/`Video`/`AudioPlayer`/`Tabs`/`Modal`/`Slider`/`DateTimeInput`
+  new; existing types gained real optional fields); `TextField`/
+  `CheckBox`/`ChoicePicker`'s value now binds via `{"value": {"path":
+  ...}}` instead of the old flat `"path"` key; `Button` now takes
+  `"child"` (a component id) instead of `"text"` — a breaking change to
+  every surface shape this project has produced, with `Badge` kept as
+  one deliberate non-spec local addition. New surface-level `dataModel`
+  (flat string-keyed dict) any `Dynamic*` field can bind against via
+  `{"path": ...}`. `MAX_SURFACE_CHARS` raised 20,000→6,000,000 to fit
+  embedded media. Fixed a real WebKit-vs-Chrome rendering bug
+  (`_is_base64_data_uri` — only `;base64,` data URIs accepted now, not
+  any `data:` prefix). `dispatch_surface()` factored out as a shared
+  validate-then-dispatch tail for `render_ui`/`render_form`/
+  `render_board_ui`.
+- `render_form` (new tool, wired into the supervisor/`research_agent`/
+  `life_admin_agent`): a flat `{label, path, input, options?, value?}`
+  field-list contract that expands into a full validated `render_ui`
+  surface server-side, instead of the model re-deriving ids/children/
+  `Button.action`'s closed shape from scratch every call.
+- `assistant/media_tools.py` (new): `render_local_media` (full-disk
+  read reusing `disk_tools._is_credential_path` directly; images
+  downsample to server.py's own 1568px long-edge convention; video
+  capped at 3MB, no transcoding) and `render_web_media` (server-side
+  fetch with an SSRF guard — scheme/redirect/DNS-resolved-private-IP/
+  content-type checks, 8MB cap — so the browser itself never makes an
+  outbound request and the existing no-remote-URL rule stays intact).
+- `board_tools.py`'s `render_board_ui` (new): fetches real
+  `board_store` rows and binds them into a `"board-"`-prefixed surface's
+  `dataModel`, read by a new frontend `BoardSurfaceView` that mirrors
+  the real Board tab's own column/priority styling — the model never
+  retypes board contents into a hand-rolled `render_ui` call.
+- `supervisor.py`: fixed a real, live-reproduced bug (seen against the
+  kanban board and a Roth/Traditional IRA thread) where the supervisor
+  couldn't tell a delegated specialist had already rendered a surface
+  (that fact only ever lived in `additional_kwargs`, never in
+  model-visible `content`) and would sometimes render it again itself —
+  fixed by appending a visible note to the specialist tool's own
+  content. Also wired `render_form` in and added prompt guidance on
+  structuring a `render_ui` call deliberately (one Card per item, Badge
+  for tags, Row vs. Column/List) rather than dumping a flat list.
+- `A2UIRenderer.tsx`/`api.ts`: new per-type renderers for all 7 new
+  component types, `dataModel` path-resolution helpers, and
+  `BoardSurfaceView`.
+
+**Verification status — does not meet this project's normal bar for
+calling a phase done, flagged rather than glossed over:**
+- **No live verification exists for any of it** — no real `/chat` round
+  trip through `render_form`, `render_local_media`, `render_web_media`,
+  or `render_board_ui` against the actually-running backend/dashboard is
+  recorded. The two bugs this phase fixes were each live-diagnosed from
+  a real report before the fix; the fixes themselves are not
+  re-verified live.
+- **Test coverage did not grow to match the new surface area.** Backend:
+  331/332 pass, an UNCHANGED count from Phase 25 — `tests/test_a2ui.py`
+  was only edited to match the new required shapes, not extended; no
+  test file exists at all for `media_tools.py` (zero coverage of the
+  SSRF guard, both size caps, the downsample path, every rejection
+  branch); no tests for the 7 new component types, `dataModel`
+  validation, `render_form`'s expansion logic, `render_board_ui`, or the
+  base64-vs-`;utf8` fix. Frontend: 86/86 pass, also an unchanged count
+  despite `A2UIRenderer.tsx` gaining 7 new node renderers and
+  `BoardSurfaceView` — its test files were only updated to the new
+  fixture shapes.
+- `ruff check .`/`tsc --noEmit` clean (1 pre-existing, unrelated ruff
+  finding, same as Phase 25). `prettier --check`: 9 findings, up from
+  Phase 25's 7 — **2 newly introduced by this work**
+  (`A2UIRenderer.tsx`, `A2UIRenderer.test.tsx`), not yet fixed.
+- **Nothing here is committed** — sits on top of Phase 25's `67dc534` as
+  unstaged modifications plus one untracked new file
+  (`assistant/media_tools.py`).
+
+**Done-when (not yet met):** each new tool run at least once against
+the real dashboard/backend; `tests/test_media_tools.py` written (SSRF
+guard, both caps, downsample, every rejection path); `test_a2ui.py`
+extended for the 7 new component types + `dataModel` + `render_form` +
+`render_board_ui`; `A2UIRenderer.test.tsx` extended for the new nodes
+and `BoardSurfaceView`; the two newly-dirty frontend files run through
+`prettier --write`; a commit boundary once the above closes the gap
+between "code complete" and this project's usual done bar.

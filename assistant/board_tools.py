@@ -25,9 +25,14 @@ a caller already has one from a prior list_board_tasks call.
 
 from __future__ import annotations
 
-from langchain_core.tools import tool
+import uuid
+from typing import Annotated, Any
+
+from langchain_core.tools import InjectedToolCallId, tool
+from langgraph.types import Command
 
 from assistant import board_store
+from assistant.a2ui import dispatch_surface
 
 
 async def _resolve_id(ref_or_id: str) -> str:
@@ -62,6 +67,101 @@ async def list_board_tasks() -> str:
     if not items:
         return "The board is empty — no tasks in any column."
     return "\n".join(_format_item(item) for item in items)
+
+
+_COLUMN_TITLES: dict[board_store.ColumnId, str] = {
+    "todo": "To Do",
+    "in-progress": "In Progress",
+    "in-review": "In Review",
+    "done": "Done",
+}
+
+
+@tool
+async def render_board_ui(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+    """Render the kanban board as a rich card layout in the dashboard,
+    visually matching the real Board tab — one column per status, one card
+    per task, with the same ref/priority badges, title, description, and
+    "updated X ago" the Board tab itself shows.
+
+    Takes NO arguments. Unlike render_ui, you never describe the board's
+    content yourself: this tool fetches the real board state directly from
+    board_store and binds every field (ref/title/description/priority/
+    column/updated_at) to the surface's own dataModel by path, rather than
+    you retyping it into the surface — so nothing can be mistyped,
+    paraphrased, or drift from what list_board_tasks would show. Prefer
+    this over calling render_ui by hand whenever you're asked to show the
+    board. Has no effect outside the dashboard, same as render_ui/
+    render_form.
+    """
+    items = await board_store.list_items()
+    data_model: dict[str, str] = {}
+    components: list[dict[str, Any]] = []
+    column_card_ids: list[str] = []
+
+    for column in board_store.COLUMNS:
+        column_items = [item for item in items if item.column == column]
+        col_id = f"col_{column}"
+        heading_id = f"{col_id}_heading"
+        heading_path = f"/{col_id}/heading"
+        data_model[heading_path] = f"{_COLUMN_TITLES[column]} ({len(column_items)})"
+        components.append({"id": heading_id, "component": "Badge", "text": {"path": heading_path}})
+        col_children = [heading_id]
+
+        if not column_items:
+            empty_id = f"{col_id}_empty"
+            components.append({"id": empty_id, "component": "Text", "text": "No tasks"})
+            col_children.append(empty_id)
+
+        for item in column_items:
+            title_id = f"{item.id}_title"
+            priority_id = f"{item.id}_priority"
+            title_path = f"/{item.id}/title"
+            priority_path = f"/{item.id}/priority"
+            # Raw values (not pre-formatted) — the dedicated board renderer
+            # (A2UIRenderer.tsx's BoardSurfaceView, keyed off this tool's
+            # own "board-" surfaceId prefix) reads these same paths
+            # directly and maps priority/column through the SAME label/
+            # color meta the real Board tab uses (KanbanBoard.tsx's
+            # PRIORITY_META/COLUMNS), for visual parity rather than a
+            # generic Text/Badge dump. `ref`/`description`/`column`/
+            # `updated_at` below have no corresponding generic component
+            # node — that's fine, dataModel entries don't require one —
+            # they exist purely for BoardSurfaceView to read.
+            data_model[title_path] = item.title
+            data_model[priority_path] = item.priority
+            data_model[f"/{item.id}/ref"] = item.ref
+            data_model[f"/{item.id}/description"] = item.description
+            data_model[f"/{item.id}/column"] = item.column
+            data_model[f"/{item.id}/updated_at"] = item.updated_at
+            components.append({"id": title_id, "component": "Text", "text": {"path": title_path}})
+            components.append({"id": priority_id, "component": "Badge", "text": {"path": priority_path}})
+
+            task_col_id = f"{item.id}_col"
+            components.append({"id": task_col_id, "component": "Column", "children": [title_id, priority_id]})
+            task_card_id = f"{item.id}_card"
+            components.append({"id": task_card_id, "component": "Card", "child": task_col_id})
+            col_children.append(task_card_id)
+
+        col_col_id = f"{col_id}_col"
+        components.append({"id": col_col_id, "component": "Column", "children": col_children})
+        col_card_id = f"{col_id}_card"
+        components.append({"id": col_card_id, "component": "Card", "child": col_col_id})
+        column_card_ids.append(col_card_id)
+
+    components.append({"id": "root", "component": "Row", "children": column_card_ids})
+    surface = {
+        # The "board-" prefix is a deliberate, load-bearing contract with
+        # the frontend (A2UIRenderer.tsx checks for it) — same "client and
+        # server agree on a well-known id ahead of time" pattern real A2UI
+        # uses for catalog negotiation, just scoped to one surface shape
+        # instead of a whole component catalog. Don't rename this prefix
+        # without updating BoardSurfaceView's own check.
+        "surfaceId": f"board-{uuid.uuid4().hex[:8]}",
+        "components": components,
+        "dataModel": data_model,
+    }
+    return await dispatch_surface(surface, tool_call_id, "render_board_ui rejected the board surface")
 
 
 @tool
@@ -157,6 +257,7 @@ async def delete_board_task(ref: str) -> str:
 def build_board_tools() -> list:
     return [
         list_board_tasks,
+        render_board_ui,
         create_board_task,
         update_board_task,
         move_board_task,

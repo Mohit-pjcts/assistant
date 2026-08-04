@@ -9647,3 +9647,249 @@ unrelated finding); `tsc --noEmit` clean; `prettier --check` clean
 (7 pre-existing, unrelated findings); `npm run build` succeeds. All
 pre-existing findings confirmed via `git stash` against unmodified
 `main`, not introduced here.
+
+## 119. Phase 26 built: A2UI full Basic Catalog parity, `render_form`, and media rendering (2026-08-04)
+
+**Not opened via a `/grill-with-docs` scoping session like Phases 21-25
+— built directly, in-code docstrings carry the "why" for each piece
+(cited below), and this entry is the first place any of it is recorded.
+Found entirely as uncommitted working-tree changes at the start of this
+session** (`git status` showed `a2ui.py`/`board_tools.py`/`sub_agents.py`/
+`supervisor.py` modified, `assistant/media_tools.py` untracked, on top
+of the already-committed Phase 25 HEAD) — this group exists to give that
+work a record, not to narrate a session that just happened live.
+
+**Objective, reconstructed from the diff and its own comments:** Phase
+17/18's `render_ui` shipped a small, ad-hoc 8-type vocabulary
+(Text/Badge/Divider/Image/Column/Row/List/Card, plus Part B's
+TextField/CheckBox/ChoicePicker/Button) with project-invented field
+names, not Google's real A2UI v0.9 Basic Catalog shape. This phase
+replaces it with real spec parity, adds a simpler form-authoring
+contract on top of it, and adds a way to get real image/video bytes
+into a surface without a model ever handling them as text.
+
+**1. `assistant/a2ui.py` — full Basic Catalog parity (rewrite, +700/-296
+lines).** All 18 real catalog component types now validate against the
+real spec's own field names: `Icon`/`Video`/`AudioPlayer`/`Tabs`/`Modal`/
+`Slider`/`DateTimeInput` are new; `Text`/`Image`/`Row`/`Column`/`List`
+gained real optional fields (`variant`, `fit`, `justify`/`align`, etc.);
+`TextField`/`CheckBox`/`ChoicePicker` were restructured so a field's
+current value is `{"value": {"path": ...}}` (a real `DynamicString`/
+`DynamicBoolean`/`DynamicStringList` binding) instead of the old
+project-invented flat `"path"` key; `Button` now requires `"child"` (a
+component id, usually a `Text`) instead of a bare `"text"` string, same
+`{"name": <str>}`-only `action` shape as before — this is a breaking
+change to every surface this project has ever produced, and
+`tests/test_a2ui.py`/`ChatPanel.test.tsx`/`A2UIRenderer.test.tsx` were
+all updated to the new shapes (see Tests below — updated, not
+extended). `Badge` is kept as one deliberate local, non-spec addition
+(documented on its own `COMPONENT_SCHEMA` entry) since nothing in the
+real catalog covers a compact tag/pill and `render_board_ui` (below)
+already depends on it. New top-level `dataModel` field on a surface (a
+flat string-keyed dict) that any `Dynamic*`-typed field can bind against
+via `{"path": "/some/key"}` instead of a literal — this is what lets
+`render_board_ui` and `render_form` (below) hand real fetched/templated
+data to the renderer without the model ever retyping it.
+`MAX_COMPONENTS` raised 50→80; `MAX_SURFACE_CHARS` raised
+20,000→6,000,000 (sized for `media_tools.py`'s embedded base64 image/
+video bytes — the old cap, sized for hand-typed JSON only, would have
+rejected every real embed). A real, live-diagnosed bug fixed in the same
+pass: `Image`/`Video`/`AudioPlayer` URLs now require the `;base64,`
+data-URI form specifically (`_is_base64_data_uri`), not just any
+`data:` prefix — a `data:image/svg+xml;utf8,<svg...>` surface rendered
+correctly in a Chrome tab but broke in the dashboard's actual WebKit-
+based Tauri WebView, traced to a real "images don't work" report.
+`dispatch_surface()` factored out of `render_ui`'s old tool body as a
+shared validate-then-dispatch tail, so `render_form` and
+`board_tools.py`'s `render_board_ui` (both below) get the exact same
+validation/dispatch/`Command`-shape guarantee instead of each
+hand-rolling a copy.
+
+**2. `render_form` (new tool, `a2ui.py` + wired into `supervisor.py`/
+`sub_agents.py`).** A flat, much smaller contract
+(`fields: [{label, path, input, options?, value?}]`, `submit_label`,
+`submit_action`, `title?`) that expands into a full `render_ui` surface
+server-side (`_build_form_surface`) — the model no longer hand-assembles
+ids, `Column`/`Card` wiring, or `Button`'s closed `action` shape for the
+single most common interactive case. The expanded surface is still run
+through the same `validate_surface()` as any `render_ui` call before
+dispatch, so `render_form` can never produce something `render_ui`
+itself would reject. Wired into the supervisor, `research_agent`, and
+`life_admin_agent` (not `coding_agent`/`mac_control_agent` — same v1
+scope call Phase 17/18 already made for `render_ui`, unchanged here).
+
+**3. `assistant/media_tools.py` (new file) — `render_local_media`/
+`render_web_media`.** Fixes a real, live-diagnosed failure mode
+documented in the module's own docstring: asking a model to read an
+image file and hand its base64 back as reply text breaks past a tiny
+file size, since a reply is a bounded model completion, not arbitrary
+storage — a real turn shelled out to `base64`, got a truncated string
+back (independently confirmed via a failed Langfuse-side decode,
+"Incorrect padding"), and shipped a broken image. Both tools read/fetch
+bytes directly in Python and call `dispatch_surface()` themselves — no
+model ever regenerates raw bytes as text.
+- `render_local_media(path)`: full-disk read, reusing
+  `disk_tools._is_credential_path` directly (imported, not
+  re-implemented, so the denylist can't drift between the two modules).
+  Images downsample to the same 1568px long-edge cap `server.py`'s own
+  upload handler already uses (`_downsample_image_bytes`, PNG kept for
+  real transparency, JPEG otherwise); video gets a flat 3MB cap and no
+  transcoding (no transcode dependency in this project). Wired into
+  `coding_agent`, `mac_control_agent` (photos_export results), and
+  named in `research_agent`/`life_admin_agent`'s prompts for
+  `render_web_media`.
+- `render_web_media(url)`: fetches SERVER-SIDE and embeds the result as
+  a `data:` URI — the browser itself never makes an outbound request,
+  preserving `a2ui.py`'s existing no-remote-URL rule rather than
+  reopening the tracking/exfiltration vector it was closed for. Guards,
+  since this now makes server-side requests to an agent(possibly
+  injected-content)-supplied URL: http/https only, no redirects
+  followed, every DNS-resolved IP checked against private/loopback/
+  link-local/reserved/multicast ranges before the request fires
+  (`_is_safe_public_host`), Content-Type must actually be `image/*` or
+  `video/*`, response streamed with an 8MB hard cap and a 15s timeout.
+  Wired into `research_agent`.
+
+**4. `board_tools.py` — `render_board_ui` (new tool).** Fetches the real
+board state from `board_store` directly and binds every field (ref/
+title/description/priority/column/updated_at) into the surface's
+`dataModel` by path rather than the model retyping board contents into
+a hand-rolled `render_ui` call — same "code builds the surface, not the
+model" pattern `media_tools.py` uses. Surface id is deliberately
+prefixed `"board-"`, a load-bearing contract with
+`A2UIRenderer.tsx`'s new `BoardSurfaceView` (below), which recognizes
+that prefix and renders the real Board tab's own column/priority
+styling (`KanbanBoard.tsx`'s `PRIORITY_META`/`COLUMNS`) instead of a
+generic component dump. Wired into `life_admin_agent`; its system
+prompt now tells the model to call `render_board_ui` (no arguments)
+instead of hand-rolling `render_ui` whenever asked to show the board.
+
+**5. `supervisor.py` — duplicate-render fix + `render_form` wiring +
+prompt restructuring guidance.** A real, live-reproduced bug named
+directly in the diff's own comment (seen against the kanban board and a
+Roth/Traditional IRA comparison thread): a delegated specialist's
+rendered surface only ever lands in a `ToolMessage`'s
+`additional_kwargs`, which the model never reads — so the supervisor
+had no way to know a specialist already rendered something, and would
+sometimes independently call `render_ui`/`render_form` again right
+after, producing two slightly different renderings of the same content
+in one turn. Fixed by appending a note to the specialist tool's
+`content` (the one channel the model actually reads) when a surface was
+forwarded, explicitly telling the supervisor not to re-render. Also:
+`render_form` added to the supervisor's own tool list; the system
+prompt gained a paragraph distinguishing `render_ui` vs. `render_form`
+and, for `research_agent`/`life_admin_agent`'s prompts specifically, new
+guidance on structuring a `render_ui` call deliberately (one Card per
+item, `Badge` for short tags, `Row` for side-by-side vs. `Column`/`List`
+for a longer list) rather than a flat dump.
+
+**6. Frontend — `A2UIRenderer.tsx` (+735/-\* lines), `api.ts`.** New
+per-type renderers (`IconNode`/`VideoNode`/`AudioPlayerNode`/`TabsNode`/
+`ModalNode`/`SliderNode`/`DateTimeInputNode`) plus `pathOf`/
+`resolveDynamicString`/`resolveDynamicNumber`/`resolveDynamicStringList`
+helpers that resolve a `{"path": ...}` binding against a surface's
+`dataModel`; `ButtonNode` updated for the new `child`-id shape. New
+`BoardSurfaceView` — recognizes a `"board-"`-prefixed `surfaceId`,
+parses its `dataModel` into per-column task cards
+(`parseBoardTasks`), and reuses `KanbanBoard.tsx`'s own priority/column
+styling for visual parity with the real Board tab rather than rendering
+it through the generic component tree. `api.ts`'s `A2UISurface` gained
+an optional `dataModel` field matching the new backend schema.
+
+**7. `.gitignore`.** Widened `workspace/user_profile.md` (Phase 25's
+own addition, STEPS.md 117) to the whole `workspace/` directory — the
+same reasoning generalized, a scratch/output dir that can end up
+holding files that must never be committed. Added
+`nova-superagent-agent-main/` + `.zip` — a separate, unrelated ServiceNow/
+AWS-Bedrock multi-agent codebase kept locally purely as a design
+comparison for `render_form`'s flat-field contract (its own
+`widget_signal` tool uses a similar shape), explicitly not this
+project's code and not meant to enter this repo's history.
+
+**Verification — genuinely incomplete, flagged rather than glossed
+over, unlike this project's usual practice of live-verifying UI/tool
+changes before calling them done:**
+- **No live verification of any of this exists** — no real `/chat`
+  round trip through `render_form`, `render_local_media`,
+  `render_web_media`, or `render_board_ui` against the actual running
+  backend/dashboard is recorded anywhere. The two bugs this phase fixes
+  (the WebKit base64 requirement, the supervisor duplicate-render) were
+  each live-diagnosed from a real report before the fix — but the FIXES
+  themselves have not been re-verified live.
+- **Backend test coverage did not grow to match the new surface.**
+  `tests/test_a2ui.py` was only edited (11 insertions/8 deletions) to
+  update existing tests to the new `Button.child`/`*.value={"path":...}`
+  shapes — no new tests exist for `Icon`/`Video`/`AudioPlayer`/`Tabs`/
+  `Modal`/`Slider`/`DateTimeInput` validation, `dataModel` validation/
+  binding, `render_form`'s expansion logic, `render_board_ui`, the
+  base64-vs-`;utf8` fix, or the supervisor duplicate-render note. **No
+  `tests/test_media_tools.py` file exists at all** — `render_local_media`/
+  `render_web_media` (including the SSRF guard, the downsample path, and
+  every rejection branch) have zero test coverage.
+  331/332 backend tests pass (unchanged count from Phase 25 — confirms
+  no new backend tests were added); the 1 failure is the same
+  pre-existing `threads.sqlite` state-pollution flake documented since
+  Phase 25 (re-ran twice, same flake both times, different random
+  thread ids).
+- **Frontend test coverage likewise did not grow.** 86/86 frontend
+  tests pass — the identical count as before this diff, despite
+  `A2UIRenderer.tsx` gaining 7 new node renderers and `BoardSurfaceView`.
+  `A2UIRenderer.test.tsx`/`ChatPanel.test.tsx` were only updated to the
+  new `Button`/`TextField` fixture shapes, not extended.
+  `ruff check .`: clean (1 pre-existing, unrelated `Awaitable`/`Callable`
+  import finding, confirmed identical to Phase 25's own). `tsc --noEmit`:
+  clean. **`prettier --check`: 9 findings, up from Phase 25's 7 — two
+  NEW, this session's own** (`A2UIRenderer.tsx`, `A2UIRenderer.test.tsx`
+  not yet run through `prettier --write`), a real small gap, not fixed
+  in this documentation pass.
+- **Nothing here is committed.** `media_tools.py` is untracked;
+  `a2ui.py`/`board_tools.py`/`sub_agents.py`/`supervisor.py`/`.gitignore`/
+  the four test files are modified-but-unstaged, all sitting on top of
+  Phase 25's already-committed HEAD (`67dc534`). Three unrelated stray
+  untracked files also exist in the repo root
+  (`conversation_memory.sqlite-x-checkpoints-*.bin`/`-metadata.bin`) —
+  not part of this work, left untouched.
+
+**Not yet done, in order:** run each tool at least once against the
+real running dashboard/backend; write `test_media_tools.py` (SSRF guard,
+downsample, both size caps, both rejection paths); extend
+`test_a2ui.py` for the 7 new component types + `dataModel` +
+`render_form` + `render_board_ui`; extend `A2UIRenderer.test.tsx` for
+the new nodes and `BoardSurfaceView`; run `prettier --write` on the two
+newly-dirty files; a commit boundary once the above closes the gap
+between "code complete" and this project's normal bar for calling a
+phase done.
+
+## 120. Dashboard-wide UI scale control, Cmd/Ctrl +/- (2026-08-04)
+
+**Found the same way as group 119 — an uncommitted change on top of
+Phase 25's HEAD, not opened via any prior scoping.** Small and
+self-contained (one new file + a one-line wiring change), unrelated in
+subject matter to group 119's A2UI/media work, so logged separately
+rather than folded into the Phase 26 entry.
+
+New `dashboard/src/lib/uiScale.tsx`: a `UiScaleProvider` context
+(`useUiScale`) that scales the entire app's font size in response to
+Cmd/Ctrl `+`/`-`/`0` (browser-zoom-style — `=`/`+` treated the same as
+the unshifted US-keyboard key, matching how the browser's own native
+zoom shortcut already behaves), clamped to 0.8x-1.6x in 0.1 steps,
+persisted to `localStorage` (`pa-ui-scale`) and re-applied on load —
+same persisted-preference shape as `theme.tsx`, survives a Tauri
+relaunch. Deliberately scales `document.documentElement.style.fontSize`
+rather than a CSS transform/zoom: the module's own comment cites
+Astryx's rem-based design system (icons/spacing/type all expressed in
+rem) as the reason one root font-size change cascades through the whole
+app without touching individual components. Wired in at the top of the
+provider tree in `main.tsx` (`ThemeProvider > UiScaleProvider >
+AstryxThemeBridge > App`).
+
+**Verification:** `npm run build` and `tsc --noEmit` both clean;
+`prettier --check` clean on both touched files (this one didn't add to
+the 2 new findings group 119 left open). Frontend test count unchanged
+at 86/86 — **no test file exists for `uiScale.tsx`** (no coverage of
+the clamp bounds, the keydown handler, or the `localStorage` round
+trip). Not live-verified in the actual running dashboard/Tauri window
+(no confirmation the keyboard shortcut doesn't collide with an existing
+browser/OS/Tauri binding, or that it behaves correctly across a real
+relaunch). Not committed — sits on top of the rest of this session's
+uncommitted changes.

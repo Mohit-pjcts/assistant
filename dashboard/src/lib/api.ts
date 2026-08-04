@@ -74,6 +74,14 @@ export interface A2UIComponent extends Record<string, unknown> {
 export interface A2UISurface {
   surfaceId: string;
   components: A2UIComponent[];
+  // Optional flat, string-keyed data model (assistant/a2ui.py's
+  // validate_surface) — a component's {"path": ...} binding resolves
+  // against this instead of a literal value, for data the AGENT never
+  // typed out itself (e.g. board_tools.py's render_board_ui binds real
+  // board_store rows here rather than having the model retype them).
+  // number/string[] added for the full basic-catalog parity pass
+  // (Slider.value / ChoicePicker.value are DynamicNumber/DynamicStringList).
+  dataModel?: Record<string, string | boolean | number | string[]>;
 }
 
 // PLAN.md Phase 19: server.py's `activity` SSE frame — supervisor.py's

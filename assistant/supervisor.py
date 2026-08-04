@@ -203,7 +203,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
 from assistant import observability, prompts, workflow_store
-from assistant.a2ui import A2UI_SURFACE_KEY, build_render_ui_tool
+from assistant.a2ui import A2UI_SURFACE_KEY, build_render_form_tool, build_render_ui_tool
 from assistant.compaction import (
     compact_history_node,
     is_compaction_summary,
@@ -372,20 +372,25 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "comparative, or list-shaped content (a set of calendar events, a "
     "comparison, a short list of options) that would be awkward as plain "
     "prose, call render_ui to present it as a rich card/list alongside your "
-    "reply — not for every answer, only when it genuinely helps. render_ui "
-    "can also render a small interactive form (TextField/CheckBox/"
-    "ChoicePicker/Button) when you need the user to supply a few specific "
-    "values rather than typing free text back — submitting it arrives as a "
-    "normal new message from them, which you handle like any other "
-    "request. Either way render_ui never itself performs an action or "
-    "substitutes for a confirmation gate. research_agent and "
-    "life_admin_agent ALSO have their own render_ui tool — they are the "
+    "reply — not for every answer, only when it genuinely helps. When what "
+    "you need instead is a few labeled fields plus a submit button (asking "
+    "the user to supply several specific values rather than typing free "
+    "text back), call render_form instead of render_ui — it takes a much "
+    "simpler flat field list (label/path/input type) instead of a full "
+    "component tree, and expands into the same kind of form render_ui's "
+    "TextField/CheckBox/ChoicePicker/Button components would. Either way, "
+    "submitting the form arrives as a normal new message from the user, "
+    "which you handle like any other request, and neither tool ever "
+    "performs an action or substitutes for a confirmation gate. "
+    "research_agent and "
+    "life_admin_agent ALSO have their own render_ui/render_form tools — "
+    "they are the "
     "ones holding the actual structured data (search results, calendar "
     "events, emails), so when you delegate to either of them, trust them "
     "to render their own results directly if that's warranted, rather than "
     "you reconstructing a card from their prose summary; don't refuse or "
-    "second-guess a request that asks you to delegate something render_ui-"
-    "shaped to one of them.\n\n"
+    "second-guess a request that asks you to delegate something render_ui/"
+    "render_form-shaped to one of them.\n\n"
     "Before delegating a request that clearly involves EXACTLY ONE of these "
     "specific actions — " + ", ".join(sorted(GATED_ACTIONS)) + " — call "
     "request_gated_action_confirmation FIRST, describing in `summary` "
@@ -1218,6 +1223,21 @@ def _make_specialist_tool(
         kwargs: dict[str, Any] = {}
         if surfaces:
             kwargs[A2UI_SURFACE_KEY] = surfaces
+            # Fixes a real, live-reproduced bug (kanban board + Roth/
+            # Traditional IRA threads): `surfaces` only ever lands in
+            # additional_kwargs, which never reaches the model — so the
+            # supervisor had no way to know this specialist already
+            # rendered a surface, and would sometimes independently call
+            # render_ui/render_form itself right after, producing two
+            # separate, slightly different renderings of the same content
+            # in one turn. This note rides in `content` (what the model
+            # actually reads next), the only channel that can reach it.
+            content += (
+                "\n\n[This specialist already rendered a UI surface for "
+                "this response via its own render_ui/render_form call — "
+                "do not call render_ui or render_form again for this same "
+                "content; just use the text above in your reply.]"
+            )
         if phone_actions:
             kwargs[PHONE_ACTION_KEY] = phone_actions
         return Command(
@@ -1286,6 +1306,7 @@ def build_supervisor(
         _make_confirmation_tool(),
         _make_propose_workflow_tool(),
         build_render_ui_tool(),
+        build_render_form_tool(),
         _make_specialist_tool(
             "coding_agent",
             _CODING_TOOL_DESCRIPTION,

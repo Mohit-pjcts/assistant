@@ -55,4 +55,14 @@ skills-lock.json
 # piece"), so it must never be committed. Found untracked and deliberately
 # excluded from a commit during Phase 25's build (STEPS.md 117-118); added
 # here so it can't land in history by accident later.
-workspace/user_profile.md
+workspace/
+
+# Nova superagent — a separate, unrelated ServiceNow/AWS-Bedrock multi-agent
+# codebase (Docker/Redis) dropped in for reference only (its widget_signal
+# tool's flat form-field contract, as a design comparison for this project's
+# own render_ui). Not this project's code, not meant to enter this portfolio
+# repo's history.
+nova-superagent-agent-main/
+nova-superagent-agent-main.zip
+
+

@@ -184,6 +184,55 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   each needs its own first-run macOS Automation permission click.
   See PLAN.md's Phase 25 entry for the full decision set, steps, and
   done-when criteria.
+- **Phase 26 — A2UI full Basic Catalog parity, `render_form`, and media
+  rendering: CODE COMPLETE, UNVERIFIED, TEST COVERAGE GAP (built
+  2026-08-04, STEPS.md 119, PLAN.md's own Phase 26 entry).** Found as
+  uncommitted working-tree changes at the start of the session that
+  wrote this status entry — not opened via a scoping session the way
+  Phases 21–25 were; reconstructed from the diff and each new piece's
+  own in-code rationale. Replaces Phase 17/18's ad-hoc 8-type `render_ui`
+  vocabulary (`assistant/a2ui.py`) with Google's real A2UI v0.9 Basic
+  Catalog (18 component types incl. new `Icon`/`Video`/`AudioPlayer`/
+  `Tabs`/`Modal`/`Slider`/`DateTimeInput`, real `dataModel`/path-binding,
+  a breaking `TextField`/`CheckBox`/`ChoicePicker`/`Button` field-shape
+  change from the old project-invented one) plus a real, live-diagnosed
+  WebKit-vs-Chrome base64 data-URI bug fix. New `render_form` tool (flat
+  field-list contract expanding into a full `render_ui` surface) wired
+  into the supervisor/`research_agent`/`life_admin_agent`. New
+  `assistant/media_tools.py` — `render_local_media`/`render_web_media`
+  fix a real diagnosed failure (a shelled-out `base64` call silently
+  truncating a real screenshot's bytes into a broken image); the web
+  variant fetches server-side behind an SSRF guard so the browser never
+  makes an outbound request. New `render_board_ui` (board_tools.py)
+  data-binds real `board_store` rows into a surface instead of the model
+  retyping them, read by a new frontend `BoardSurfaceView`. Also fixed a
+  real, live-reproduced supervisor bug (seen against the kanban board
+  and a Roth/Traditional IRA thread): a delegated specialist's already-
+  rendered surface was invisible to the supervisor's own model (lived
+  only in `additional_kwargs`), so it would sometimes render the same
+  content a second time — fixed via a visible note on the specialist
+  tool's own content. **Does not meet this project's normal done bar,
+  flagged rather than glossed over:** no live verification exists for
+  any of the new tools; backend/frontend test COUNTS are unchanged from
+  Phase 25 despite the large new surface area (`tests/test_a2ui.py` only
+  updated to the new shapes, not extended; no `test_media_tools.py`
+  exists at all — zero coverage of the SSRF guard, both size caps, and
+  every rejection path; `A2UIRenderer.test.tsx` likewise only updated,
+  not extended for the 7 new node types or `BoardSurfaceView`); 2 new
+  `prettier` findings introduced (`A2UIRenderer.tsx`/`.test.tsx`), not
+  yet fixed. Nothing here is committed — sits on top of Phase 25's
+  `67dc534` as unstaged modifications plus one untracked file
+  (`assistant/media_tools.py`). See PLAN.md's Phase 26 entry and
+  STEPS.md 119 for full detail and the remaining done-when list.
+- **Dashboard-wide UI scale control (Cmd/Ctrl +/-), built 2026-08-04,
+  STEPS.md 120 — not a numbered phase, small and unrelated to Phase 26,
+  logged separately.** New `dashboard/src/lib/uiScale.tsx`
+  (`UiScaleProvider`/`useUiScale`) scales the app's root font size
+  (0.8x-1.6x, `localStorage`-persisted) in response to Cmd/Ctrl
+  `+`/`-`/`0`, wired in at the top of `main.tsx`'s provider tree.
+  `tsc`/`prettier`/`npm run build` clean; no test file exists for it and
+  it has not been live-verified in the real running dashboard. Not
+  committed.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -595,6 +644,12 @@ wanted the general cross-app-chaining capability itself, not one demo
 scenario. Its mechanism is code-complete and live-verified; its two
 original proof workflows remain blocked on the user's own permission
 grants (Messages/Photos/Contacts), not on any further code. See PLAN.md.
+Phase 26 (A2UI full Basic Catalog parity, `render_form`, media
+rendering) was built 2026-08-04 without its own prior scoping session —
+found as uncommitted changes and documented after the fact (STEPS.md
+119). Code complete but does not meet this project's normal done bar:
+no live verification, no growth in test coverage despite a large new
+surface area, not yet committed. See PLAN.md's own Phase 26 entry.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

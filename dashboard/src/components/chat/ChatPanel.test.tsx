@@ -302,9 +302,10 @@ describe("ChatPanel", () => {
       onA2UI?.({
         surfaceId: "rsvp-1",
         components: [
-          { id: "root", component: "Column", children: ["name", "go"] },
-          { id: "name", component: "TextField", label: "Guest name", path: "/name" },
-          { id: "go", component: "Button", text: "RSVP", action: { name: "rsvp" } },
+          { id: "root", component: "Column", children: ["name", "go_label", "go"] },
+          { id: "name", component: "TextField", label: "Guest name", value: { path: "/name" } },
+          { id: "go_label", component: "Text", text: "RSVP" },
+          { id: "go", component: "Button", child: "go_label", action: { name: "rsvp" } },
         ],
       });
       return { type: "message", content: "Here's the form." };

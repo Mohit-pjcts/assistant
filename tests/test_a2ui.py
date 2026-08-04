@@ -111,7 +111,10 @@ def test_button_action_must_be_exactly_name(action: Any) -> None:
     Button from ever becoming a second side-effect channel."""
     surface = {
         "surfaceId": "s1",
-        "components": [{"id": "root", "component": "Button", "text": "Go", "action": action}],
+        "components": [
+            {"id": "label", "component": "Text", "text": "Go"},
+            {"id": "root", "component": "Button", "child": "label", "action": action},
+        ],
     }
     with pytest.raises(ValueError):
         validate_surface(surface)
@@ -121,23 +124,23 @@ def test_valid_interactive_form_passes() -> None:
     form = {
         "surfaceId": "s2",
         "components": [
-            {"id": "root", "component": "Column", "children": ["name", "attending", "meal", "go"]},
-            {"id": "name", "component": "TextField", "label": "Guest name", "path": "/name"},
+            {"id": "root", "component": "Column", "children": ["name", "attending", "meal", "go_label", "go"]},
+            {"id": "name", "component": "TextField", "label": "Guest name", "value": {"path": "/name"}},
             {
                 "id": "attending",
                 "component": "CheckBox",
                 "label": "Attending?",
-                "path": "/attending",
-                "value": True,
+                "value": {"path": "/attending"},
             },
             {
                 "id": "meal",
                 "component": "ChoicePicker",
                 "label": "Meal",
-                "path": "/meal",
-                "options": ["Veg", "Meat"],
+                "value": {"path": "/meal"},
+                "options": [{"label": "Veg", "value": "Veg"}, {"label": "Meat", "value": "Meat"}],
             },
-            {"id": "go", "component": "Button", "text": "RSVP", "action": {"name": "rsvp"}},
+            {"id": "go_label", "component": "Text", "text": "RSVP"},
+            {"id": "go", "component": "Button", "child": "go_label", "action": {"name": "rsvp"}},
         ],
     }
     validate_surface(form)  # must not raise
