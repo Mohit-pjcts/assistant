@@ -223,6 +223,15 @@ STEPS.md updated ✓ (groups 29–33).
 
 ## Phase 5 — Voice I/O — COMPLETE (2026-07-13)
 
+**Superseding note (2026-08-06, STEPS.md 123):** the daemon this phase
+delivered (v2, `voice_daemon.py`, described below) is RETIRED — Phase 9's
+own step 7 checkpoint below ("retire `voice_daemon.py` only once real
+parity is confirmed") is now resolved, just much later and in one step
+rather than gradually. Voice moved into the dashboard itself (in-app mic
+button + browser Web Speech TTS) at the user's direct request. This
+phase's own delivery record below is left exactly as originally written —
+historical, not current architecture.
+
 **Objective:** speak to the assistant and hear it answer; the text CLI stays
 fully intact.
 
@@ -545,7 +554,9 @@ section for the full annotated tree.
 **Objective:** a desktop app with a dashboard for the assistant — live chat,
 conversation history, and token/cost tracking. Voice I/O moving into the app
 is now a LATER pass within this phase, not this pass (see Decision 3 below) —
-`voice_daemon.py` keeps running unchanged for now.
+`voice_daemon.py` keeps running unchanged for now. (That "later pass" didn't
+happen until 2026-08-06, STEPS.md 123, and by then arrived as a one-shot
+retirement rather than a gradual parity-then-retire move — see step 7 above.)
 
 **Architectural fork, decided at planning, CONFIRMED at the scoping
 checkpoint:** the app is a CLIENT of the existing Python graph, it does NOT
@@ -630,9 +641,12 @@ below):**
    today/week/all-time windows, defensively degrading to a clear
    "not configured" state rather than breaking the other panels if
    `LANGSMITH_API_KEY` is missing.
-7. CHECKPOINT (separate from this phase's initial done-when): voice-in-app
-   sequencing — only after 1–6 are stable; retire `voice_daemon.py` only once
-   real parity is confirmed.
+7. **RESOLVED — 2026-08-06, STEPS.md 123, long after this phase's own
+   completion date.** This checkpoint sat open for over three weeks while
+   `voice_daemon.py` kept running as-is (per the note below it). Closed at
+   the user's direct request, not as a natural follow-on from steps 1–6:
+   voice moved into the dashboard (mic button + browser Web Speech TTS),
+   and the daemon was deleted outright rather than kept alongside it.
 
 **Initial-pass done-when status, checked explicitly (STEPS.md 60) — met at
 the code/test level, ONE caveat before calling it fully done:** all four
@@ -2759,3 +2773,205 @@ extended for the 7 new component types + `dataModel` + `render_form` +
 and `BoardSurfaceView`; the two newly-dirty frontend files run through
 `prettier --write`; a commit boundary once the above closes the gap
 between "code complete" and this project's usual done bar.
+
+---
+
+## Phase 27 — Obsidian vault: Oni's own note-store — CODE COMPLETE, LIVE-VERIFIED (scoped 2026-08-06 via `/grill-with-docs`, STEPS.md 124; built + live-verified 2026-08-07, STEPS.md 126)
+
+**Objective:** give Oni a persistent note-store modeled on the "second
+brain" idea — a place to keep information that doesn't need to be loaded
+into context every run (unlike `memory_store.py`'s small, curated Facts)
+but might be useful later, at a scale where redundancy is acceptable and
+Obsidian's `[[wikilinks]]` provide the organizing structure instead of a
+rigid schema. Scoped in a `/grill-with-docs` session before any code was
+written (STEPS.md 124); built and live-verified the next day (STEPS.md
+126). See `CONTEXT.md` for the Vault/Note/Fact/Workspace terminology this
+session crystallized, and `docs/adr/0001-*`/`0002-*` for the two decisions
+here that carry real, standing consequences.
+
+**Real facts found during scoping, not assumed:**
+- `disk_tools.py`'s ungated `search_disk`/`read_disk_file` — the tools this
+  phase was originally assumed to build on — turned out to be wired into
+  **no agent at all**. A same-day, uncommitted rewrite
+  (`assistant/claude_code_tool.py`) replaced `coding_agent`'s own hand-rolled
+  file tools with `run_claude_code`, a nested Claude Code CLI session with
+  full, ungated read/write/shell access to the whole home directory
+  (`--dangerously-skip-permissions`) — a much heavier, `coding_agent`-only
+  mechanism, not a fit for "recall something I wrote in my notes" during a
+  research/life-admin conversation. This phase builds a new, dedicated,
+  lightweight tool module instead of reusing either.
+- Three Obsidian vaults already exist on this Mac: this repo's own root
+  (`PA/.obsidian/`, gitignored, already holding this project's own
+  `PLAN.md`/`STEPS.md`/`CLAUDE.md` plus at least one personal note not
+  part of that convention), `~/Documents/Courses` (17 notes), and
+  `~/Documents/summer26/NovaWorks` (45 notes). None of these are reused —
+  seeded the choice of a fourth, dedicated vault (below), since mixing
+  Oni's own redundant scratch notes into any of the three risks either
+  polluting a git-tracked repo or conflating Oni's notes with the user's
+  own curated knowledge.
+- Surveyed the Obsidian-integration skill/tool landscape before choosing
+  an approach: `kepano/obsidian-skills@obsidian-markdown` (kepano is
+  Obsidian's own CEO — Steph Ango) is a pure syntax reference (wikilinks,
+  embeds, callouts, frontmatter, block IDs), zero tool/permission
+  footprint, installed as a reference. `bitbonsai/mcpvault@obsidian` is a
+  real MCP server for Obsidian (would have followed this project's own
+  Phase 2 Gmail/Calendar MCP precedent) but needs the Obsidian app actively
+  running for some operations and adds a new external process to trust;
+  `kepano/obsidian-skills@obsidian-cli` has the same "app must be running"
+  constraint. `mattpocock/skills@obsidian-vault` turned out to be one
+  person's hardcoded personal-vault conventions, not a reusable building
+  block. See Decision 2 below for why hand-rolling won over the MCP route.
+
+**Decisions locked (each the user's own explicit call):**
+1. **Mechanism:** a new, dedicated tool module, not `run_claude_code` and
+   not a revival of `disk_tools.py`'s dead ungated tools — cheap/fast reads
+   instead of a full agentic session per call, and not stapled to
+   `coding_agent`.
+2. **Implementation:** hand-rolled plain-file I/O (`assistant/
+   obsidian_tools.py`, mirrors `disk_tools.py`'s existing pattern), not an
+   MCP server — works whether or not Obsidian.app is open (matters for
+   automations/phone triggers, which can't guarantee the app is running),
+   and Obsidian's file format is genuinely simple enough not to need one.
+   `obsidian-markdown` (kepano/obsidian-skills) installed as a syntax
+   reference only — no tool access, no code execution.
+3. **Ownership:** `research_agent` + `life_admin_agent` only, to start —
+   mirrors the `render_ui`/`render_form` precedent (Phase 18) rather than
+   wiring into all four specialists immediately.
+4. **Vault:** a brand-new, dedicated vault at `~/Documents/OniVault` —
+   sibling to the user's other vaults, not nested in either, not reusing
+   this repo's own vault or the user's personal ones.
+5. **Tool shape — full CRUD, not create-only:** `search_vault`,
+   `read_vault_note`, `write_vault_note`, `update_vault_note`,
+   `delete_vault_note`. (The session's first pass toward a create-only,
+   atomic-notes-only shape was revised once the user asked for update and
+   delete too.)
+6. **Writes and deletes are fully ungated** — no `interrupt()`, no async
+   review queue like Facts get. The user will audit the Vault by opening
+   it in Obsidian directly rather than through any in-dashboard mechanism.
+   `delete_vault_note` refuses to delete any Note lacking an `oni: true`
+   frontmatter marker, so it can never remove a Note the user wrote
+   themselves. Full reasoning and consequences in `docs/adr/0001-*`.
+7. **Oni decides autonomously when to write** — not request-only. A
+   deliberate divergence from this same session's own "start narrow"
+   instinct (Decision 3); full reasoning and consequences in
+   `docs/adr/0002-*`.
+8. **Active linking is mandatory, not optional:** `write_vault_note` must
+   call `search_vault` for related Notes first and insert real
+   `[[wikilinks]]` to them — enforced by the tool's own contract, not left
+   to the model's discretion, since Decision 7 means Notes will accumulate
+   often enough that "linking only when the model happens to remember"
+   would produce exactly the disconnected pile the Vault exists to avoid.
+9. **Update semantics:** `update_vault_note` fully replaces a Note's body
+   (matches `write_disk_file`'s existing full-overwrite convention) but
+   must read the Note's current content back first and require the full
+   new body, not a diff — same discipline `write_disk_file` already has,
+   chosen over an append-only alternative specifically because Notes can
+   now also be things the user wrote themselves (Decision 5).
+10. **Per-turn write cap:** `write_vault_note`/`update_vault_note` combined
+    capped at 3 calls per model turn, refusing further calls with a
+    model-readable error — the only backstop against Decision 7's
+    autonomy turning into a runaway-cost or runaway-noise loop in one bad
+    turn. No `NoParallel*`-style middleware is needed the way `disk_tools.py`/
+    `mac_tools.py` need one, since nothing here calls `interrupt()` — that
+    failure mode (a second same-turn interrupt getting stranded) doesn't
+    apply to an ungated tool.
+11. **Search/read scope:** confined to the Vault directory only, not
+    whole-disk like `disk_tools.py`. Implemented as a directory walk +
+    text search, not Spotlight/`mdfind` — a Note written moments earlier
+    might not be Spotlight-indexed yet when immediately searched for,
+    which `disk_tools.py`'s `search_disk` never had to account for since
+    it was never used to search content Oni itself had just written.
+
+**Domain modeling, done live during scoping (`/domain-modeling`, found
+missing and installed from `mattpocock/skills` — the first time this
+project's `/grill-with-docs` skill has had its own named dependency
+actually available; Phase 25's own scoping session, STEPS.md 117, fell
+back to logging decisions in STEPS.md/PLAN.md directly for the same
+reason):** produced this project's first `CONTEXT.md` (Vault/Note/Fact/
+Workspace) and first two ADRs (`docs/adr/0001-*`, `0002-*`).
+
+**Delivered (STEPS.md 126):**
+- `assistant/obsidian_tools.py` — `search_vault`, `read_vault_note`,
+  `write_vault_note`, `update_vault_note`, `delete_vault_note`. The
+  per-turn write cap (Decision 10) turned out not to need its own
+  middleware — implemented as an `InjectedState` check inside the two
+  write-shaped tools themselves, the same mechanism `disk_tools.py`'s
+  gated tools already use to read `pre_approved_actions`, just counting
+  prior tool-call attempts instead of checking set membership.
+- **One deliberate extension beyond the locked design:** `update_vault_note`
+  carries the SAME `oni: true` authorship check `delete_vault_note` has
+  (Decision 6), even though `docs/adr/0001-*`'s own text only names
+  delete — an unprotected full-body overwrite is exactly as destructive as
+  an unprotected delete, so leaving update unguarded would have made the
+  delete protection pointless.
+- **One implementation refinement of Decision 8:** rather than requiring
+  the MODEL to call `search_vault` first and hand-type `[[wikilinks]]`,
+  `write_vault_note` performs the related-note search itself (title
+  keyword overlap) and appends the links mechanically — closer to "enforced
+  by the tool's own contract" than the original text's literal reading,
+  and removes any risk of a hallucinated link target.
+- Wired into `research_agent`/`life_admin_agent` (`sub_agents.py`), both
+  system prompts extended with "decide for yourself, don't ask permission
+  first" language per Decision 7/`docs/adr/0002-*`. `supervisor.py`'s
+  routing clause updated to name the vault explicitly for both
+  specialists — the routing-blindness risk this entry already flagged
+  (Phases 18/20's own precedent) was treated as assumed-to-recur, not
+  assumed away.
+- `~/Documents/OniVault` created on disk — already the same vault
+  `~/Documents/Courses` was separately, manually populated into at the
+  user's direct request the same session (STEPS.md 125), ahead of this
+  phase's own code landing. Not the same as making Obsidian recognize it
+  as a vault — the user still needs to "Open folder as vault" once.
+
+**Done-when — met, but only after a real incident corrected an
+overstated first pass (STEPS.md 127, in full):** the first "live-verified"
+claim rested on a script that called `research_agent` directly — proving
+the TOOLS work, not that the SUPERVISOR reliably routes real conversation
+to them. Running an actual 7-prompt test suite through the real running
+backend (not an isolated script) found it didn't: every vault-shaped
+request got misrouted to `mac_control_agent`'s Apple Notes.app tools
+instead (a real Apple Note was actually created, confirmed via
+`osascript`), and one "delete" request made the supervisor itself raise a
+`delete_disk_file`-shaped confirmation gate by lexical pattern-matching,
+despite vault actions never being in `GATED_ACTIONS` at all. Fixed with an
+explicit disambiguation rule in `supervisor.py`'s prompt ("note"/"vault"
+defaults to Oni's own vault unless the user explicitly says "Notes.app"/
+"Apple Notes") plus a matching defensive line in `mac_control_agent`'s own
+prompt. Re-running the suite against the fix got 6 of 7 correctly routing
+to the real vault tools — **and the 7th actually deleted a real,
+pre-existing course note**, exposing a second, more serious bug: all 138
+notes from STEPS.md 125's earlier course-population work had been
+mistakenly marked `oni: true` (Oni's-own-writes template misapplied to
+unrelated, non-Oni authorship), silently defeating `delete_vault_note`'s
+authorship check for the vault's entire actual content the whole time —
+the tool's code was correct throughout; the data it trusted was wrong.
+Recovered the deleted note byte-for-byte from this same session's own
+prior tool-call history, corrected the same mistake (`oni: true` →
+`oni: false`) across all 137 other notes via one verified `sed` pass, and
+re-confirmed live against the fixed backend and fixed data: the identical
+delete request now correctly refuses, file confirmed still present. A
+real conversation asking Oni to save a Note, and a separate request to
+recall it, are both now confirmed against the real graph with real
+Anthropic API calls AND real conversational phrasing through the real
+supervisor — not just unit tests, and not just a specialist called in
+isolation. 24 new tests pass alongside the existing suite (364/365, 1
+pre-existing unrelated flake) plus 35 existing `test_supervisor.py`/
+`test_sub_agents.py` tests unaffected; `ruff check .` clean (1
+pre-existing, unrelated finding); STEPS.md updated (126, then the
+incident and its fix in 127); all 7 prompts re-synced to Langfuse twice
+(once per prompt-fix round).
+
+**Standing lesson from this incident, worth carrying into every future
+phase's own verification, not just this one:** a script that bypasses the
+supervisor to call a specialist directly verifies the specialist, never
+the supervisor's own routing decision — "live-verified" should be read as
+a claim about what was actually exercised, not about what logically ought
+to work given passing unit tests.
+
+**Done-when — not met:** the per-turn cap stopping a real 4th write/update
+call within one live turn was NOT specifically live-provoked — forcing a
+real model to attempt exactly a 4th write in one turn isn't reliably
+reproducible without an artificial prompt. Covered by 2 direct unit tests
+against the tool functions instead (cap enforced at exactly 3, a 3rd call
+still succeeds); the mechanism is simple enough that this gap was judged
+not worth chasing further live.

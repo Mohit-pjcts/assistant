@@ -1,5 +1,4 @@
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { isTauri } from "@tauri-apps/api/core";
 import { Mic, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -47,13 +46,15 @@ interface PendingAttachment {
   previewUrl?: string;
 }
 
-// PLAN.md Phase 19: how often to check whether ANOTHER client (chiefly
-// voice I/O, which invokes the graph directly via its own ainvoke() —
-// voice_daemon.py's module docstring — completely outside this panel's own
-// SSE stream) has advanced this same thread. 4s is cheap (one /threads
-// fetch, already used by the sidebar) and fast enough that voice output
-// shows up without a manual reload, without polling aggressively enough to
-// matter for cost/rate limits.
+// PLAN.md Phase 19: how often to check whether ANOTHER client (the phone
+// channel, or an unattended automation — both invoke the graph directly via
+// their own ainvoke(), completely outside this panel's own SSE stream) has
+// advanced this same thread. In-app voice (this panel's own mic button) no
+// longer needs this — it flows through this panel's own handleSend, same as
+// typing, so it shows up live without any poll. 4s is cheap (one /threads
+// fetch, already used by the sidebar) and fast enough that an external
+// write shows up without a manual reload, without polling aggressively
+// enough to matter for cost/rate limits.
 const EXTERNAL_UPDATE_POLL_MS = 4000;
 
 // Phase 17 (PLAN.md): a completed assistant turn may carry zero or more
@@ -122,6 +123,15 @@ interface ChatPanelProps {
   // anything tied to this component's own mount lifecycle, so events
   // arriving after an unmount still land correctly.
   onActivity?: (event: AgentActivityEvent) => void;
+  // Called once whenever a stream settles WITHOUT a clean terminal frame —
+  // a user-requested stop, a backend error frame, or the connection simply
+  // dying mid-turn (a backend restart, a network drop). Lets App.tsx's
+  // shared useAgentActivity() state force-clear itself: without this, a
+  // tool call that was "running" when the stream died stays marked running
+  // forever, since nothing else in the event stream ever says otherwise
+  // (a real, live-observed bug — a stale "coding_agent" node stuck
+  // highlighted in the activity graph long after that turn had ended).
+  onStreamEnded?: () => void;
   // PLAN.md: set by App.tsx when the Home tab's landing composer (or one of
   // its prompt-suggestion cards) hands off a message — this panel sends it
   // through the exact same handleSend path a typed message would take, once
@@ -134,6 +144,7 @@ interface ChatPanelProps {
 
 export function ChatPanel({
   onActivity = () => {},
+  onStreamEnded = () => {},
   initialMessage = null,
   onConsumeInitialMessage = () => {},
 }: ChatPanelProps) {
@@ -149,17 +160,30 @@ export function ChatPanel({
   // other piece of ChatPanel's logic (streaming, interrupt, A2UI, the
   // external-update poll, stop handling) is completely unmodified.
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
-  // iPhone-access feature: browser-side voice input, only ever shown
-  // outside the Tauri app (the Mac already has its own always-on
-  // hotkey-driven voice daemon — a second, different voice affordance in
-  // the same desktop window would just be confusing). "recording" and
-  // "transcribing" are mutually exclusive UI states on the same mic
-  // button: tap to start, tap again to stop-and-upload, button stays
-  // disabled while the /voice/transcribe round trip is in flight.
+  // In-app voice I/O: browser-side mic capture, shared by the Tauri
+  // dashboard and the phone/PWA path (originally built as the iPhone-access
+  // feature — the mechanism doesn't care which client uploads to it). Used
+  // to be hidden inside Tauri behind an `isTauri()` check because the Mac
+  // ALSO had a separate always-on hotkey daemon (voice_daemon.py) at the
+  // time; that daemon is retired (see its own removal note) specifically
+  // because it wrote turns via its own isolated `ainvoke()` outside this
+  // panel's SSE stream, which is exactly why a voice turn never showed up
+  // without a manual refresh. Routing voice through this component's own
+  // handleSend instead means a voice turn IS a normal live turn — same
+  // streaming, same auto-scroll, no separate sync mechanism needed.
+  // "recording" and "transcribing" are mutually exclusive UI states on the
+  // same mic button: tap to start, tap again to stop-and-upload, button
+  // stays disabled while the /voice/transcribe round trip is in flight.
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  // Set right before handleSend() fires for a voice-originated turn, read
+  // (and cleared) once that turn's final message lands in applyResult —
+  // that's the signal to speak the reply aloud, mirroring how Claude/
+  // ChatGPT's voice mode answers back rather than just transcribing input.
+  // Never set for a typed turn, so ordinary text chat stays silent.
+  const voiceTurnRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamingTextRef = useRef("");
   // Surfaces rendered so far by the turn CURRENTLY in flight. Kept live
@@ -267,8 +291,21 @@ export function ChatPanel({
     setPendingA2ui([]);
   }
 
+  // Speaks a completed reply aloud via the browser's own Web Speech API —
+  // no backend TTS endpoint needed (unlike STT, which needs the real
+  // mlx-whisper model server-side). `speechSynthesis` is undefined in
+  // jsdom (ChatPanel.test.tsx), hence the guard rather than an assumed
+  // global.
+  function speakReply(text: string) {
+    if (!text.trim() || typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  }
+
   function applyResult(result: ChatTurnResult) {
     resetStreamingText();
+    const wasVoiceTurn = voiceTurnRef.current;
+    voiceTurnRef.current = false;
     if (result.type === "interrupt") {
       setPendingInterrupt(result.payload);
     } else {
@@ -282,6 +319,13 @@ export function ChatPanel({
         },
       ]);
       resetPendingA2ui();
+      // Deliberately not extended to the interrupt branch above: a gated
+      // action's confirmation card is still approve/decline-by-click only
+      // (voice_daemon.py's spoken-confirmation-answer path went with it,
+      // not rebuilt here — free-text gated payloads were never
+      // voice-approvable anyway per CLAUDE.md's security model, and the
+      // simple ones are one click away regardless).
+      if (wasVoiceTurn) speakReply(result.content);
     }
     setBusy(false);
   }
@@ -296,12 +340,32 @@ export function ChatPanel({
         ]);
       }
     } else {
-      setError(err instanceof Error ? err.message : String(err));
+      // `setError` alone isn't enough: it's local to this component, gets
+      // wiped by the very next handleSend/handleResume's own `setError(null)`,
+      // and disappears entirely the moment this panel unmounts (a tab
+      // switch away from Chat — Base UI's Tabs unmounts inactive panels).
+      // A real incident showed exactly that gap: a turn's connection died
+      // mid-tool-call, the transient error banner came and went unnoticed,
+      // and there was no other record anywhere that the turn never
+      // finished. Appending it to the transcript instead — same treatment
+      // "_Stopped._" already gets above — makes it a durable part of the
+      // conversation instead of a banner that can vanish before it's seen.
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      const partial = streamingTextRef.current;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `${partial ? `${partial}\n\n` : ""}_Connection to Oni was lost before this turn finished (${message}). It may not have completed — check Cost/History or try again._`,
+        },
+      ]);
     }
     stopRequestedRef.current = false;
     resetStreamingText();
     resetPendingA2ui();
     setBusy(false);
+    onStreamEnded();
   }
 
   function handleFilesSelected(next: File | File[] | null) {
@@ -389,7 +453,10 @@ export function ChatPanel({
         setTranscribing(true);
         transcribeVoice(blob)
           .then((text) => {
-            if (text.trim()) void handleSend(text);
+            if (text.trim()) {
+              voiceTurnRef.current = true;
+              void handleSend(text);
+            }
           })
           .catch((err: unknown) => {
             setError(err instanceof Error ? err.message : String(err));
@@ -600,23 +667,19 @@ export function ChatPanel({
               maxFiles={5}
               isDisabled={busy || pendingInterrupt !== null}
             />
-            {/* iPhone-access feature: never shown inside the Tauri app —
-                the Mac already has its own hotkey-driven voice daemon. */}
-            {!isTauri() && (
-              <button
-                type="button"
-                aria-label={recording ? "Stop recording" : "Record a voice message"}
-                onClick={() => void toggleRecording()}
-                disabled={transcribing || busy || pendingInterrupt !== null}
-                className={cn(
-                  "flex size-8 items-center justify-center rounded-full text-muted-foreground disabled:opacity-50",
-                  recording && "animate-pulse",
-                )}
-                style={recording ? { color: "var(--color-error)" } : undefined}
-              >
-                {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
-              </button>
-            )}
+            <button
+              type="button"
+              aria-label={recording ? "Stop recording" : "Record a voice message"}
+              onClick={() => void toggleRecording()}
+              disabled={transcribing || busy || pendingInterrupt !== null}
+              className={cn(
+                "flex size-8 items-center justify-center rounded-full text-muted-foreground disabled:opacity-50",
+                recording && "animate-pulse",
+              )}
+              style={recording ? { color: "var(--color-error)" } : undefined}
+            >
+              {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+            </button>
           </Fragment>
         }
         sendButton={

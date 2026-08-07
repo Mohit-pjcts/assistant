@@ -55,8 +55,9 @@ This is the one you'll assign to the Action Button. Build a new Shortcut named
    - **Dictate Text** — capture the answer.
    - **If** the dictated answer text **contains** "yes" → set a variable
      `Approved` to `true`; **Otherwise** → `Approved` = `false`.
-     (Match `voice_daemon.py`'s own fail-closed logic in spirit: only a clear
-     "yes" approves; anything else — including silence/unclear speech — declines.)
+     (Fail-closed, matching every other confirmation gate in this project:
+     only a clear "yes" approves; anything else — including silence/unclear
+     speech — declines.)
    - **Get Contents of URL**
      - URL: `http://<TAILSCALE-HOST>:8000/phone/resume`
      - Method: `POST`, header `Content-Type: application/json`

@@ -1,19 +1,19 @@
 # assistant
 
-A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI, an always-on voice daemon in the macOS menu bar, and a Tauri desktop dashboard — all three talking to the same conversation, the same memory, and the same graph. A supervisor routes each request to the right specialist sub-agent (coding, research, email/calendar, Mac control) and can chain several in one turn. Side-effectful actions — sending an email, creating a calendar event, running a Shortcut, writing a durable memory — always pause for an explicit confirmation first. The whole thing is built around the assumption that anything a tool returns (a search result, an email, a calendar event, a Note) could be adversarial.
+A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI and a Tauri desktop dashboard (voice included) — both talking to the same conversation, the same memory, and the same graph. A supervisor routes each request to the right specialist sub-agent (coding, research, email/calendar, Mac control) and can chain several in one turn. Side-effectful actions — sending an email, creating a calendar event, running a Shortcut, writing a durable memory — always pause for an explicit confirmation first. The whole thing is built around the assumption that anything a tool returns (a search result, an email, a calendar event, a Note) could be adversarial.
 
 ## What it can do today
 
-- Hold a conversation that persists across separate launches (SQLite-backed), routed by a supervisor to the right specialist sub-agent, with **multiple named conversation threads** you can create/switch/rename/delete from the CLI, voice, or the dashboard — not just one endless thread.
+- Hold a conversation that persists across separate launches (SQLite-backed), routed by a supervisor to the right specialist sub-agent, with **multiple named conversation threads** you can create/switch/rename/delete from the CLI or the dashboard — not just one endless thread.
 - **Coding**: read/write files in a sandboxed workspace and run shell commands there — argument-list execution only (never a shell interpreter), a denylist blocking destructive commands and AppleScript, and a confirmation gate on inline interpreter code (`python3 -c "..."`).
 - **Research**: search the web (Tavily); can resolve objective ambiguity itself (current date/time, a real-world fact) instead of asking you, while still asking when it's a genuine preference only you can supply.
 - **Life-admin**: search/read Gmail *and* send email, archive/label messages, and create/delete Gmail filters; search/read Google Calendar *and* create/update/delete events. Every write pauses for confirmation showing the verbatim content (real recipient, real body, real event details) — never an LLM summary of what it's about to do.
 - **Mac control**: open/focus an app, control Music.app playback, read/create Reminders and Notes, start a new Shortcut in the editor (you finish and save it), run a named Shortcut (confirmation-gated), read/create/update Apple Calendar events (create/update gated, mirrors the Google Calendar pattern), and open a URL in Brave.
 - **Memory**: short-term — conversation history is automatically compacted (summarized) once it grows large, so cost/latency don't scale with a thread's entire lifetime. Long-term — the agent can propose durable facts about you worth remembering across conversations (always behind a confirmation gate showing the exact fact text, never voice-approvable), recalled selectively on later turns, never dumped wholesale.
-- **Voice**: press Option+Return from any application to talk to it and hear it answer — an always-on menu bar daemon (🎙/🔴/💭 state), speech-to-text running fully locally (`mlx-whisper large-v3`, no audio ever leaves the machine), replies spoken via macOS `say`. Say "start a new conversation" to switch threads by voice. Voice and text share the same conversation history and thread; the confirmation gate works spoken too — except for anything with free-text content (email body, memory fact, event description), which is text-only by design (harder to vet by ear than an action verb).
-- **Dashboard ("Oni")**: a Tauri + React desktop app — a landing Home tab (adapted from an Astryx Playground design) that hands a typed message or a prompt-suggestion card straight into a live chat with token-streaming responses and a Stop button, full conversation history, memory viewer, a per-day/week/all-time cost panel (real LangSmith aggregates), a thread sidebar, a live right-hand rail (agent activity graph, tool-call timeline, cost summary), and a kanban board the assistant can read and write directly. Tauri owns the Python backend's and voice daemon's process lifecycle — launching the app starts both, quitting it stops both.
+- **Voice**: tap the mic button in the dashboard's chat composer to talk to it and hear it answer — speech-to-text running fully locally (`mlx-whisper large-v3`, no audio ever leaves the machine), replies spoken back via the browser's own Web Speech API. A voice turn is a normal chat turn (same streaming, same history) rather than a separate process, so it always shows up live, no refresh needed. Gated actions still confirm by click, same as typed turns — free-text gate content (email body, memory fact, event description) was never voice-approvable to begin with.
+- **Dashboard ("Oni")**: a Tauri + React desktop app — a landing Home tab (adapted from an Astryx Playground design) that hands a typed message, a prompt-suggestion card, or a recorded voice message straight into a live chat with token-streaming responses and a Stop button, full conversation history, memory viewer, a per-day/week/all-time cost panel (real LangSmith aggregates), a thread sidebar, a live right-hand rail (agent activity graph, tool-call timeline, cost summary), and a kanban board the assistant can read and write directly. Tauri owns the Python backend's process lifecycle — launching the app starts it, quitting it stops it.
 - **Photos and files in chat**: attach an image or a text file to a message; images are downsampled server-side before reaching Claude's vision model (keeps token cost sane on a large screenshot or photo).
-- Side-effectful or opaque actions pause the conversation for an explicit confirmation before executing, via a real LangGraph interrupt — not just a prompt instruction. In the text CLI that's a y/n prompt; in the dashboard it's a real UI affordance rendering the verbatim payload; in voice mode the question is spoken and the answer parsed fail-closed (anything that isn't a clear yes — mumble, silence, timeout — declines).
+- Side-effectful or opaque actions pause the conversation for an explicit confirmation before executing, via a real LangGraph interrupt — not just a prompt instruction. In the text CLI that's a y/n prompt; in the dashboard it's a real UI affordance rendering the verbatim payload, regardless of whether the turn that reached it was typed or spoken.
 
 Email, calendar, Note, and Shortcut content are all treated as untrusted input: the system prompts tell the model not to follow instructions embedded in message/event content or blindly trust what a Shortcut does, and — more importantly — the tools themselves are built so an adversarial instruction has nothing dangerous to reach even if the model is fooled. See [Security model](#security-model) below.
 
@@ -40,8 +40,9 @@ assistant/
 │                            verbatim payload (the raw MCP write tools never reach a model)
 ├── mcp_tools.py           # MCP integration: Gmail + Calendar, async, with interceptors
 ├── server.py              # FastAPI wrapper over the graph — /chat, /resume (SSE streaming +
-│                            stop-mid-run), /history, /memory/facts, /cost, /threads; shares the
-│                            CLI/voice daemon's real checkpointer + active-thread pointer
+│                            stop-mid-run), /history, /memory/facts, /cost, /threads,
+│                            /voice/transcribe; shares the CLI's real checkpointer +
+│                            active-thread pointer
 ├── interrupts.py          # Dummy confirmation-gated tool — the interrupt mechanic's test fixture
 ├── compaction.py          # Short-term context compaction + per-sub-agent history windowing
 ├── memory_store.py        # Long-term durable-facts storage (separate SQLite file)
@@ -53,9 +54,9 @@ assistant/
 │                            (local, in-app, fully reversible — not an external side effect)
 ├── thinking_repair.py     # Repairs a confirmed langchain-anthropic streaming bug so extended
 │                            thinking can stay enabled without corrupting conversation state
-├── voice_io.py            # Mic capture, local STT (mlx-whisper), `say` TTS, confirmation parsing
-├── voice_daemon.py        # Always-on menu bar daemon — global hotkey, same graph as the CLI,
-│                            "start a new conversation" trigger phrase for switching threads
+├── voice_io.py            # Local STT (mlx-whisper) reached via an arbitrary audio file —
+│                            server.py's /voice/transcribe, shared by the dashboard's own mic
+│                            button and the phone/PWA path
 └── memory.py              # get_checkpointer() — async context manager over AsyncSqliteSaver
 
 dashboard/                 # Tauri 2 + React + TypeScript desktop app ("Oni")
@@ -73,11 +74,9 @@ dashboard/                 # Tauri 2 + React + TypeScript desktop app ("Oni")
 │       ├── cost/           # LangSmith cost aggregates
 │       ├── threads/        # thread sidebar — new/switch/rename/delete
 │       └── activity/       # live agent-activity graph, tool-call timeline, status pill
-└── src-tauri/              # Rust shell — owns the Python backend's and voice daemon's process
-                               lifecycle end-to-end (spawn on launch, kill on quit)
+└── src-tauri/              # Rust shell — owns the Python backend's process lifecycle end-to-end
+                               (spawn on launch, kill on quit)
 
-launchd/          # Legacy LaunchAgent plist — superseded by Tauri's own process ownership;
-                    kept for the CLI-only-without-the-dashboard case
 tests/            # pytest-shaped (test_*.py / test_* / assert), run with `pytest`
 workspace/        # the ONLY directory file/shell tools (and confined MCP downloads) may touch
 PLAN.md           # phase-by-phase build plan; only one phase is ever "active"
@@ -88,7 +87,7 @@ A hand-built outer `StateGraph` (`supervisor.py`) holds a routing supervisor and
 
 Extended thinking (`thinking={"type": "adaptive"}`) is enabled on all five agent models, paired everywhere with `ThinkingBlockRepairMiddleware` — a real `langchain-anthropic` bug can drop a streamed thinking block's required field during SSE chunk merging, which the Anthropic API then rejects on replay; the middleware repairs the malformed shape before it ever reaches persisted state, rather than disabling the feature project-wide to avoid it.
 
-Voice mode (`voice_daemon.py`) and the dashboard are both wrappers around the *same* graph and the *same* thread registry, not separate agent logic — a conversation started by voice can be continued by keyboard or in the dashboard, and vice versa. Voice is internally three coordinated threads — a rumps menu bar app on the main thread (an AppKit hard requirement; all UI mutation is marshaled there), a dedicated asyncio loop for graph/STT/TTS work, and pynput's global-hotkey listener — with a small IDLE → RECORDING → PROCESSING state machine in between, and an extra ANSWERING state for spoken confirmation answers.
+Voice lives entirely inside the dashboard now, not a separate process: `ChatPanel.tsx`'s mic button records via the browser's own `MediaRecorder`, uploads to `server.py`'s `/voice/transcribe` (local mlx-whisper, same model the phone/PWA path already used), and feeds the transcript through the exact same `handleSend` a typed message takes — so a voice turn streams live into the open chat with no separate sync mechanism needed. Replies are spoken back via the browser's own Web Speech API, only for turns that originated by voice. (An earlier design ran voice as an always-on menu-bar daemon with a global Option+Return hotkey, retired in favor of this in-app version — see STEPS.md for the change.)
 
 ## Setup
 
@@ -122,7 +121,6 @@ cp .env.example .env   # then fill in the real values
 | `GMAIL_MCP_SERVER_PATH` | Gmail | Path to a built `Gmail-MCP-Server/dist/index.js` |
 | `GOOGLE_CALENDAR_MCP_SERVER_PATH` | Calendar | Path to a built `google-calendar-mcp/build/index.js` |
 | `GOOGLE_CALENDAR_MCP_CREDENTIALS` | Calendar | Path to that server's `gcp-oauth.keys.json` |
-| `ASSISTANT_TTS_VOICE` | Voice (optional) | TTS voice name, default `Ava (Premium)`; falls back to the system voice with a logged warning if not installed |
 
 Gmail and Calendar are optional at startup — if their env vars are unset or the servers aren't built yet, `main.py` prints a warning and runs without the `life_admin_agent` tools. Mac control needs no setup beyond running on macOS — see the permissions note below.
 
@@ -169,26 +167,9 @@ No API keys or config needed — but the first time each AppleScript-controlled 
 
 ### Voice mode
 
-Speech-to-text runs fully locally via [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) (`large-v3`, Apple Silicon only — no per-utterance API cost, no audio leaving the machine). The model preloads at startup so first-utterance latency isn't paid per turn.
+Voice lives inside the dashboard's chat composer — no separate process, no extra setup. Speech-to-text runs fully locally via [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) (`large-v3`, Apple Silicon only — no per-utterance API cost, no audio leaving the machine) behind `server.py`'s `/voice/transcribe`; the model loads lazily on first use rather than at server startup. Tap the mic button, speak, tap again to stop — the transcript sends like a typed message, and the reply is spoken back via the browser's own Web Speech API. The only permission involved is the standard macOS microphone prompt the Tauri window shows the first time you tap the mic (its `Info.plist` already declares `NSMicrophoneUsageDescription`) — no Input Monitoring or Full Disk Access grants needed.
 
-**Nicer voice (optional, recommended):** macOS's default `say` voice is robotic. Download an Enhanced/Premium voice once — System Settings → Accessibility → Spoken Content → System Voice → Manage Voices… — and either grab "Ava (Premium)" (the default this project looks for) or set `ASSISTANT_TTS_VOICE` to whichever you picked.
-
-**Run it directly** (or let the dashboard start it for you — see below):
-
-```sh
-.venv/bin/assistant-voice
-```
-
-A 🎙 icon appears in the menu bar. Press **Option+Return** (from any application) to start recording — 🔴 — and again to stop and submit; the reply is spoken and logged. Say "start a new conversation" to switch to a fresh thread. When a gated action needs confirmation, the daemon speaks the question and immediately starts recording your answer — say yes or no, then one Option+Return submits it (memory writes, email sends, calendar creates/updates, and filter writes are text-only, never voice-approvable — free-text content is harder to vet by ear than a verb like "send"). Quit from the menu bar icon. Transcripts, confirmation outcomes, and errors go to a self-rotating log at `~/Library/Logs/PersonalAssistant/voice_daemon.log`.
-
-**Permissions:** global hotkey listening needs the **Input Monitoring** TCC grant; running the daemon outside the dashboard (or via the legacy `launchd/` plist) also needs **Full Disk Access** to read a project under `~/Documents`. The venv's Python resolves through *two* distinct executables — the framework stub and the `Python.app` bundle it re-execs into — and macOS attributes grants per-binary, so **both** need **both** grants:
-
-```
-/opt/homebrew/Cellar/python@3.12/<version>/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-/opt/homebrew/Cellar/python@3.12/<version>/Frameworks/Python.framework/Versions/3.12/Resources/Python.app
-```
-
-Those grants pin to the versioned Cellar path, so a `brew upgrade python@3.12` requires re-granting.
+*(An earlier design ran voice as an always-on menu-bar daemon with a global Option+Return hotkey and spoken confirmation answers — retired in favor of the in-app version above; see STEPS.md for why.)*
 
 ### Dashboard app
 
@@ -198,7 +179,7 @@ npm install
 npm run tauri dev
 ```
 
-This launches the Tauri window, which itself spawns the Python backend (`uvicorn assistant.server:app`) and the voice daemon as child processes — quitting the window stops both. No need to run `assistant`/`assistant-voice` separately when using the dashboard. `npm run build` produces a release bundle.
+This launches the Tauri window, which itself spawns the Python backend (`uvicorn assistant.server:app`) as a child process — quitting the window stops it too. No need to run `assistant` separately when using the dashboard. `npm run build` produces a release bundle.
 
 ### Run (CLI only)
 
@@ -221,8 +202,7 @@ Threat model: any tool that touches the web, email, calendar, Notes, or Shortcut
 - **Gmail read**: `download_attachment`/`download_email` write to disk from inside the separate Node server process, outside `tools.py`'s own sandbox — an interceptor forces their save path into `workspace/` and reduces filenames to their basename.
 - **Cost**: an MCP tool that defaults to expanding up to 50 full email threads into context on a single call is capped by an interceptor, rather than trusting the model to pass a small limit.
 - **Long-term memory**: writing a durable fact is automatic (the agent decides what's worth saving) but layered: extraction only ever reads the genuine user's own current-turn text (never tool-result content, closing the "a prompt-injected 'remember X' becomes a permanent fact" hole structurally, not just behaviorally); a cited fact must be backed by a real tool result found independently in the current turn or it's refused outright; every write still goes through the same confirmation gate as any other side effect, with the exact confirmed text persisted verbatim; and recall is framed as data ("known facts...") to the model, never as directives.
-- **Standing confirmation rule**: any side-effectful or opaque action pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit confirmation before executing — demonstrated end-to-end (both confirm and decline paths) through the real CLI/dashboard/voice, not just tested in isolation. The kanban board (`board_tools.py`) is the deliberate exception this rule already carves out: local, in-app, fully reversible actions aren't gated — the same category `open_url_in_brave` sits in below.
-- **Voice confirmation fails closed**: the spoken answer only approves on a recognized affirmative — a mistranscription, ambiguous phrase, silence, or timeout all decline. Decline-words win when both appear.
+- **Standing confirmation rule**: any side-effectful or opaque action pauses the graph via a real `langgraph.types.interrupt()` and waits for an explicit confirmation before executing — demonstrated end-to-end (both confirm and decline paths) through the real CLI and dashboard, not just tested in isolation. A voice-originated turn hits the exact same click-based gate as a typed one — there is no separate voice-answerable path. The kanban board (`board_tools.py`) is the deliberate exception this rule already carves out: local, in-app, fully reversible actions aren't gated — the same category `open_url_in_brave` sits in below.
 - **Skill vetting**: a Claude Code skill is instruction-bearing content loaded into agent context — the same threat model as any other untrusted input. No skill is installed without reading it first; High/Medium-risk community skills are declined by default; bulk/marketplace installs are never used.
 
 Full reasoning, including several things that went wrong during development and how they were caught, is in [STEPS.md](STEPS.md).
@@ -258,4 +238,4 @@ See [PLAN.md](PLAN.md) for the full phase-by-phase plan.
 .venv/bin/pytest
 ```
 
-`tests/` is pytest-shaped (`def test_...(): assert ...`, `test_*.py` naming) and also runnable directly with plain `python tests/test_x.py` if you'd rather not install pytest. Most files hit real APIs (Anthropic, Tavily, LangSmith) rather than mocking — by design, per this project's testing convention — so a full run has a small real cost and takes about a minute. `test_mac_tools.py` and `test_voice_io.py` monkeypatch `subprocess.run` and hardware-touching internals throughout, so they run anywhere — no macOS apps, microphone, or permission grants required; live verification of the real integrations is manual and recorded in STEPS.md instead. No CI is wired up — a deliberate choice given the no-mocking convention (either paying for API calls on every push, or a lint-only CI that doesn't prove the suite passes); see STEPS.md.
+`tests/` is pytest-shaped (`def test_...(): assert ...`, `test_*.py` naming) and also runnable directly with plain `python tests/test_x.py` if you'd rather not install pytest. Most files hit real APIs (Anthropic, Tavily, LangSmith) rather than mocking — by design, per this project's testing convention — so a full run has a small real cost and takes about a minute. `test_mac_tools.py` monkeypatches `subprocess.run` throughout and `test_voice_io.py` monkeypatches the STT model call, so they run anywhere — no macOS apps, microphone, or permission grants required; live verification of the real integrations is manual and recorded in STEPS.md instead. No CI is wired up — a deliberate choice given the no-mocking convention (either paying for API calls on every push, or a lint-only CI that doesn't prove the suite passes); see STEPS.md.

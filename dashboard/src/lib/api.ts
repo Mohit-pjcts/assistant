@@ -738,3 +738,107 @@ export async function fetchWorkflows(): Promise<WorkflowRun[]> {
   const body = (await response.json()) as { workflows: WorkflowRun[] };
   return body.workflows;
 }
+
+// A real, live-diagnosed incident (STEPS.md 121-122): a turn silently
+// retried a failing render_ui call 43 times over ~28 minutes with nothing
+// telling the user it was even happening. This polls assistant/
+// active_turns.py's in-memory registry so ActiveTurnBanner can show any
+// in-flight turn — across every channel, not just the dashboard's own
+// current tab — regardless of who's watching. Polling, not SSE: the whole
+// point is visibility into turns this browser tab didn't itself start
+// (voice, phone, automations), so a per-request SSE stream can't cover it.
+export interface ActiveTurnInfo {
+  thread_id: string;
+  channel: "dashboard" | "voice" | "phone" | "automation" | "cli";
+  agent: string;
+  elapsed_seconds: number;
+  seconds_since_update: number;
+  step_count: number;
+  current_tool: string | null;
+  consecutive_failures: number;
+  stuck: boolean;
+}
+
+// Follow-up to the above: a turn that ends abnormally (backend error, a
+// cancellation) is otherwise invisible to any tab/channel other than the
+// one that started it the instant it drops out of ActiveTurnInfo — assistant/
+// active_turns.py's list_recent() keeps a short, time-windowed record of how
+// every turn ended so ActiveTurnBanner can show a brief notice instead of
+// silence.
+export interface RecentlyEndedTurn {
+  thread_id: string;
+  channel: "dashboard" | "voice" | "phone" | "automation" | "cli";
+  agent: string;
+  outcome: "completed" | "error" | "cancelled";
+  elapsed_seconds: number;
+  seconds_since_ended: number;
+}
+
+export async function fetchActiveTurns(): Promise<{
+  active: ActiveTurnInfo[];
+  recentlyEnded: RecentlyEndedTurn[];
+}> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/activity/active`);
+  if (!response.ok) {
+    throw new Error(`/activity/active failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as {
+    active: ActiveTurnInfo[];
+    recently_ended: RecentlyEndedTurn[];
+  };
+  return { active: body.active, recentlyEnded: body.recently_ended };
+}
+
+// run_claude_code's own nested Claude Code sessions (2026-08-06) — read-only
+// from this API's side, same as Workflows above: assistant/
+// claude_code_sessions.py parses the .jsonl transcripts Claude Code's own
+// CLI process writes, this server never writes them. These sessions are
+// invisible in Claude Code's own interactive session browser (tagged
+// entrypoint="sdk-cli", not a terminal session), so this panel is the only
+// place to see them. Polling, not SSE, per the same reasoning as
+// fetchActiveTurns above — a new session can land at any time from a turn
+// this browser tab didn't itself start.
+export interface ClaudeCodeSessionSummary {
+  session_id: string;
+  title: string;
+  prompt_preview: string;
+  started_at: string | null;
+  ended_at: string | null;
+  event_count: number;
+}
+
+export type ClaudeCodeSessionBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; content: unknown; is_error: boolean };
+
+export interface ClaudeCodeSessionTurn {
+  role: string;
+  blocks: ClaudeCodeSessionBlock[];
+  timestamp: string | null;
+}
+
+export interface ClaudeCodeSessionDetail {
+  session_id: string;
+  title: string | null;
+  turns: ClaudeCodeSessionTurn[];
+}
+
+export async function fetchClaudeCodeSessions(): Promise<ClaudeCodeSessionSummary[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/claude-code-sessions`);
+  if (!response.ok) {
+    throw new Error(`/claude-code-sessions failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { sessions: ClaudeCodeSessionSummary[] };
+  return body.sessions;
+}
+
+export async function fetchClaudeCodeSession(sessionId: string): Promise<ClaudeCodeSessionDetail> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/claude-code-sessions/${sessionId}`);
+  if (!response.ok) {
+    throw new Error(
+      `/claude-code-sessions/${sessionId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  return response.json() as Promise<ClaudeCodeSessionDetail>;
+}

@@ -74,18 +74,22 @@ from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
 from assistant import prompts
 from assistant.a2ui import build_render_form_tool, build_render_ui_tool
 from assistant.board_tools import build_board_tools
-from assistant.disk_tools import build_disk_tools
+from assistant.circuit_breaker import RepeatedToolFailureCircuitBreaker
+from assistant.claude_code_tool import build_claude_code_tools
+from assistant.disk_tools import GATED_TOOLS as DISK_GATED_TOOLS
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
 from assistant.media_tools import render_local_media, render_web_media
+from assistant.obsidian_tools import build_obsidian_tools
 from assistant.phone_tools import build_phone_action_tools
 from assistant.thinking_repair import ThinkingBlockRepairMiddleware
-from assistant.tools import execute_shell_command, read_file, web_search, write_file
+from assistant.tools import web_search
 from assistant.write_tools import build_write_tools
 
 # Self-contained on import, same reasoning as tools.py/agent.py.
@@ -107,38 +111,49 @@ class GatedAgentState(AgentState):
 CODING_MODEL_NAME = "claude-sonnet-5"
 
 # Langfuse prompt name: "coding-agent-system-prompt" (scripts/
-# sync_prompts_to_langfuse.py). Mandatory local fallback — extended at
-# Phase 23 (PLAN.md) with the full-disk search/read/write/delete tools;
-# byte-for-byte identical to the pre-Phase-23 text otherwise.
+# sync_prompts_to_langfuse.py). Mandatory local fallback — rewritten
+# 2026-08-06 to drop the workspace-confined read_file/write_file/
+# execute_shell_command/search_disk/read_disk_file tools entirely: a live
+# run showed the model still reaching for its own old tools (search_disk,
+# execute_shell_command) instead of the newly-added run_claude_code despite
+# prompt guidance to merely *prefer* it, so those were removed outright
+# rather than deprioritized again. write_disk_file/delete_disk_file are
+# kept as the one exception — Phase 25's workflow-audit mechanism
+# (supervisor.py's _extract_gated_action_executions) needs a literal tool
+# call by that exact name to know an approved step actually ran; see
+# build_coding_agent's own docstring for the full reasoning. See
+# claude_code_tool.py's module docstring for run_claude_code's full
+# scope/safety discussion.
 CODING_SYSTEM_PROMPT_FALLBACK = (
-    "You are the coding/file sub-agent of a personal assistant. You have "
-    "file read/write (confined to a local workspace directory) and shell "
-    "command execution (also confined to that workspace, with destructive "
-    "commands blocked). Use a tool when it would get a better or more "
-    "current answer than reasoning alone. Be direct and concise.\n\n"
-    "You ALSO have full-disk access, separate from the workspace-confined "
-    "tools above: search_disk (Spotlight search across the WHOLE Mac "
-    "filesystem, not just the workspace) and read_disk_file (read any "
-    "file found that way) are ungated — use them freely for requests "
-    "like 'find that PDF from last month' or 'what's in my Downloads "
-    "folder'. write_disk_file and delete_disk_file (writing/overwriting/ "
-    "deleting a file OUTSIDE the workspace) pause for the user's explicit "
-    "confirmation showing the exact path and content first — you will "
-    "always find out whether it was approved from the tool's own return "
-    "value, so just call the tool directly and act on the outcome rather "
-    "than asking the user to confirm in chat yourself first. A small, "
-    "fixed set of credential/secret paths (SSH keys, cloud credentials, "
-    "Keychain files, browser cookie/password stores, .env-shaped files "
-    "anywhere) are refused by all four of these tools even though you "
-    "otherwise have full-disk access — if one of them returns that kind "
-    "of refusal, say so plainly rather than trying a workaround.\n\n"
+    "You are the coding/file sub-agent of a personal assistant. For actual "
+    "coding/file/shell work, you have exactly one tool: run_claude_code. "
+    "It delegates the task to a real, separate Claude Code session with "
+    "full read/write/shell access rooted at the user's home directory (not "
+    "just a sandboxed workspace) — it can create, edit, and delete files "
+    "and run arbitrary commands anywhere reachable from there. It has no "
+    "memory of this conversation, so give it a complete, self-contained "
+    "task description every time, not a short follow-up. Be direct and "
+    "concise in your own reply summarizing what it did.\n\n"
+    "You ALSO have write_disk_file and delete_disk_file — use ONLY these "
+    "two (never run_claude_code) when the user is writing, overwriting, or "
+    "deleting a file OUTSIDE the workspace, since these are the specific "
+    "gated actions the rest of the system knows how to bundle into one "
+    "confirmation and audit as approved-vs-executed. Each pauses for the "
+    "user's explicit confirmation showing the exact path and content "
+    "first — you will always find out whether it was approved from the "
+    "tool's own return value, so just call the tool directly and act on "
+    "the outcome rather than asking the user to confirm in chat yourself "
+    "first. Both refuse a small, fixed set of credential/secret paths "
+    "(SSH keys, cloud credentials, Keychain files, browser cookie/password "
+    "stores, .env-shaped files anywhere) even though you otherwise have "
+    "full-disk access via them — if one returns that kind of refusal, say "
+    "so plainly rather than trying a workaround via run_claude_code.\n\n"
     "When the dashboard is the client and the user wants to actually SEE an "
     "image or video file (not just find it), call render_local_media with "
     "its path — it reads and embeds the file directly. Never try to read "
-    "an image/video's bytes yourself (via read_disk_file or a shell "
-    "command) and pass them along as text — a real photo's data is far "
-    "larger than you can generate in a single reply and will come back "
-    "truncated, producing a broken image."
+    "an image/video's bytes yourself and pass them along as text — a real "
+    "photo's data is far larger than you can generate in a single reply "
+    "and will come back truncated, producing a broken image."
 )
 
 CODING_SYSTEM_PROMPT = prompts.get_prompt(
@@ -168,16 +183,35 @@ class NoParallelCodingWrites(AgentMiddleware):
 def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledStateGraph:
     """Build the coding sub-agent.
 
+    All actual coding/file/shell work routes through run_claude_code
+    (assistant/claude_code_tool.py) — a real, nested Claude Code session
+    with full access rooted at the user's home directory — rather than this
+    agent's own hand-rolled read_file/write_file/execute_shell_command/
+    search_disk/read_disk_file. Those were removed outright (not just
+    deprioritized in the prompt) after a live run showed the model still
+    reaching for them instead of run_claude_code despite prompt guidance to
+    prefer it; see claude_code_tool.py's module docstring for the full
+    scope/safety discussion of what run_claude_code can do.
+
+    write_disk_file/delete_disk_file (disk_tools.py's two GATED tools) are
+    the one deliberate exception, kept even though run_claude_code could
+    technically do the same writes itself: supervisor.py's GATED_ACTION_OWNERS
+    and Phase 25's workflow-audit mechanism (_extract_gated_action_executions)
+    both key off a literal tool call named "write_disk_file"/"delete_disk_file"
+    inside this agent's own message list to know whether an approved
+    workflow step actually ran — removing them broke
+    test_propose_workflow_bundles_two_gated_actions_into_one_confirmation
+    (the run got stuck at "running" forever, since the model had no tool by
+    that name left to call) until they were restored here.
+
     Args:
-        extra_tools: Additional tools beyond the standard file/shell set —
-            currently used to wire in interrupts.send_test_notification for
-            the Phase 3 step-5 confirmation-gate demo.
+        extra_tools: Additional tools beyond the standard set — currently
+            used to wire in interrupts.send_test_notification for the
+            Phase 3 step-5 confirmation-gate demo.
     """
     tools = [
-        read_file,
-        write_file,
-        execute_shell_command,
-        *build_disk_tools(),
+        *build_claude_code_tools(),
+        *DISK_GATED_TOOLS,
         render_local_media,
         *(extra_tools or []),
     ]
@@ -186,7 +220,12 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
         model=model,
         tools=tools,
         system_prompt=CODING_SYSTEM_PROMPT,
-        middleware=[NoParallelCodingWrites(), ThinkingBlockRepairMiddleware()],
+        middleware=[
+            NoParallelCodingWrites(),
+            AnthropicPromptCachingMiddleware(),
+            RepeatedToolFailureCircuitBreaker(),
+            ThinkingBlockRepairMiddleware(),
+        ],
         state_schema=GatedAgentState,
         name="coding_agent",
     )
@@ -231,7 +270,22 @@ RESEARCH_SYSTEM_PROMPT_FALLBACK = (
     "itself server-side. Never put a live http(s) URL directly into "
     "render_ui's Image/Video url field (it's rejected — only base64 data "
     "is accepted, specifically so a rendered surface can never phone home "
-    "to an external server on its own)."
+    "to an external server on its own).\n\n"
+    "You also have Oni's own persistent note vault — search_vault, "
+    "read_vault_note, write_vault_note, update_vault_note, delete_vault_note. "
+    "This is different from your own working context: a place for things "
+    "that don't need to be loaded every run but might be worth finding "
+    "again later — a finding, a fact, something you researched. Decide for "
+    "yourself, without being asked, when something from this conversation "
+    "is worth saving; don't ask permission first, just call write_vault_note. "
+    "It always creates a NEW note and automatically links related existing "
+    "notes for you — you don't need to search_vault first or write your "
+    "own [[wikilinks]] unless you're specifically checking whether "
+    "something already exists. Redundancy across notes is fine, don't hold "
+    "back for fear of duplicating something. You can update or delete a "
+    "note you created earlier, but both refuse to touch a note you didn't "
+    "create — if either comes back with that error, the note belongs to "
+    "the user, not you, and you should leave it alone."
 )
 
 RESEARCH_SYSTEM_PROMPT = prompts.get_prompt(
@@ -251,9 +305,19 @@ def build_research_agent() -> CompiledStateGraph:
     model = ChatAnthropic(model=RESEARCH_MODEL_NAME, thinking={"type": "adaptive"})
     return create_agent(
         model=model,
-        tools=[web_search, build_render_ui_tool(), build_render_form_tool(), render_web_media],
+        tools=[
+            web_search,
+            build_render_ui_tool(),
+            build_render_form_tool(),
+            render_web_media,
+            *build_obsidian_tools(),
+        ],
         system_prompt=RESEARCH_SYSTEM_PROMPT,
-        middleware=[ThinkingBlockRepairMiddleware()],
+        middleware=[
+            AnthropicPromptCachingMiddleware(),
+            RepeatedToolFailureCircuitBreaker(),
+            ThinkingBlockRepairMiddleware(),
+        ],
         state_schema=GatedAgentState,
         name="research_agent",
     )
@@ -328,7 +392,25 @@ LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK = (
     "shown in list_board_tasks' output. When showing the board's current "
     "state, call render_board_ui instead of render_ui — it takes no "
     "arguments and renders the real board data directly, so you never "
-    "have to retype task titles/priorities yourself."
+    "have to retype task titles/priorities yourself.\n\n"
+    "You also have Oni's own persistent note vault — search_vault, "
+    "read_vault_note, write_vault_note, update_vault_note, delete_vault_note. "
+    "This is different from your own working context: a place for things "
+    "that don't need to be loaded every run but might be worth finding "
+    "again later — a decision, a detail from an email or event, anything "
+    "worth remembering. Decide for yourself, without being asked, when "
+    "something from this conversation is worth saving; don't ask "
+    "permission first, just call write_vault_note. It always creates a NEW "
+    "note and automatically links related existing notes for you — you "
+    "don't need to search_vault first or write your own [[wikilinks]] "
+    "unless you're specifically checking whether something already "
+    "exists. Redundancy across notes is fine, don't hold back for fear of "
+    "duplicating something. You can update or delete a note you created "
+    "earlier, but both refuse to touch a note you didn't create — if "
+    "either comes back with that error, the note belongs to the user, not "
+    "you, and you should leave it alone. Unlike email/calendar/filter "
+    "writes above, vault writes never need the user's confirmation first — "
+    "same as board changes."
 )
 
 LIFE_ADMIN_SYSTEM_PROMPT = prompts.get_prompt(
@@ -419,9 +501,15 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
             build_render_ui_tool(),
             build_render_form_tool(),
             *build_board_tools(),
+            *build_obsidian_tools(),
         ],
         system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
-        middleware=[NoParallelWrites(), ThinkingBlockRepairMiddleware()],
+        middleware=[
+            NoParallelWrites(),
+            AnthropicPromptCachingMiddleware(),
+            RepeatedToolFailureCircuitBreaker(),
+            ThinkingBlockRepairMiddleware(),
+        ],
         state_schema=GatedAgentState,
         name="life_admin_agent",
     )
@@ -439,7 +527,11 @@ MAC_CONTROL_SYSTEM_PROMPT_FALLBACK = (
     "playback (play, pause, next/previous track, read what's currently "
     "playing, play a specific song by name/artist, or play a specific "
     "playlist by exact name); read and create Reminders; read and create "
-    "Notes; search Photos.app by text (photos_search — matches people/"
+    "Notes (Apple's Notes.app specifically — a different thing entirely "
+    "from Oni's own note vault, which you have no access to at all; if a "
+    "request is actually about Oni's vault, say so plainly rather than "
+    "silently using Notes.app as a substitute); search Photos.app by text "
+    "(photos_search — matches people/"
     "places/objects/dates the way the app's own search bar does) and "
     "export a found item into the workspace (photos_export); when the "
     "dashboard is the client and the user wants to actually SEE that item "
@@ -542,7 +634,12 @@ def build_mac_control_agent() -> CompiledStateGraph:
         model=model,
         tools=[*MAC_CONTROL_TOOLS, render_local_media],
         system_prompt=MAC_CONTROL_SYSTEM_PROMPT,
-        middleware=[NoParallelMacWrites(), ThinkingBlockRepairMiddleware()],
+        middleware=[
+            NoParallelMacWrites(),
+            AnthropicPromptCachingMiddleware(),
+            RepeatedToolFailureCircuitBreaker(),
+            ThinkingBlockRepairMiddleware(),
+        ],
         state_schema=GatedAgentState,
         name="mac_control_agent",
     )
@@ -601,7 +698,11 @@ def build_phone_agent() -> CompiledStateGraph:
         model=model,
         tools=build_phone_action_tools(),
         system_prompt=PHONE_SYSTEM_PROMPT,
-        middleware=[ThinkingBlockRepairMiddleware()],
+        middleware=[
+            AnthropicPromptCachingMiddleware(),
+            RepeatedToolFailureCircuitBreaker(),
+            ThinkingBlockRepairMiddleware(),
+        ],
         state_schema=GatedAgentState,
         name="phone_agent",
     )

@@ -94,5 +94,24 @@ export function useAgentActivity() {
     [recompute],
   );
 
-  return { activeAgent, activeTool, timeline, handleActivity };
+  // A turn can end WITHOUT a matching tool_end for everything still on the
+  // stack: the SSE connection can die mid-tool-call (a backend process
+  // restart — e.g. uvicorn --reload picking up an edited file — or a
+  // network drop) with no chance to emit the closing frame, and a
+  // user-requested stop deliberately cuts the stream the same way. Either
+  // way, whatever ChatPanel was showing as "running" is no longer true, but
+  // nothing in the event stream itself says so. ChatPanel's own
+  // handleStreamError calls this once the sendChat/resumeChat promise
+  // settles abnormally, so the graph/pill/timeline never get stuck showing
+  // a tool call that quietly stopped existing minutes ago (the real,
+  // live-observed bug this closes: a stale "coding_agent" staying
+  // highlighted long after its turn had already ended).
+  const resetActivity = useCallback(() => {
+    inFlightRef.current = [];
+    setActiveAgent(null);
+    setActiveTool(null);
+    setTimeline((prev) => prev.map((e) => (e.status === "running" ? { ...e, status: "done" } : e)));
+  }, []);
+
+  return { activeAgent, activeTool, timeline, handleActivity, resetActivity };
 }

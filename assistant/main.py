@@ -196,10 +196,9 @@ def main() -> None:
     # constructed, since tags were constructor-bound in Langfuse v2. No
     # longer a hard ordering requirement as of the v3 migration (STEPS.md
     # 86) — tags are read fresh per-call now (see configure_client()'s own
-    # docstring). Still set here rather than at module level for an
-    # unrelated, still-real reason: voice_daemon.py imports _render_content
-    # from this module, which must NOT have the side effect of claiming
-    # "cli" as the client identity for a process that is actually voice.
+    # docstring). Kept function-scoped (not module level) regardless — no
+    # reason to widen this call's blast radius now that nothing else imports
+    # from this module.
     observability.configure_client("cli")
     args = _parse_args()
     try:

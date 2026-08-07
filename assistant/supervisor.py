@@ -190,6 +190,7 @@ from dotenv import load_dotenv
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.callbacks import AsyncCallbackHandler, adispatch_custom_event
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import convert_to_messages
@@ -204,6 +205,7 @@ from langgraph.types import Command, interrupt
 
 from assistant import observability, prompts, workflow_store
 from assistant.a2ui import A2UI_SURFACE_KEY, build_render_form_tool, build_render_ui_tool
+from assistant.circuit_breaker import RepeatedToolFailureCircuitBreaker
 from assistant.compaction import (
     compact_history_node,
     is_compaction_summary,
@@ -330,13 +332,20 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "not just the workspace — e.g. 'find that PDF on my Desktop'), and also "
     "for any request to "
     "send a test/demo notification; research_agent for web search / "
-    "current-events questions; life_admin_agent for anything about email, "
-    "GOOGLE Calendar (the user's Google account calendar), or the user's "
+    "current-events questions, or anything about Oni's own note vault "
+    "(searching, reading, saving, updating, or deleting a note — full, "
+    "ungated access); life_admin_agent for anything about email, "
+    "GOOGLE Calendar (the user's Google account calendar), the user's "
     "kanban board (listing/creating/updating/moving/deleting tasks — full, "
-    "ungated access, no confirmation needed for board changes); "
+    "ungated access, no confirmation needed for board changes), or ALSO "
+    "Oni's own note vault (life_admin_agent carries the same vault tools "
+    "as research_agent — either specialist can handle a vault request, "
+    "pick whichever one already fits the rest of the request); "
     "mac_control_agent "
     "for controlling this Mac directly — opening or focusing an "
-    "application, Music playback, Reminders, Notes, searching/exporting "
+    "application, Music playback, Reminders, Apple's Notes.app (its OWN "
+    "separate app, completely unrelated to Oni's note vault above — see "
+    "the disambiguation rule right after this list), searching/exporting "
     "Photos.app, running a named "
     "Shortcut, reading/creating/updating events on APPLE Calendar (the "
     "local/iCloud/Exchange calendar in the Mac's own Calendar app — a "
@@ -353,6 +362,15 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "the Mac dashboard/CLI/voice) — reading the latest synced health "
     "snapshot, opening an app or URL on that same phone (including a "
     "WhatsApp compose draft), or running a named Shortcut on that phone. "
+    "DISAMBIGUATION — 'a note'/'the vault' vs. Notes.app: these are two "
+    "completely separate, unrelated systems. Oni's own note vault "
+    "(research_agent/life_admin_agent) is the DEFAULT for any bare 'note' "
+    "or 'vault' request with no further signal — saving something for "
+    "later, recalling something saved, updating or deleting a saved note. "
+    "Route to mac_control_agent's Notes.app ONLY when the user explicitly "
+    "says 'Notes.app', 'Apple Notes', or similar — never infer it just "
+    "because the word 'note' appeared. If you're not sure which one a "
+    "request means, default to Oni's own vault. "
     "If the message is a plain greeting or doesn't "
     "need a specialist, answer directly without calling a tool. Call only ONE "
     "specialist tool at a time, even for a request that spans multiple "
@@ -391,6 +409,19 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "you reconstructing a card from their prose summary; don't refuse or "
     "second-guess a request that asks you to delegate something render_ui/"
     "render_form-shaped to one of them.\n\n"
+    "CRITICAL — you have NO way to produce a real image or video. You do "
+    "not have render_local_media or render_web_media; only research_agent "
+    "(for a web image/video) and mac_control_agent (for a local file, e.g. "
+    "a Photos.app export) can actually fetch real bytes. render_ui's "
+    "Image/Video/AudioPlayer fields REQUIRE a real base64 data: URI — never "
+    "attempt to fill one in yourself, whether by inventing one or by "
+    "leaving it for later. If a request wants a real photo/video shown "
+    "(\"with a picture of X\", \"a photo of each\"), delegate the whole "
+    "visual part to research_agent or mac_control_agent and let IT call "
+    "render_ui/render_form with the real embedded media — don't build that "
+    "surface yourself and don't retry a failed render_ui call more than "
+    "once; if it fails again, stop and tell the user plainly rather than "
+    "trying again with the same tool.\n\n"
     "Before delegating a request that clearly involves EXACTLY ONE of these "
     "specific actions — " + ", ".join(sorted(GATED_ACTIONS)) + " — call "
     "request_gated_action_confirmation FIRST, describing in `summary` "
@@ -401,9 +432,17 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "specialist's own confirmation for this exact action is already "
     "satisfied, so it will just proceed without asking again. If declined, "
     "do not delegate at all — tell the user directly that it was "
-    "cancelled. This applies ONLY to the actions listed above — everything "
-    "else (reads, searches, non-destructive Mac control, and any specialist "
-    "action not in that list) needs no upfront confirmation at all.\n\n"
+    "cancelled. This applies ONLY to the EXACT action names listed above — "
+    "everything else (reads, searches, non-destructive Mac control, and "
+    "any specialist action not in that list) needs no upfront confirmation "
+    "at all. Do NOT pattern-match by verb alone: a request to write/update/"
+    "delete a note in Oni's own vault is NEVER one of the actions above, "
+    "even though 'delete_disk_file'/'write_disk_file' might look similar —  "
+    "those two are specifically about the WHOLE-DISK filesystem "
+    "(coding_agent), a completely different thing from Oni's own vault "
+    "(write_vault_note/update_vault_note/delete_vault_note, which are not "
+    "in this list at all and never need request_gated_action_confirmation "
+    "— just delegate directly to research_agent/life_admin_agent).\n\n"
     "If a single request genuinely needs TWO OR MORE of those same gated "
     "actions — a cross-app chain, e.g. parsing something then creating a "
     "calendar event AND sending a message — do NOT call "
@@ -1333,7 +1372,12 @@ def build_supervisor(
         model=model,
         tools=tools,
         system_prompt=SUPERVISOR_SYSTEM_PROMPT,
-        middleware=[NoParallelSpecialistCalls(), ThinkingBlockRepairMiddleware()],
+        middleware=[
+            NoParallelSpecialistCalls(),
+            AnthropicPromptCachingMiddleware(),
+            RepeatedToolFailureCircuitBreaker(),
+            ThinkingBlockRepairMiddleware(),
+        ],
         name="supervisor",
     )
 

@@ -233,6 +233,41 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   `tsc`/`prettier`/`npm run build` clean; no test file exists for it and
   it has not been live-verified in the real running dashboard. Not
   committed.
+- **Anthropic prompt caching wired into all 6 agent models, 2026-08-04,
+  STEPS.md 121 — a real gap found and closed, not a new phase.** A
+  latency question led to a real Langfuse pull showing prompt caching
+  had never been enabled anywhere in the codebase (0 cache hits across
+  1,000 generations). Fixed via `langchain_anthropic.middleware.
+  AnthropicPromptCachingMiddleware` added to the supervisor's and all 5
+  sub-agents' middleware lists; live-verified against the real API
+  (`cache_read_input_tokens` covering ~99% of input on a real
+  `coding_agent` call). New load-bearing rule added alongside the
+  thinking-repair one above. Full backend suite + `ruff` clean, no test
+  regressions. Not committed.
+- **Real incident diagnosed and fixed: a stuck 43-retry `render_ui` loop
+  (~28 minutes, one turn), 2026-08-04, STEPS.md 122 — a bug fix plus a
+  new standing capability, not a new phase.** Same Langfuse investigation
+  as the caching entry above, continued: found a real trace where the
+  supervisor retried an identical failing `render_ui` call 43 times
+  because it tried to embed a real photo it had no tool to produce,
+  exhausted its 4096-token output budget every time, and never stopped.
+  Three fixes: (1) supervisor.py's system prompt now explicitly says it
+  has no media tool and must delegate real image/video requests to
+  `research_agent`/`mac_control_agent`; (2) new
+  `assistant/circuit_breaker.py`'s `RepeatedToolFailureCircuitBreaker`
+  (wired into all 6 agents, new load-bearing rule) stops ANY tool-calling
+  loop that fails identically 3+ times in a row, independent of root
+  cause; (3) at the user's own direct, standing request ("I always want
+  to know if there's a process going on in the background... this is
+  just a waste of my money") — a new `assistant/active_turns.py`
+  registry + `GET /activity/active` + a persistent dashboard
+  `ActiveTurnBanner` (visible from every tab) showing any in-flight turn
+  across every channel (dashboard/voice/phone/automation), with a
+  visible warning once a tool is retrying. 342/343 backend tests pass (1
+  pre-existing, unrelated failure); 89/89 frontend (3 new); `ruff`/`tsc`/
+  `prettier`/build all clean. Not live-verified against the original
+  failing request or in the real Tauri window (component/unit-tested
+  only) — not committed. See STEPS.md 122 for the full incident record.
 - Complete: Phase 1 — single-agent CLI with tools + persistent memory
   (STEPS.md groups 1–8)
 - Complete: Phase 2 — Gmail + Calendar via MCP (READ-ONLY), async graph
@@ -650,6 +685,151 @@ found as uncommitted changes and documented after the fact (STEPS.md
 119). Code complete but does not meet this project's normal done bar:
 no live verification, no growth in test coverage despite a large new
 surface area, not yet committed. See PLAN.md's own Phase 26 entry.
+- **The Phase 5 menu-bar voice daemon is RETIRED, replaced by in-app
+  voice I/O in the dashboard (2026-08-06, STEPS.md 123)** — not a
+  numbered phase, a same-session architecture change at the user's
+  direct request ("this is not how I envisioned voice I/O to work...
+  more like how Claude/ChatGPT have voice I/O... I have to refresh the
+  chat to see my voice input"), confirmed explicitly before removal:
+  keep the old always-on hotkey daemon alongside the new version, or
+  retire it — the user chose retire. `assistant/voice_daemon.py`
+  (rumps menu bar app, pynput global Option+Return hotkey, its own
+  `graph.ainvoke()` loop, spoken confirmation answers) is deleted
+  outright; `voice_io.py` trimmed to just `transcribe_file` (dropped
+  `Recorder`, buffer `transcribe()`, `speak()`, TTS voice resolution,
+  `parse_confirmation` — all daemon-only); the `assistant-voice`
+  console script and the `pynput`/`rumps`/`sounddevice`/`numpy`
+  dependencies removed; `src-tauri/src/lib.rs`'s voice-daemon spawn/kill
+  code removed (Rust still builds clean); the launchd plist deleted.
+  The replacement needed almost no new code: `server.py`'s
+  `/voice/transcribe` and `ChatPanel.tsx`'s mic-button recorder were
+  ALREADY built, for Phase 21's iPhone-access feature, and simply hidden
+  inside Tauri (`!isTauri()`) because the Mac's separate daemon existed
+  at the time. Un-hiding that one gate was the actual fix — a voice
+  turn now flows through `ChatPanel.tsx`'s own `handleSend`, identical
+  to typing, so it streams live into the open chat with no separate
+  sync mechanism, which is exactly what fixes "have to refresh to see
+  my voice input" (the old daemon wrote turns via an isolated
+  `ainvoke()` outside this panel's own SSE stream). Added spoken
+  replies via the browser's own Web Speech API (`speakReply`,
+  `window.speechSynthesis`) rather than a new backend TTS endpoint —
+  fires only for a turn that actually originated by voice, mirroring
+  Claude/ChatGPT's own voice-mode behavior.
+  **Deliberately not rebuilt, called out explicitly rather than
+  silently dropped:** the daemon's spoken-confirmation-answer path — a
+  voice-originated turn that hits a gate now shows the same click-only
+  `InterruptGate` card a typed turn would (this project's standing rule
+  that free-text gate content is never voice-approvable already covered
+  most of what mattered here; what's actually lost is answering a
+  SIMPLE gate, like a calendar-event delete, by saying "yes" instead of
+  clicking) — and the daemon's local "start a new conversation" trigger
+  phrase for switching threads by voice, with no equivalent in the new
+  path (the dashboard's own New Thread button is the replacement).
+  The PHONE channel's own voice interaction (Shortcuts' Speak/Dictate
+  round trip, `/phone/turn`/`/phone/resume`) is entirely unrelated to
+  this daemon and is untouched — it still checks `voice_approvable` on
+  gate payloads exactly as before.
+  **Also fixed in the same session, found first:** `/Applications/
+  Oni.app` (a compiled AppleScript applet, not a `tauri build` release
+  bundle — a prior session's deliberate live-reload-over-packaging
+  trade-off) used to open a visible Terminal window to run `npm run
+  tauri dev`; recompiled to launch the same script via `do shell
+  script "nohup ... &"` instead, so Oni now runs with no Terminal
+  window at all, output going to `~/Library/Logs/PersonalAssistant/
+  oni-dev.log` instead. A live investigation into the menu-bar hotkey
+  not registering after that relaunch (Input Monitoring/Accessibility
+  showed `Python` already enabled; a daemon restart was the leading
+  hypothesis, since trust granted after a process's event tap already
+  exists doesn't apply retroactively) was never concluded — superseded
+  by the daemon's retirement before a final retest. A separately
+  reported "Cmd+Q leaves the backend/voice daemon orphaned" finding
+  from earlier in this same investigation was very likely a testing
+  artifact (synthetic AppleScript keystrokes/`quit` commands don't
+  reliably reach a real quit path) rather than a real bug — `lib.rs`'s
+  quit handling already matches both `RunEvent::ExitRequested` and
+  `RunEvent::Exit` specifically because of an earlier, separately
+  live-diagnosed version of this exact bug; flagged here since that
+  earlier "confirmed" claim was reported to the user before being
+  corrected.
+  340/341 backend tests pass (1 failure is the pre-existing
+  `threads.sqlite` active-thread-pointer flake, this run triggered by
+  this same session's own permission-probe test traffic, not this
+  change); 99/99 frontend tests pass; `tsc`/`ruff`/`prettier`/Rust build/
+  `npm run build` all clean. Not live human-tested (needs a real
+  microphone and a real ear, neither available to the agent session
+  that built this) — Oni is running with the daemon gone, live testing
+  is the user's own next step. Not committed.
+- **Phase 27 (Obsidian vault: Oni's own note-store) — CODE COMPLETE,
+  LIVE-VERIFIED (scoped 2026-08-06 via a `/grill-with-docs` session,
+  STEPS.md 124; built 2026-08-07 STEPS.md 126; a real incident found and
+  fixed during live verification, corrected the same day, STEPS.md
+  127).** A
+  "second brain"-style persistent note-store, distinct from
+  `memory_store.py`'s small curated Facts, that `research_agent`/
+  `life_admin_agent` can search/read/write/update/delete via new
+  `assistant/obsidian_tools.py` — fully ungated (`docs/adr/0001-*`), with
+  Oni deciding for itself when something's worth saving rather than
+  waiting to be asked (`docs/adr/0002-*`). The scoping session was the
+  first time `/grill-with-docs`'s own named `/domain-modeling` dependency
+  was actually installed rather than missing (Phase 25's own scoping
+  session, STEPS.md 117, had to fall back to logging decisions directly in
+  STEPS.md/PLAN.md for lack of it) — produced this project's first
+  `CONTEXT.md` and first two ADRs.
+  **Two deliberate departures from the locked design, made while
+  building:** `update_vault_note` was given the same `oni: true`
+  authorship check `delete_vault_note` has, even though the ADR only names
+  delete — an unguarded full-body overwrite is exactly as destructive as
+  an unguarded delete; and the "must link related notes" rule (Decision 8)
+  is enforced mechanically inside `write_vault_note` itself (keyword
+  overlap against existing titles, real `[[wikilinks]]` appended
+  automatically) rather than by asking the model to call `search_vault`
+  first and hand-type links, which would have risked a hallucinated
+  target. **First live-verification pass was real but too narrow, and
+  said so only after a second pass caught it (STEPS.md 127, full
+  incident record):** a throwaway script that called `research_agent`
+  directly (bypassing the supervisor's own routing decision) proved the
+  TOOLS work — a real turn saving a fact, a real follow-up recalling it,
+  a real refused deletion, all against a temp checkpointer + temp vault,
+  never touching real state. Running an actual 7-prompt conversational
+  suite through the REAL running backend afterward — the test that
+  actually exercises the supervisor's own routing, which the isolated
+  script structurally could not — found it misrouted every vault request
+  to `mac_control_agent`'s Apple Notes.app tools instead (a real Apple
+  Note was actually created), the exact routing-blindness class Phases
+  18/20 already hit for `render_ui`/the board, recurring here despite an
+  earlier attempt to guard against it. Fixed with an explicit
+  disambiguation rule in the supervisor's prompt. Re-running the suite
+  against the fix then surfaced a SECOND, more serious bug: a "delete"
+  request correctly reached `delete_vault_note` this time, and it
+  **actually deleted a real, pre-existing course note** — because all 138
+  notes from the same session's earlier course-population work
+  (STEPS.md 125) had been mistakenly marked `oni: true`, silently
+  defeating the authorship check for the vault's entire real content the
+  whole time; the tool's own code was correct throughout, the data it
+  trusted was not. Recovered the deleted note byte-for-byte from this
+  session's own prior tool-call history, corrected the same mistake
+  across all 137 other notes, and re-confirmed live against the fixed
+  backend and fixed data that the identical delete request now correctly
+  refuses. One gap left open: the per-turn write cap (3 writes/turn) is
+  unit-tested but wasn't live-provoked through a real 4th-write attempt,
+  judged not worth chasing given how simple the mechanism is. 24 new
+  tests plus 35 existing `test_supervisor.py`/`test_sub_agents.py` tests
+  unaffected; 364/365 backend tests pass suite-wide (1 pre-existing,
+  unrelated `threads.sqlite` flake); `ruff check .` clean (1 pre-existing,
+  unrelated finding in `supervisor.py`); all 7 prompts re-synced to
+  Langfuse twice (once per prompt-fix round). Not committed. **Standing
+  lesson, worth carrying into every future phase's own verification:** a
+  script that bypasses the supervisor to call a specialist directly
+  verifies the specialist, never the supervisor's own routing decision —
+  "live-verified" should mean what was actually exercised, not what
+  logically ought to work given passing unit tests.
+  Separately, and not part of this phase's own code: `~/Documents/
+  OniVault` was also manually seeded the same session with 138 notes
+  summarizing `~/Documents/Courses`, done directly by Claude Code (not
+  through Oni, to avoid Console API spend) at the user's explicit request
+  — see STEPS.md 125-127 for that work (125 for the population itself,
+  127 for the `oni: true`-mislabeling bug found in it and fixed), which
+  predates and is unrelated to this phase's own build.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -679,8 +859,13 @@ below is durable.
   required`) — live-reproduced against the real API at this decision
   point, not just cited from the old record. Only affects streaming callers
   (LangGraph Studio, and since Phase 14, the dashboard's `/chat`/`/resume`
-  SSE path via `astream_events`) — the CLI/voice daemon's non-streaming
-  `ainvoke()` was never at risk either way. Rather than disable thinking
+  SSE path via `astream_events`) — the CLI's non-streaming `ainvoke()` was
+  never at risk either way. (Voice was in this same non-streaming category
+  too, when it ran as its own daemon calling `ainvoke()` directly; since
+  its 2026-08-06 retirement in favor of in-app voice, a voice turn goes
+  through the dashboard's own streaming `/chat` call like any other turn,
+  so it's now covered by this same middleware rather than exempt from the
+  bug it guards against.) Rather than disable thinking
   project-wide again, `assistant/thinking_repair.py`'s
   `ThinkingBlockRepairMiddleware` patches the exact malformed shape
   (adds `"thinking": ""`, which fabricates nothing — that's the same value
@@ -698,6 +883,59 @@ below is durable.
   block. `compaction.py`/`memory_extraction.py`'s Haiku calls stay
   `thinking={"type": "disabled"}` deliberately (single-shot classification/
   summarization, no orchestration reasoning to gain).
+- **Prompt caching: `AnthropicPromptCachingMiddleware` in every agent
+  model's middleware list (added 2026-08-04, STEPS.md 121)** — found
+  missing, not a design choice being revisited: a real Langfuse pull (1,000
+  generations, 14 days) showed `input_cache_read`/`input_cache_creation`
+  at exactly 0 everywhere and a `cache_control` grep across `assistant/`
+  came back empty, meaning every one of the supervisor's and all 5
+  sub-agents' large, mostly-static system prompts was being fully
+  re-prefilled on every single call, including consecutive calls within
+  the same turn. `langchain_anthropic.middleware.
+  AnthropicPromptCachingMiddleware` (same `AgentMiddleware` mechanism as
+  `ThinkingBlockRepairMiddleware` above) tags the system prompt's trailing
+  block and the last tool definition with an ephemeral `cache_control`
+  breakpoint. Live-verified with a real API call: two `ainvoke()`s against
+  `coding_agent` both returned `cache_read_input_tokens` covering nearly
+  the entire input, including the first call of a freshly-built agent
+  process (cache is content-keyed, not session-keyed). **Any new
+  `create_agent(...)` model construction in supervisor.py/sub_agents.py
+  MUST include this middleware too**, same standing as the thinking-repair
+  rule above — omitting it doesn't break correctness, only silently
+  reintroduces the full-reprefill cost this fix closes. Deliberately NOT
+  applied to `compaction.py`/`memory_extraction.py`'s single-shot Haiku
+  calls (no middleware pipeline exists there; lower reuse value) — left as
+  an open follow-up, not a rejected option.
+- **Retry circuit breaker: `RepeatedToolFailureCircuitBreaker` in every
+  agent model's middleware list (added 2026-08-04, STEPS.md 122)** —
+  found via a real, live-diagnosed incident: a Langfuse trace showed a
+  single supervisor turn retrying a failing `render_ui` call 43 times in
+  a row (~28 minutes of real model latency, real API spend), because it
+  tried to build a surface needing a real image it had no tool to
+  produce, kept exhausting its 4096-token output budget mid-generation,
+  and nothing ever told it to stop. `assistant/circuit_breaker.py`'s
+  `awrap_model_call` scans the trailing message history for a streak of
+  identical-tool-name calls that all came back with
+  `ToolMessage.status="error"`; once the streak reaches
+  `max_consecutive_failures` (default 3), it returns a synthetic
+  `AIMessage` explaining what happened INSTEAD of calling the model
+  again — caps both the wasted time and the wasted spend, not just one
+  of the two. This is a GENERIC safety net (any tool, any reason it
+  keeps failing identically), independent of that incident's own root
+  cause (supervisor.py's system prompt now separately tells the
+  supervisor it has no media tool of its own — see the prompt itself).
+  **Any new `create_agent(...)` model construction in supervisor.py/
+  sub_agents.py MUST include this middleware too**, same standing as the
+  thinking-repair/prompt-caching rules above — a retry storm is a
+  generic failure mode of the ReAct tool-calling loop itself, not
+  specific to any one agent's tools. Also best-effort updates
+  `assistant/active_turns.py`'s in-flight-turn registry (see that
+  module's own docstring for its one accepted scope gap) so the
+  dashboard's `ActiveTurnBanner` can show "retrying X" WHILE it's still
+  happening — the user's own separate, standing ask this addresses:
+  never again be surprised by a process that had been silently running
+  in the background. See STEPS.md 122 for the full incident, the fix,
+  and the new cross-channel visibility feature this prompted.
 - **Active-thread pointer, not a fixed `THREAD_ID` constant (superseded
   Phase 15, 2026-07-15):** every client previously shared one hardcoded
   `THREAD_ID = "cli-default-thread"`, which was fine until concurrent real
@@ -737,10 +975,12 @@ below is durable.
   still guards against non-string `.content` shapes) — only the dashboard
   streams. Phase 14 (STEPS.md 71/72) added SSE streaming to
   `assistant/server.py`'s `/chat`/`/resume` specifically for the Tauri
-  dashboard client; `main.py`/`voice_daemon.py` still call
-  `graph.ainvoke()` directly and were deliberately left untouched — no
-  request to stream the CLI or voice output, and streaming voice output
-  would need mid-utterance TTS chunking that's out of scope here.
+  dashboard client; `main.py` still calls `graph.ainvoke()` directly and
+  was deliberately left untouched — no request to stream the CLI. (Voice
+  used to be in the same non-streaming category as the CLI, via its own
+  `voice_daemon.py` process; since that daemon's 2026-08-06 retirement,
+  voice lives inside the dashboard and goes through this same streaming
+  `/chat` path like any other turn — see STEPS.md 123.)
 
 ## Security model — never weaken without explicit discussion
 
@@ -785,10 +1025,15 @@ filtering content.
   tool names are never added to a model's tool list — only their gated
   wrappers are). Email sends, calendar create/update, and Gmail filter
   writes are all additionally text-only, never voice-approvable
-  (`voice_daemon.py` checks `voice_approvable: False` on the interrupt
-  payload) — free-text content (an email body, an event description, a
-  filter's forward target) is harder to vet by ear than an action verb like
-  "send". The one deliberate exception is calendar event **delete**, which
+  (`server.py`'s phone-turn handler checks `voice_approvable: False` on the
+  interrupt payload and auto-declines silently, since the phone's own
+  Speak/Dictate round trip has no screen to show free-text content on —
+  the Mac dashboard's in-app voice, since the 2026-08-06 daemon retirement,
+  has no voice-answerable gate path at all, text-only or otherwise: every
+  gate is click-only regardless of which channel the turn came from) —
+  free-text content (an email body, an event description, a filter's
+  forward target) is harder to vet by ear than an action verb like "send".
+  The one deliberate exception is calendar event **delete**, which
   IS voice-approvable — it carries no free-text payload to hide an injection
   in, unlike every other gated action here (STEPS.md 63); Gmail filter
   delete does NOT get the same exception, since identifying which filter is

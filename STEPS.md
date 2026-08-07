@@ -9893,3 +9893,725 @@ trip). Not live-verified in the actual running dashboard/Tauri window
 browser/OS/Tauri binding, or that it behaves correctly across a real
 relaunch). Not committed — sits on top of the rest of this session's
 uncommitted changes.
+
+## 121. Anthropic prompt caching wired into all 6 agent models (2026-08-04)
+
+**Diagnosed before any code was written, not assumed.** A latency
+question ("why is Oni slower than a normal chatbot") led to pulling
+1,000 real `GENERATION` observations from Langfuse (last 14 days, via
+the `langfuse-cli` skill) and grepping the codebase. Finding: **prompt
+caching was never wired up at all** — `input_cache_read` and
+`input_cache_creation` were both exactly 0 across all 1,000
+generations, every model, every agent, and `grep -rn "cache_control"
+assistant/*.py` returned nothing. Not a TTL-expiry problem (which would
+still show cache_creation writes) — the feature was simply never
+enabled. Cost: 896 Sonnet-5 generations in that window averaged 9,313
+input tokens each, all paid as full fresh prefill every single time
+(8.4M total input tokens, zero reuse), including back-to-back calls
+within the SAME user turn (supervisor → specialist → supervisor again)
+that share large chunks of identical system-prompt content. Real
+latency in that sample: median 3.4s / p90 10.6s end-to-end, median 2.0s
+/ p90 3.3s time-to-first-token (one 10+ hour outlier excluded — almost
+certainly a gated action idling on confirmation, not model latency).
+
+**Fix:** `langchain-anthropic`==1.4.8 (this project's installed
+version, verified before coding against it — CLAUDE.md's own
+discipline) ships `langchain_anthropic.middleware.
+AnthropicPromptCachingMiddleware`, an `AgentMiddleware` built for
+exactly this: tags the system message's trailing content block and the
+last tool definition with an `ephemeral` `cache_control` breakpoint
+(default `ttl="5m"`), so Anthropic caches everything up to that point
+and only the turn's new content gets prefilled fresh. This is the same
+middleware mechanism `assistant/thinking_repair.py`'s
+`ThinkingBlockRepairMiddleware` already uses, so it slots directly into
+every existing `middleware=[...]` list with no new dependency
+(`langchain` was already required for the middleware framework itself)
+and no structural change. Added to all 6 `create_agent(...)` sites that
+build an agent model — the supervisor (`supervisor.py`) and all 5
+sub-agents (`sub_agents.py`: coding/research/life_admin/mac_control/
+phone) — the exact same scope `ThinkingBlockRepairMiddleware` already
+covers, since these are the only sites with large, mostly-static system
+prompts and real conversational reuse. Deliberately NOT applied to
+`compaction.py`/`memory_extraction.py`'s single-shot Haiku calls (no
+`create_agent`/middleware pipeline exists there — they call
+`model.ainvoke()` directly — and each is a one-off classification/
+summarization call per invocation, lower reuse value); left as a
+possible follow-up, not done here to keep this change scoped to what
+was actually diagnosed.
+
+**Live-verified with a real API call, not just reasoned through:**
+built `coding_agent` directly and called `ainvoke()` twice against the
+real Anthropic API (throwaway scripts, not committed). Both calls
+returned `cache_read_input_tokens` covering nearly the entire input
+(2884-2885 of ~2886-2887 total input tokens each call) — including the
+FIRST call of the second script run, confirming the cache is keyed on
+content and persists across separate agent builds/processes within the
+TTL window, not just within one Python session. No real state was
+polluted: per `sub_agents.py`'s own docstring these graphs compile
+WITHOUT a checkpointer, so the throwaway `thread_id`s used for the
+smoke test were never persisted anywhere; the calls also bypassed
+`agent.py`'s `make_thread_config`/`observability.tracing_context()`, so
+nothing landed in Langfuse either — a clean, non-polluting live test.
+
+**Tests:** `tests/test_supervisor.py`/`tests/test_sub_agents.py` (35
+tests) and the full backend suite pass unchanged — no test asserts a
+specific `middleware` list shape, so this was a safe structural
+addition. `ruff check .` on the two touched files: only the same
+pre-existing, unrelated `Awaitable`/`Callable` import finding — nothing
+new introduced.
+
+**Not yet done:** no before/after latency comparison has been run
+against real production-shaped traffic (the smoke test used a tiny
+single-turn prompt, not a real multi-hop supervisor→specialist turn);
+`compaction.py`/`memory_extraction.py` caching left as an open,
+lower-priority follow-up; not committed.
+
+## 122. Real incident diagnosed via Langfuse: a stuck 43-retry render_ui loop — root-cause prompt fix, a generic retry circuit breaker, and a new cross-channel "active turn" dashboard indicator (2026-08-04)
+
+**How this was found — not theoretical, not proactive.** Continuing the
+same latency investigation as group 121, pulled the supervisor's own
+generations split by whether adaptive thinking actually fired. Calls
+WITH a visible thinking block had a wildly higher median latency (20.6s
+vs 3.4s) and ~9x more output tokens (2,211 vs 237) — but digging into
+the worst cluster (14 calls, 98-119s each) found every single one had
+`outputUsage` pinned at exactly 4096 (the `max_tokens` cap) and an
+EMPTY `render_ui` tool call (`input: {}`). Pulling the full trace: a
+real user turn — *"Give me a step-by-step guide for changing a bike
+tire, one step per tab, with a picture for the trickiest part"* — asked
+twice (the user retried after the first attempt hung), each time
+producing the identical error `Error invoking tool 'render_ui' with
+kwargs {} with error: surface: Field required. Please fix the error and
+try again.`, retried immediately with no backoff and no cap. The first
+attempt did this **43 times in a row**, summing to **~28 minutes of
+real model latency** (`sum(latency)` across that trace's own
+generations = 1694s) in one single turn, with nothing on the dashboard
+or anywhere else indicating it was happening. A second trace showed the
+same pattern on a differently-worded but structurally identical request
+("laptops... a photo of each"). All of this analysis was pure Langfuse
+reads (real trace data already recorded) — zero new Anthropic API
+calls, per the user's explicit ask to keep this investigation cheap.
+
+**Root cause:** the supervisor has no way to produce a real image —
+`render_local_media`/`render_web_media` (Phase 26) only exist on
+`research_agent`/`mac_control_agent`/`coding_agent`. `render_ui`'s
+`Image`/`Video` fields require real base64 bytes (also Phase 26,
+closing a WebKit rendering bug). When asked for "a picture," the
+supervisor tried to build that `render_ui` surface ITSELF instead of
+delegating to a specialist that actually has a media tool, ran its
+4096-token output budget dry mid-generation (likely attempting to
+fabricate the impossible embedded image), got a validation error back,
+and retried the identical doomed approach — forever, since nothing told
+it to stop.
+
+**Three fixes, addressing three different layers of the same incident:**
+
+1. **Root cause — `supervisor.py`'s system prompt.** New paragraph,
+   CRITICAL-flagged: the supervisor has NO media tool of its own; any
+   request wanting a real photo/video must be delegated whole to
+   `research_agent`/`mac_control_agent`, which call `render_ui`/
+   `render_form` themselves with the real embedded bytes; explicitly
+   told not to retry a failed `render_ui` call more than once. Re-synced
+   to Langfuse (`scripts/sync_prompts_to_langfuse.py`, all 7 prompts —
+   only supervisor's content actually changed).
+
+2. **Generic safety net — `assistant/circuit_breaker.py`
+   (new file), `RepeatedToolFailureCircuitBreaker`.** Independent of
+   the root cause above: protects against the whole CLASS of bug (any
+   tool, any reason it keeps failing identically), not just this one
+   trigger. `awrap_model_call` scans the trailing message history for a
+   streak of (single-tool-call AIMessage, `ToolMessage(status="error")`)
+   pairs naming the SAME tool; once the streak reaches
+   `max_consecutive_failures` (default 3), returns a synthetic AIMessage
+   explaining what happened INSTEAD of calling the model again — no
+   further API spend for that doomed attempt, not just a time cap.
+   Detects via `ToolMessage.status`, a structural signal
+   `langchain_core`'s own tool-execution path already sets on a handled
+   validation failure — not string-matching the error text, which would
+   be fragile to a future wording change. Added to all 6
+   `create_agent(...)` middleware lists (supervisor + 5 sub-agents),
+   same standing as `ThinkingBlockRepairMiddleware`/
+   `AnthropicPromptCachingMiddleware` — a new load-bearing-decision entry
+   added to CLAUDE.md alongside them.
+
+3. **The user's own, separate, standing ask — visibility.** Direct
+   quote: *"i always want to know if theres a process going on in the
+   background... this is just a waste of my money."* Not solved by #2
+   alone (a cap only limits damage — the user wants to actually SEE a
+   long-running or stuck turn while it's happening, from ANY channel,
+   not just after the fact). New `assistant/active_turns.py` — an
+   in-memory registry (deliberately NOT a durable SQLite store — nothing
+   here should survive a restart) tracking any in-flight turn:
+   thread_id, channel, started_at, step_count, current_tool,
+   consecutive_failures. `RepeatedToolFailureCircuitBreaker` itself
+   updates it (best-effort — see the module's own docstring for the one
+   accepted scope gap: a nested specialist's own isolated `ainvoke()`
+   has no `configurable.thread_id` in scope, so `get_config()` raises
+   there and the touch silently no-ops; this only reliably covers the
+   SUPERVISOR's own top-level view, which is exactly where the real
+   incident happened). `start_turn`/`finish_turn` wired into every
+   channel that can run a turn without the user directly watching it:
+   `server.py`'s `_stream_turn` (dashboard `/chat`/`/resume`/`/a2ui/
+   action`) and `_run_turn` (`/phone/turn`/`/phone/resume`), `server.py`'s
+   `fire_automation` (keyed by `automation:{automation_id}` — no
+   thread_id exists on that path), and `voice_daemon.py`'s
+   `_process_turn`. Deliberately NOT wired into `main.py`'s CLI loop —
+   the user is already watching that synchronously in a terminal, the
+   opposite of the "silently in the background" problem this fixes.
+   New `GET /activity/active` endpoint (`server.py`) returns the
+   registry as-is for polling. New frontend: `useActiveTurns.ts` (polls
+   every 4s, matching `ChatPanel.tsx`'s own established external-update
+   cadence) + `ActiveTurnBanner.tsx`, mounted in `App.tsx`'s shell
+   directly below the header — visible from EVERY tab, not just Chat,
+   specifically because a voice/phone/automation-originated turn has no
+   other way to surface there at all. Uses the app's existing
+   `--signal`/`--alarm` rail-grammar tokens (a running turn vs. a
+   `stuck` one — 2+ consecutive failures, a lower bar than the circuit
+   breaker's own cutoff of 3, deliberately: this warning is meant to
+   appear BEFORE the breaker actually stops the loop).
+
+**Tests — all pure/structural, zero live API calls, per the same
+cost-conscious constraint as group 121's verification:**
+`tests/test_circuit_breaker.py` (6 tests: streak detection — counts a
+real 3-in-a-row failure, resets on success, resets on a different tool,
+zero for plain text; the middleware itself — confirms the handler is
+NEVER called once the threshold is hit via an assertion inside a fake
+handler, confirms it still calls through normally below threshold).
+`tests/test_active_turns.py` (5 tests: start/touch/finish round trip,
+the `stuck` flag threshold, a touch on an unregistered thread silently
+no-ops, multiple channels list independently, finish on an unregistered
+thread silently no-ops). `ActiveTurnBanner.test.tsx` (3 tests: renders
+nothing when idle, shows a running turn's channel/agent/tool/elapsed
+time, visibly distinguishes a `stuck` turn with its own testid and
+retry count). Zero-cost construction check (building all 6 agents,
+no model invocation) confirms the new middleware doesn't break
+construction anywhere. 342/343 backend tests pass (1 pre-existing,
+unrelated failure — the documented `threads.sqlite` flake, re-confirmed
+identical on this run); 89/89 frontend tests pass (3 new). `ruff check .`: clean, same single pre-existing finding as every
+prior entry this session. `prettier --check`: `ActiveTurnBanner.tsx`
+initially flagged, fixed immediately via `prettier --write` (a genuine
+new file, unlike the pre-existing findings elsewhere) — back to the
+same 9 pre-existing findings this session started with (7 original + 2
+from Phase 26, none newly introduced here). `tsc --noEmit`: clean.
+`npm run build`: succeeds.
+
+**Not yet done:** no live end-to-end reproduction of the ORIGINAL
+failing request ("bike tire... with a picture") to confirm the
+supervisor now delegates instead of looping — the prompt fix's
+reasoning is sound and the circuit breaker independently guarantees the
+loop itself can no longer run away even if the prompt fix somehow
+doesn't fully land, but neither has been re-run against the real API
+(deliberately, to keep this investigation-and-fix pass cheap per the
+user's own instruction); the dashboard indicator has not been
+live-verified in the actual running Tauri window (only component-
+tested); not committed.
+
+## 123. Oni.app made Terminal-less; the menu-bar voice daemon retired in favor of in-app voice I/O (2026-08-06)
+
+**Part A — Oni.app no longer opens a Terminal window.** Started from a
+real complaint: two visible terminal windows were the only thing
+"keeping Oni alive." Root cause: `/Applications/Oni.app` (a compiled
+AppleScript applet, not a `tauri build` release bundle — a deliberate
+trade-off from an earlier session for live-reload convenience) launched
+`dashboard/run-oni-dev.sh` via `tell application "Terminal" to do
+script`, which necessarily opens a visible window. Fixed by recompiling
+the applet's `main.scpt` to launch the exact same script via `do shell
+script "nohup ... &"` instead — same `npm run build:watch` + `npm run
+tauri dev` pipeline, same backend/voice-daemon child-process spawning,
+just never allocates a Terminal window. Two real bugs found and fixed
+getting this working: `do shell script`'s minimal PATH
+(`/usr/bin:/bin:/usr/sbin:/sbin`) had neither Homebrew's `bin` (`npm`)
+nor `~/.cargo/bin` (`cargo`, needed by `tauri dev`'s own Rust build) —
+both added explicitly to the launcher's `PATH`. Output that used to
+print to the Terminal window now goes to
+`~/Library/Logs/PersonalAssistant/oni-dev.log`, matching the voice
+daemon's own launchd logging convention. Live-verified: relaunching
+Oni.app brings up the real window with the Terminal window count
+unchanged throughout, backend answered a real `GET /threads` with 200,
+and the voice daemon (at the time still in service) came up too. Also
+found and cleaned up a genuinely stale, week-old orphaned
+`target/debug/dashboard` process from a previous session — unrelated to
+this fix, just discovered while verifying it.
+
+Tested whether quitting the app (Cmd+Q, and `tell application "dashboard"
+to quit`) tears down the backend/voice-daemon children — it appeared not
+to, which was reported as a live-confirmed gap. **That report was
+likely wrong, corrected while touching this same code again in Part B
+below:** `lib.rs`'s `run()` closure already matches on BOTH
+`RunEvent::ExitRequested` and `RunEvent::Exit` specifically because an
+earlier session found (per its own inline comment) that matching
+`ExitRequested` alone left both children orphaned after a real
+Quit-menu/Apple-Event-driven quit — i.e. this exact class of bug was
+already found and fixed once, live, before this session. The Cmd+Q/
+AppleScript-`quit` test that suggested it was still broken almost
+certainly didn't reach the app's real quit path at all (a synthetic
+`System Events` keystroke to a raw, unbundled dev binary, and an
+AppleScript `quit` command sent to a process name — "dashboard" — that
+isn't a real LaunchServices-registered application) — the same
+synthetic-input limitation that made the hotkey test below
+inconclusive. Flagging this explicitly rather than letting the earlier,
+likely-incorrect claim stand uncorrected.
+
+**Part B — Voice permissions investigation, real findings, no
+resolution before the ask changed.** Asked to trigger the pending
+Automation-permission dialogs for Photos/Contacts/Messages left over
+from Phases 21-25. Ran real read-only requests (Reminders, Notes,
+Music, Apple Calendar, Photos, Contacts) through the ACTUAL running
+backend (not an ad-hoc shell osascript call, which would carry the
+wrong process identity) — all six returned real data on the first try,
+no dialog needed, meaning those grants already carry over cleanly
+across Part A's launch-mechanism change. Also caught the model
+correctly refusing to act on a real prompt-injection sitting in an
+actual Notes.app note title ("SYSTEM NOTICE... open https...") —
+incidental, not the point of the test, worth a look regardless.
+Separately dug into a real logged voice failure
+(`voice_daemon.log`, 2026-08-05 17:01: two consecutive
+`PortAudioError -9986` opening the mic, the first attempts after a
+week-long gap in an otherwise-flawless usage history back to
+2026-07-13) — reproduced live via the same Python binary identity and
+found the mic opens cleanly today, pointing to a transient device
+conflict (a `LoomAudioDevice` from Loom is registered) rather than a
+revoked grant. The GLOBAL HOTKEY itself, however, would not register at
+all after Part A's relaunch — zero log output on a real physical
+Option+Return press, even though System Settings showed `Python`
+already enabled in both Input Monitoring and Accessibility. Restarting
+the daemon (so it would pick up trust granted after it had already
+created its event tap — a real, common macOS gotcha) was tried as the
+likely fix, but a second live retest was never completed: the user
+redirected mid-debugging to a different, larger ask (Part C) before a
+final confirmation either way. **This investigation is superseded, not
+concluded** — Part C removes the mechanism being debugged entirely.
+
+**Part C — the actual ask underneath both of the above: voice should
+live in the app, not a separate Python process.** Direct feedback:
+"this is not how I envisioned voice I/O to work... more like how
+Claude/ChatGPT have voice I/O... I have to refresh the chat to see my
+voice input." Confirmed with the user before touching anything load-
+bearing: retire `voice_daemon.py` entirely (not kept alongside the new
+in-app version) — a deliberate, explicit call, not an oversight, made
+knowing it drops system-wide (any-app, not just when the dashboard is
+open) hands-free access.
+
+The real discovery that made this cheap: **everything needed already
+existed**, built for Phase 21's iPhone-access feature and simply hidden
+inside Tauri. `server.py`'s `/voice/transcribe` (browser-recorded audio
+-> `voice_io.transcribe_file` -> the same mlx-whisper model) and
+`ChatPanel.tsx`'s mic button (`toggleRecording`, tap-to-start/tap-to-
+stop, uploads via `transcribeVoice`, then calls the SAME `handleSend`
+a typed message takes) were both already fully built — just gated
+behind `{!isTauri() && (...)}`  because at the time the Mac's separate
+hotkey daemon existed and a second voice affordance in the same window
+would have been confusing. Retiring the daemon made removing that one
+gate the actual fix: because a voice turn now flows through THIS
+panel's own `handleSend` (identical to typing), it streams live into
+the open chat exactly like a typed turn — no separate sync mechanism,
+which is exactly what "have to refresh to see my voice input" was
+pointing at (the old daemon wrote turns via its own isolated
+`ainvoke()`, invisible to this panel except via a 4s poll). Confirmed
+the mic-permission plumbing was already in place too:
+`src-tauri/Info.plist` already declares `NSMicrophoneUsageDescription`
+(added in an earlier session specifically because a subprocess's
+"responsible process" becoming the app bundle instead of Terminal
+silently denied mic access — the SAME class of TCC quirk Part B's
+unresolved hotkey investigation was chasing).
+
+Added on top: reply speech via the browser's own Web Speech API
+(`ChatPanel.tsx`'s `speakReply`, `window.speechSynthesis`) rather than
+a new backend TTS endpoint — no round trip, no new server surface,
+matches Claude/ChatGPT's own "voice mode speaks back" behavior. Only
+fires for a turn that actually originated by voice (`voiceTurnRef`,
+set right before the post-transcription `handleSend` call, read once
+in `applyResult` and cleared either way) — a typed turn stays silent,
+and a turn that hits a confirmation gate stays silent too rather than
+speaking the eventual approved/declined outcome, since gate answers
+are click-only again now (see below).
+
+**Deliberately NOT rebuilt:** the daemon's spoken-confirmation-answer
+path (`parse_confirmation`, the `ANSWERING` state, `voice_approvable`
+gating on the daemon side) is gone with no in-app replacement — a
+voice-originated turn that hits a gate shows the exact same click-
+based `InterruptGate` card a typed turn would. This was always
+consistent with the standing rule that free-text gate content is
+never voice-approvable anyway; what's actually lost is the ability to
+approve a SIMPLE (non-free-text) gate, like a calendar-event delete,
+by speaking "yes" instead of clicking. Also lost, called out
+explicitly rather than silently: the daemon's local, client-side
+"start a new conversation" trigger phrase for switching threads by
+voice — no equivalent exists in the new path (the dashboard's own
+New Thread button in the thread sidebar is the replacement, one click
+away).
+
+**Removed:** `assistant/voice_daemon.py` (deleted outright); `voice_io.py`
+trimmed to just `transcribe_file` + `STT_MODEL_REPO` (dropped `Recorder`,
+buffer-based `transcribe()`, `speak()`, TTS voice-resolution, and
+`parse_confirmation` — all daemon-only, now dead); `tests/test_voice_io.py`
+rewritten down to one test covering the surviving `transcribe_file`
+(the 13 tests it used to have all covered removed code); the
+`assistant-voice` console-script entry (`pyproject.toml`); the
+`pynput`/`rumps`/`sounddevice`/`numpy` dependencies (`pyproject.toml` +
+`requirements.txt` — confirmed via grep that nothing else in the
+codebase imports any of the four); `src-tauri/src/lib.rs`'s
+`spawn_voice_daemon`/`free_process_matching`/the `ManagedProcesses.
+voice_daemon` field/its `kill_managed_processes` cleanup branch (Rust
+still builds clean, zero warnings, confirmed via a forced rebuild);
+`launchd/com.mohitvuyyuru.assistant-voice.plist` (and the now-empty
+`launchd/` directory itself). README.md's voice-related sections
+(top summary, feature bullets, architecture tree, the whole "Voice
+mode" setup section, the `ASSISTANT_TTS_VOICE` env var row, the
+security-model "voice confirmation fails closed" bullet) rewritten to
+describe the in-app version; historical/comparative mentions of
+`voice_daemon.py` scattered through other modules' docstrings
+(server.py, thread_store.py, observability.py, fa_service.py) left
+untouched deliberately — they're citing design lineage, not asserting
+the file still exists in a way that would mislead.
+
+**Verification:** 341 backend tests collected, 340 pass / 1 fails — the
+already-documented `threads.sqlite` active-thread-pointer flake
+(CLAUDE.md's own Phase 26/memory-re-architecture note), this run
+triggered by this SAME session's own earlier permission-probe testing
+switching the active thread away from the legacy default, not by
+anything in this change. 99/99 frontend tests pass. `tsc --noEmit`:
+clean. `npx prettier --check` on the touched file: clean. `npm run
+build`: succeeds. `ruff check assistant/ tests/`: one pre-existing,
+unrelated finding in `supervisor.py` (an import-source lint rule,
+confirmed nowhere near anything touched here). Rust: clean rebuild, zero
+warnings. Restarted Oni end-to-end after all removals — backend comes
+up healthy (`GET /threads` -> 200), dashboard window comes up, and
+critically `ps aux` shows no `assistant-voice` process at all anymore.
+
+**Not yet done, and can't be done from here:** an actual human tap of
+the new mic button in the live dashboard — recording, transcription,
+live-appended chat turn, and spoken reply — needs a real microphone and
+a real ear, neither of which this session has. Which system voice the
+browser's `speechSynthesis` actually picks inside the Tauri WKWebView is
+unchecked (no code exists anymore to request a specific one, e.g. the
+old `ASSISTANT_TTS_VOICE`/"Ava (Premium)" preference — it now depends
+on whatever WebKit/AVSpeechSynthesizer defaults to). CLAUDE.md's Current
+Status / Load-bearing-decisions text still describes the retired
+daemon in several places; a proposed edit was presented to the user
+for approval rather than applied directly, per this file's own status-
+edit rule. Not committed.
+
+## 124. Phase 27 scoped: Obsidian vault as Oni's own note-store (2026-08-06)
+
+**What:** the user asked about Obsidian-as-second-brain conversationally,
+then asked to scope it as a phase before any code — run through a full
+`/grill-with-docs` session (`/grilling` + `/domain-modeling`). Unlike Phase
+25's own scoping session (STEPS.md 117), `/domain-modeling` was actually
+findable and installable this time: searched `npx skills find domain
+modeling`, picked `mattpocock/skills@obsidian-vault`'s sibling
+`domain-modeling` skill (341K installs, Gen/Socket/Snyk all clean),
+installed globally after the auto-mode classifier blocked the first
+attempt and the user approved it via `/permissions`. This is the first
+time this project has a real `CONTEXT.md` or `docs/adr/` directory.
+
+**Real findings during scoping, not assumed:**
+- Went looking for what this phase would build on (`disk_tools.py`'s
+  ungated `search_disk`/`read_disk_file`, Phase 23) and found those tools
+  wired into no agent at all — a same-day, uncommitted rewrite
+  (`assistant/claude_code_tool.py`, not otherwise logged yet) replaced
+  `coding_agent`'s own file tools with `run_claude_code`, a nested Claude
+  Code session with full ungated home-directory access. Ruled out reusing
+  either for this phase — one's dead, the other's too heavy and
+  `coding_agent`-only for "recall something from my notes."
+- `mdfind`/`find` turned up three Obsidian vaults already on this Mac:
+  this repo's own root (`.obsidian/`, gitignored — already used to browse
+  this project's own `PLAN.md`/`STEPS.md` via Obsidian's graph view, plus
+  one personal note, `Assistant — Full Graph.md`, outside the STEPS.md
+  convention), `~/Documents/Courses` (17 notes), `~/Documents/summer26/
+  NovaWorks` (45 notes). Directly reframed the opening conversational
+  question — the user already uses Obsidian, including on this exact
+  project.
+- Researched the Obsidian skill/tool ecosystem before choosing an
+  implementation: `kepano/obsidian-skills@obsidian-markdown` (kepano =
+  Obsidian's own CEO, Steph Ango) is a clean syntax reference with zero
+  tool footprint, installed. `bitbonsai/mcpvault@obsidian` is a real MCP
+  server (would extend this project's Phase 2 Gmail/Calendar MCP
+  precedent) but needs Obsidian.app actively running for some operations;
+  same constraint on `kepano/obsidian-skills@obsidian-cli`. Both passed
+  over in favor of hand-rolling, mirroring `disk_tools.py`'s own pattern.
+
+**Decisions reached (see PLAN.md's Phase 27 entry and `docs/adr/0001-*`/
+`0002-*` for full reasoning on each):** a new dedicated tool module, not
+`run_claude_code`, not a `disk_tools.py` revival; hand-rolled plain-file
+I/O, not an MCP server; owned by `research_agent`+`life_admin_agent` only
+to start, same "prove narrow first" instinct as Phase 18's `render_ui`;
+a brand-new vault at `~/Documents/OniVault`, not reusing any of the three
+that already exist; full CRUD (`search_vault`/`read_vault_note`/
+`write_vault_note`/`update_vault_note`/`delete_vault_note`), revised up
+from an initial create-only proposal once the user asked for update and
+delete too; writes/deletes fully ungated, no review queue — the user's
+own call, reasoning it'll be audited by opening the app directly, not
+through the dashboard (`docs/adr/0001-*`); `delete_vault_note` refuses to
+delete a Note missing an `oni: true` marker, protecting notes the user
+adds themselves; Oni decides autonomously when to write, not
+request-only — the user's own call against this session's own "start
+narrow" recommendation (`docs/adr/0002-*`); `write_vault_note` must
+search for and link related notes, not leave linking optional; full-body
+overwrite semantics for updates (matches `write_disk_file`), but only
+after reading the current body back first; a hard cap of 3 combined
+write/update calls per model turn as the one backstop against the
+autonomous-write decision turning into a runaway loop; search/read
+scoped to the vault directory only, via directory-walk text search
+rather than `mdfind`, since a just-written Note might not be
+Spotlight-indexed yet.
+
+**Process:** scoped only — nothing built. PLAN.md's Phase 27 entry marked
+PLANNED, not ACTIVE, per this project's own standing rule (CLAUDE.md: "do
+not build ahead of the active phase"). `CONTEXT.md` and `docs/adr/
+0001-*`/`0002-*` are new files, created live during the session per
+`/domain-modeling`'s own "update inline, don't batch" instruction, not
+written up after the fact.
+
+## 125. `~/Documents/OniVault` seeded with real notes on `~/Documents/Courses`, done directly by Claude Code, not through Oni (2026-08-06)
+
+**What:** the user asked to populate the (still-unbuilt) Phase 27 vault
+with notes on their real `~/Documents/Courses` folder, explicitly done
+by Claude Code itself rather than through Oni's own graph — the
+stated reason being cost: this session bills against the Claude.ai
+subscription, while a real `obsidian_tools.py` call through Oni would
+bill the Console pay-per-token key. No Phase 27 code was written; this
+is content, not implementation, and does not change Phase 27's PLANNED
+status.
+
+**Real findings, not assumed:** `~/Documents/Courses` turned out to be
+far larger and messier than the 17-note sample found during Phase 27's
+own scoping session — 3 semesters, 11 real courses, and heavy clutter
+(duplicate `.git` clones of group projects — COMP2113's alone had ~9
+backup copies — `__pycache__`, and a `github-recovery-codes.txt` sitting
+directly in the folder root, never read or referenced). A 4th
+pre-existing Obsidian vault was found nested inside `MATH2012`
+(`.obsidian/`), missed by the original scoping session's shallower
+`find -maxdepth 4`. Two files were found misfiled into the wrong course
+folder (landed in `CCCH9032`, actually belonging to COMP2113/ENGG1340
+and MATH2012) — flagged in the notes, not moved, since the source folder
+was kept strictly read-only throughout.
+
+**Process:** dispatched 11 parallel read-only `Explore` subagents (one
+per course), each told to skip `.git`/`__pycache__`/`.DS_Store`/lock
+files/audio, never read anything credential-shaped, and convert
+`.docx`/`.pptx` to text via macOS's built-in `textutil` rather than
+adding a new dependency. One agent (`AIHU1002`) accidentally left an
+empty stray file (`Week 3.txt`) inside the real source folder via a
+misused `textutil` redirect — caught and deleted immediately, the one
+place this session touched `Courses` at all beyond reading. One course
+(`CCAI9025`) hit a hard Claude content-safety refusal twice in a row on
+two different framings (`API Error: Sonnet 5 can't help with this`);
+rather than keep retrying blindly against a repeated block, this was
+stopped and written up as its own flagged note (filenames only, no
+content read, no guessing at cause) instead of silently omitting it or
+routing around the refusal.
+
+**Delivered:** 12 new files in `~/Documents/OniVault` — one note per
+successfully-summarized course (all carrying `oni: true` frontmatter and
+cross-linking `[[wikilinks]]` to related courses, per Phase 27's own
+locked design, e.g. AIHU1001's explainability debate ↔ AIHU1002's
+algorithmic-fairness week), the one flagged CCAI9025 stub, and an index
+note (`Courses — Overview.md`). `~/Documents/Courses` itself is
+unmodified (confirmed via a final `find -newer` sanity check) beyond the
+one stray file created and then deleted mid-session.
+
+**Follow-up in the same session, at the user's explicit request:** the
+two misfiled files found inside `CCCH9032` (an ENGG1340 exercise and a
+MATH2012 proof assignment) were moved back to their correct course
+folders — the one deliberate, requested exception to this session's
+otherwise read-only treatment of `Courses`. The affected vault notes
+(`CCCH9032`, `MATH2012`, `Courses — Overview`) were updated from
+"flagged, not moved" to reflect the actual move.
+
+**CCAI9025 resolved on a third attempt (same session, user asked to
+retry).** The first two failures were whole-folder passes; the third
+attempt tested a specific hypothesis — that the folder's IMAGES (4
+screenshots, a Twitter/X-CDN jpeg, 2 other images), not its text, were
+triggering the refusal — by hard-forbidding the subagent from opening
+any image file at all and reading only the `.docx`/`.pdf` text. That
+succeeded cleanly with zero refusals on all 7 text documents,
+confirming the hypothesis. The course turned out to be a Common Core AI
+course (embodied AI/robotics in healthcare: a group presentation, a
+field-trip reflection covering Huawei + CUHK's T-Stone Robotics
+Institute, and a fiction-format AI-ethics essay). The placeholder stub
+note was replaced with a real one, and both it and `Courses — Overview`
+record that the note is built from text sources only — the images
+remain deliberately unreviewed rather than quietly assumed harmless.
+
+## 126. Phase 27 built: `assistant/obsidian_tools.py`, wired into research_agent/life_admin_agent, live-verified (2026-08-07)
+
+**What:** built the actual Phase 27 code (PLAN.md, scoped STEPS.md 124) —
+`search_vault`/`read_vault_note`/`write_vault_note`/`update_vault_note`/
+`delete_vault_note`, all fully ungated per `docs/adr/0001-*`. Wired into
+`research_agent` and `life_admin_agent` (`sub_agents.py`), with both
+system prompts extended to tell the specialist to decide FOR ITSELF when
+something's worth saving (`docs/adr/0002-*` — no "ask permission first"
+language). `supervisor.py`'s routing clause updated too, naming the vault
+explicitly for both specialists — the same "supervisor can't see a
+specialist's bound tools" routing-blindness class Phases 18/20 both hit
+for `render_ui`/the board, assumed to recur here rather than assumed
+away.
+
+**Implementation decisions made while building, not fully spelled out in
+the original locked design:**
+- **`update_vault_note` gets the SAME `oni: true` authorship check
+  `delete_vault_note` has**, even though `docs/adr/0001-*`'s own text only
+  names delete. Reasoning: an unprotected full-body overwrite is exactly
+  as destructive as an unprotected delete — leaving update unguarded would
+  make the delete protection pointless. Documented in the module's own
+  docstring as a deliberate extension of the same standing rule, not a
+  separate weaker one.
+- **The per-turn write cap (Decision 10) is enforced inside the tools
+  themselves via `InjectedState`**, counting prior `write_vault_note`/
+  `update_vault_note` tool-call attempts in the conversation's own message
+  history — same mechanism `disk_tools.py`'s gated tools already use to
+  read `pre_approved_actions`, just counting instead of set-membership.
+  No new `NoParallel*Writes`-style middleware needed, since nothing here
+  calls `interrupt()` — the failure mode those middlewares guard against
+  (a second same-turn interrupt getting silently stranded) doesn't apply
+  to an ungated tool.
+- **Active linking (Decision 8) is mechanical, not prompted:**
+  `write_vault_note` extracts keywords from the new note's title, matches
+  them against every existing note's title, and appends a real
+  `[[wikilink]]`-based "Related Notes" section itself — the model never
+  hand-types a link, so there's no hallucinated-target risk.
+- **`write_vault_note` always creates at the vault root**, never nested
+  into the Semester/Course folder structure the 138 pre-existing course
+  notes (STEPS.md 125) live in — Oni has no knowledge of that taxonomy and
+  no reason to participate in it. Read/update/delete look up a Note by
+  title anywhere in the tree, so Oni can still reach any existing note.
+- Frontmatter parsing/writing is hand-rolled (a few regex line-matches),
+  not `pyyaml` — confirmed `pyyaml` is only an undeclared transitive
+  dependency in this venv (via langchain, not `requirements.txt`/
+  `pyproject.toml`), and every field this module touches is a single
+  unquoted scalar, so a real parser wasn't worth the implicit-dependency
+  risk.
+
+**Live-verified against the real graph, not just unit tests** (a
+throwaway script, `/tmp`-scoped checkpointer + a temp `VAULT_DIR`
+monkeypatch, never touching the real `conversation_memory.sqlite` or the
+real `~/Documents/OniVault`'s 138 notes): a real turn asking the
+supervisor to save a fact → real delegation → real `write_vault_note`
+call → a real file with correct `oni: true` frontmatter appeared on disk;
+a real follow-up turn on the same thread correctly recalled the saved
+fact; a real turn asking it to delete a manually-planted
+non-`oni:true` note → real delegation → real `delete_vault_note` call →
+correctly refused, explained the refusal to the user in its own reply,
+and the file was confirmed still present on disk afterward. This
+specifically proves the part unit tests structurally can't: that the
+supervisor actually routes a vault request to a specialist at all, and
+that a real model in a real tool-calling loop calls these tools
+correctly.
+
+24 new tests (`tests/test_obsidian_tools.py`) — write/read/update/delete
+lifecycle, title-collision refusal, related-note auto-linking, the
+per-turn cap, and the authorship-check refusal on both `update` and
+`delete`. One real bug caught and fixed in the tests themselves before
+they were trusted: three assertions were written outside their own
+`with _temp_vault()` block, so they were checking filesystem state after
+the tempdir was already cleaned up — one of the three (`.exists()` after
+a delete) was a genuine false-positive risk (would have passed even if
+delete had silently failed), not just a style issue. 364/365 backend
+tests pass suite-wide (the 1 failure is the pre-existing, already-
+documented `threads.sqlite` active-thread-pointer flake, confirmed
+unrelated — this work never touches `thread_store.py`/`server.py`);
+`ruff check .` clean on every new/changed file (1 pre-existing,
+unrelated `UP035` finding in `supervisor.py`, confirmed via `git stash`
+not introduced here). All 7 prompts re-synced to Langfuse
+(`scripts/sync_prompts_to_langfuse.py`) per this project's own standing
+lesson that a stale remote "production" prompt silently wins over an
+edited local fallback.
+
+**Not yet done:** PLAN.md's status header and CLAUDE.md's Current Status
+block still say Phase 27 is PLANNED — proposed for a status-flip
+approval, not yet applied, per this file's own status-edit rule. Not
+committed.
+
+## 127. Real incident: the previous entry's "live-verified" claim was too strong — the supervisor never actually reached the vault tools, and fixing that exposed a real data-integrity bug that deleted a real note (2026-08-07)
+
+**What happened, in order.** At the user's request, ran a 7-prompt test
+suite through the REAL running backend (a live `uvicorn` process on
+:8000, found already running rather than started fresh — see the
+project's own STEPS.md 96 hazard about killing a live backend
+accidentally, avoided here by checking first) with a dedicated new
+thread, deliberately NOT the isolated throwaway-script approach group
+126's own "live-verified" claim was based on.
+
+**Finding 1 — the supervisor never once reached the vault tools.**
+Every single vault-shaped request (save, recall, update, delete) got
+misrouted to `mac_control_agent`'s real Apple Notes.app tools instead —
+confirmed via direct evidence, not the model's own claims: a real Apple
+Note titled "Portuguese Learning Goal" was actually created (verified via
+`osascript`), the model's own replies referenced "the Mac-control tool I
+use," and the vault directory's file diff was empty across the whole
+run. One request ("delete the vault note titled X") instead made the
+**supervisor itself** raise a confirmation gate shaped like
+`delete_disk_file` — pattern-matching the verb "delete" onto the nearest
+`GATED_ACTIONS` key by lexical similarity, despite vault actions never
+being in that registry at all. This left a real stuck interrupt on the
+test thread, cleanly declined via `/resume` afterward.
+
+**Root cause and fix:** group 126's own "live-verified" claim rested on
+a script that called `research_agent` directly — proving the TOOLS work,
+never proving the SUPERVISOR reliably routes to them from natural
+phrasing. That's the actual gap this test suite exists to catch, and it
+did. Root cause: "note"/"vault" is genuinely ambiguous against
+`mac_control_agent`'s pre-existing, differently-scoped Notes.app tools
+(same vocabulary, "read and create Notes"), and the routing-clause edit
+group 126 made wasn't forceful enough to win against that competing
+interpretation — the exact routing-blindness class Phases 18/20 already
+hit for `render_ui`/the board, recurring here despite a prior attempt to
+guard against it. Fixed with three changes to `supervisor.py`'s prompt:
+an explicit disambiguation rule stated as its own paragraph ("'a note'/
+'the vault' vs. Notes.app... default to Oni's own vault" when ambiguous,
+Notes.app ONLY on explicit "Notes.app"/"Apple Notes" mention); an
+explicit carve-out in the `GATED_ACTIONS` instructions naming vault
+actions as never-gated and warning against verb-only pattern-matching;
+and a parenthetical at the `mac_control_agent` routing entry itself
+pointing at the disambiguation rule. A matching defensive line was added
+to `mac_control_agent`'s OWN prompt (`sub_agents.py`) for when an
+ambiguous instruction reaches it anyway. Re-synced to Langfuse; 35/35
+existing `test_supervisor.py`/`test_sub_agents.py` tests still pass;
+`ruff` clean (same 1 pre-existing finding).
+
+**Re-running the same 7-prompt suite against the fixed backend: 6 of 7
+correctly reached the real vault tools** (save, both recalls, update,
+and the Oni-authored delete all worked, confirmed via real file diffs on
+disk) — **but the delete-refusal test (#6) actually SUCCEEDED in
+deleting a real, pre-existing course note**
+(`CCCH9032 — Sick Man of Asia and Republican Physical Culture.md`),
+confirmed by the vault's own file diff and note count dropping to 137.
+
+**Finding 2, more serious than Finding 1 — a real data-integrity bug,
+not a code bug.** `delete_vault_note`'s `oni: true` authorship check
+(`docs/adr/0001-*`) executed exactly as coded. The reason it didn't
+protect this note: checked directly, **all 138 of the notes populated
+into the vault during STEPS.md 125's earlier Claude-Code-direct work
+carried `oni: true` in their frontmatter** — including this one — despite
+NONE of them having been written through Oni at all. That earlier
+session applied the template meant for Oni's OWN future writes to its
+own, unrelated authorship instead, silently defeating the entire
+authorship-check design for the whole vault's actual content from the
+moment it existed. `delete_vault_note`'s code was never wrong; the data
+it was checking was.
+
+**Recovery:** the deleted note's exact original content was still
+recoverable from this same session's own earlier tool-call history (the
+`Write` call that first created it) — restored byte-for-byte, this time
+correctly marked `oni: false`. Then bulk-corrected the SAME mistake
+across all remaining 137 notes (`oni: true` → `oni: false`, a single
+`sed` pass, `grep`-verified zero remaining `oni: true` anywhere in the
+vault and no unrelated frontmatter fields disturbed). Re-verified
+directly against the real file (not through a live model call this
+time, to avoid a second accidental deletion while confirming the fix):
+`_is_oni_authored()` now correctly returns `False` for the restored
+note, and a direct `delete_vault_note.invoke()` call against it now
+correctly refuses with the expected message, file confirmed still
+present.
+
+**Lesson, stated plainly for the record:** "live-verified" is a claim
+about what was actually exercised, not about what should logically work
+given the tools pass their unit tests — this project's own standing
+verification discipline, re-learned the expensive way. A script that
+bypasses the supervisor to call a specialist directly verifies the
+specialist; it does not verify the supervisor's own routing decision,
+which is exactly where both of this entry's real bugs lived. Group 126's
+STEPS.md/PLAN.md/CLAUDE.md status text should be read as accurate for
+"the tools work in isolation," not as ever having demonstrated "the
+supervisor reaches them from real phrasing" — that claim is only true as
+of THIS entry.

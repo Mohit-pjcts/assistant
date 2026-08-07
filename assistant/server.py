@@ -79,8 +79,10 @@ from PIL import Image  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from assistant import (  # noqa: E402
+    active_turns,
     automation_store,
     board_store,
+    claude_code_sessions,
     memory_review_agent,
     memory_store,
     observability,
@@ -377,6 +379,8 @@ async def _stream_turn(
     task = asyncio.current_task()
     if task is not None:
         app.state.active_tasks[thread_id] = task
+    active_turns.start_turn(thread_id, channel="dashboard")
+    outcome: active_turns.Outcome = "completed"
     try:
         config = make_thread_config(thread_id)
         # Phase 16 Part B (v3 migration): wraps the actual graph streaming
@@ -492,11 +496,14 @@ async def _stream_turn(
         # /chat/stop already told its caller "stopped: true" — nothing left
         # to signal here; letting this propagate closes the SSE connection,
         # which is exactly what the client sees as "the stream stopped."
+        outcome = "cancelled"
         raise
     except Exception as exc:  # network errors, rate limits, etc. — data, not a crash
+        outcome = "error"
         yield _sse_event({"type": "error", "detail": f"{type(exc).__name__}: {exc}"})
     finally:
         app.state.active_tasks.pop(thread_id, None)
+        active_turns.finish_turn(thread_id, outcome=outcome)
 
 
 async def _run_turn(
@@ -550,6 +557,8 @@ async def _run_turn(
         if stored_headers
         else observability.tracing_context(thread_id)
     )
+    active_turns.start_turn(thread_id, channel="phone")
+    outcome: active_turns.Outcome = "completed"
     try:
         with tracing_scope as span:
             if span is not None and not is_resume:
@@ -614,8 +623,14 @@ async def _run_turn(
                     response["phone_actions"] = phone_actions
         await thread_store.touch_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
         return response
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
     except Exception as exc:  # data, not a crash — same convention as _stream_turn's error frame
+        outcome = "error"
         return {"type": "error", "detail": f"{type(exc).__name__}: {exc}"}
+    finally:
+        active_turns.finish_turn(thread_id, outcome=outcome)
 
 
 # --- File/photo upload (dashboard chat composer) --------------------------
@@ -1231,6 +1246,26 @@ async def stop_chat(request: StopRequest) -> dict[str, Any]:
     return {"stopped": True}
 
 
+@app.get("/activity/active")
+async def list_active_turns() -> dict[str, Any]:
+    """Every currently in-flight agent turn, across ALL channels (dashboard,
+    voice, phone, unattended automations) — polled by the dashboard's
+    persistent activity indicator (PLAN.md, STEPS.md 122) so a long-running
+    or stuck turn is visible regardless of which tab is open or which
+    channel started it. See `assistant/active_turns.py`'s module docstring
+    for exactly what "in-flight" covers and its one accepted scope gap
+    (specialist-internal activity isn't tracked, only the top-level
+    supervisor/specialist-delegation view).
+
+    Also returns `recently_ended` — turns that ended (any outcome) within
+    the last 30s, the follow-up to the above that closes a related gap: a
+    turn started by voice/phone/an automation that ends abnormally was
+    otherwise invisible to every OTHER tab/channel the instant it dropped
+    out of `active`, with nothing distinguishing "finished fine" from "just
+    broke." See `active_turns.list_recent()`'s own docstring."""
+    return {"active": active_turns.list_active(), "recently_ended": active_turns.list_recent()}
+
+
 @app.get("/threads")
 async def list_threads() -> dict[str, Any]:
     threads = await thread_store.list_threads(db_path=thread_store.DEFAULT_DB_PATH)
@@ -1706,6 +1741,8 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
         f"{automation.action} action it is scoped to; it does not need a fresh "
         "confirmation from you."
     )
+    active_turns.start_turn(f"automation:{automation_id}", channel="automation", agent=specialist_name)
+    turn_outcome: active_turns.Outcome = "completed"
     try:
         content, _surfaces, _phone_actions, _executed_actions = await _invoke_agent_graph(
             specialist_graph,
@@ -1713,10 +1750,16 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
             [HumanMessage(content=instruction)],
             {automation.action},
         )
+    except asyncio.CancelledError:
+        turn_outcome = "cancelled"
+        raise
     except Exception as exc:  # a real upstream failure — logged, not raised
+        turn_outcome = "error"
         detail = f"{type(exc).__name__}: {exc}"
         await automation_store.log_run(automation_id, outcome="error", detail=detail)
         return {"outcome": "error", "detail": detail}
+    finally:
+        active_turns.finish_turn(f"automation:{automation_id}", outcome=turn_outcome)
 
     await automation_store.log_run(automation_id, outcome="fired", detail=content)
     return {"outcome": "fired", "detail": content}
@@ -1771,6 +1814,30 @@ async def get_workflow(run_id: str) -> dict[str, Any]:
     if run is None:
         raise HTTPException(status_code=404, detail=f"No workflow run with id {run_id}")
     return _serialize_workflow_run(run)
+
+
+# --- Claude Code sessions (2026-08-06) --------------------------------------
+#
+# Read-only, same reasoning as the Workflows section above: run_claude_code
+# (assistant/claude_code_tool.py) is the only writer of these sessions —
+# Claude Code's own CLI process writes the underlying .jsonl transcripts,
+# not this server — so there is no POST/PATCH/DELETE here. Exists purely
+# because Claude Code's own interactive session browser filters these
+# sessions out (they're tagged entrypoint="sdk-cli", not an interactive
+# terminal session) — see claude_code_sessions.py's own module docstring.
+
+
+@app.get("/claude-code-sessions")
+async def list_claude_code_sessions() -> dict[str, Any]:
+    return {"sessions": claude_code_sessions.list_sessions()}
+
+
+@app.get("/claude-code-sessions/{session_id}")
+async def get_claude_code_session(session_id: str) -> dict[str, Any]:
+    session = claude_code_sessions.read_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"No Claude Code session with id {session_id}")
+    return session
 
 
 @app.get("/cost")

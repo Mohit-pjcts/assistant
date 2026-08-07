@@ -237,6 +237,47 @@ describe("ChatPanel", () => {
     expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
   });
 
+  // A real, live-observed bug: a stream dying mid-turn (backend restart,
+  // network drop — anything that isn't a user-requested stop) only ever
+  // set ChatPanel's own local `error` state, which gets wiped by the very
+  // next message and disappears entirely on a tab-switch remount. Nothing
+  // durable was ever left behind, so the user had no way to tell a turn
+  // silently failed to finish. This must land in the transcript instead,
+  // and must tell the shared activity graph (onStreamEnded) to stop
+  // showing whatever tool call never got its own tool_end.
+  it("a non-stop stream failure leaves a durable message in the transcript and clears activity state", async () => {
+    const user = userEvent.setup();
+    const onStreamEnded = vi.fn();
+    let capturedOnToken: ((text: string) => void) | undefined;
+    let rejectTurn!: (err: Error) => void;
+    const pending = new Promise<never>((_resolve, reject) => {
+      rejectTurn = reject;
+    });
+    mockedSendChat.mockImplementation(async (_message, onToken) => {
+      capturedOnToken = onToken;
+      return pending;
+    });
+
+    render(<ChatPanel onStreamEnded={onStreamEnded} />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "build the feature");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    capturedOnToken?.("working on it");
+    await screen.findByTestId("streaming-bubble");
+
+    // Simulate the backend process dying mid-turn (e.g. uvicorn --reload
+    // restarting) — the connection ends with no terminal frame, same
+    // failure shape api.ts's streamSSE throws for any abnormal close.
+    rejectTurn(new Error("/chat: stream ended without a terminal event"));
+
+    await waitFor(() => expect(document.body.textContent).toContain("Connection to Oni was lost"));
+    expect(document.body.textContent).toContain("working on it");
+    expect(onStreamEnded).toHaveBeenCalledTimes(1);
+    // Busy state cleared — back to a normal Send button, not stuck.
+    expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
+  });
+
   it("renders an A2UI surface delivered via onA2UI inline with the assistant's reply", async () => {
     // Phase 17 (PLAN.md): server.py forwards render_ui's validated surface
     // as a non-terminal `{"type": "a2ui", ...}` frame — api.ts surfaces it

@@ -24,7 +24,6 @@ const BACKEND_PORT: u16 = 8000;
 
 struct ManagedProcesses {
     backend: Mutex<Option<Child>>,
-    voice_daemon: Mutex<Option<Child>>,
 }
 
 fn project_root() -> PathBuf {
@@ -124,46 +123,6 @@ fn spawn_backend() -> std::io::Result<Child> {
         .spawn()
 }
 
-/// Kill any process whose command line matches `pattern` (via `pgrep -f`).
-/// The voice daemon has no port to probe the way `free_port` checks the
-/// backend, so this is the equivalent collision-avoidance check for it —
-/// same "always start fresh" guarantee, different detection mechanism.
-fn free_process_matching(pattern: &str) {
-    let Ok(output) = Command::new("pgrep").args(["-f", pattern]).output() else {
-        eprintln!("[assistant] could not run pgrep to check for {pattern}");
-        return;
-    };
-    for pid in String::from_utf8_lossy(&output.stdout).lines() {
-        let pid = pid.trim();
-        if pid.is_empty() {
-            continue;
-        }
-        eprintln!("[assistant] {pattern} already running as pid {pid}, killing it to start fresh");
-        let _ = Command::new("kill").arg(pid).status();
-    }
-}
-
-/// Spawn the voice daemon (`assistant-voice`, the console-script entry
-/// point — `assistant/voice_daemon.py`'s rumps menu-bar app) the same way
-/// the backend is spawned. Phase 14 packaging checkpoint: Tauri is now the
-/// SOLE owner of this process's lifecycle — the prior launchd LaunchAgent
-/// (`launchd/com.mohitvuyyuru.assistant-voice.plist`) was unloaded and its
-/// installed copy removed from `~/Library/LaunchAgents` in this same pass,
-/// specifically to avoid two independent mechanisms fighting over one
-/// process (the exact dual-ownership confusion STEPS.md 70 diagnosed for
-/// the backend). The daemon's own behavior — hotkey, mic, STT/TTS, TCC
-/// permissions (pinned to this same `.venv/bin/assistant-voice` path,
-/// STEPS.md 42) — is completely untouched; only WHO starts/stops the
-/// process changed. The repo's `launchd/*.plist` is kept as-is for
-/// reference/rollback, not deleted.
-fn spawn_voice_daemon() -> std::io::Result<Child> {
-    let root = project_root();
-    let binary = root.join(".venv/bin/assistant-voice");
-    free_process_matching(".venv/bin/assistant-voice");
-    eprintln!("[assistant] starting voice daemon: {}", binary.display());
-    Command::new(binary).current_dir(&root).spawn()
-}
-
 /// Block `setup()` (and therefore the main window's appearance — Tauri
 /// creates the configured window right after `setup()` returns) until the
 /// backend accepts a TCP connection, or `timeout` elapses. PLAN.md Phase 19:
@@ -191,11 +150,6 @@ fn kill_managed_processes(app_handle: &tauri::AppHandle) {
         let _ = child.kill();
         let _ = child.wait();
     };
-    if let Some(mut child) = state.voice_daemon.lock().unwrap().take() {
-        eprintln!("[assistant] stopping voice daemon");
-        let _ = child.kill();
-        let _ = child.wait();
-    };
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -218,16 +172,8 @@ pub fn run() {
                     None
                 }
             };
-            let voice_daemon = match spawn_voice_daemon() {
-                Ok(child) => Some(child),
-                Err(err) => {
-                    eprintln!("[assistant] failed to start voice daemon: {err}");
-                    None
-                }
-            };
             app.manage(ManagedProcesses {
                 backend: Mutex::new(backend),
-                voice_daemon: Mutex::new(voice_daemon),
             });
             Ok(())
         })

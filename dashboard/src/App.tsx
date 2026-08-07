@@ -12,6 +12,7 @@ import { CostSummaryCard } from "@/components/cost/CostSummaryCard";
 import { KanbanBoard } from "@/components/board/KanbanBoard";
 import { AutomationsPanel } from "@/components/automations/AutomationsPanel";
 import { WorkflowsPanel } from "@/components/workflows/WorkflowsPanel";
+import { ClaudeCodeSessionsPanel } from "@/components/claude-code/ClaudeCodeSessionsPanel";
 import { InProgressTasksCard } from "@/components/board/InProgressTasksCard";
 import { ThreadSidebar } from "@/components/threads/ThreadSidebar";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
@@ -19,6 +20,7 @@ import { AgentActivityGraph } from "@/components/activity/AgentActivityGraph";
 import { ToolCallTimeline } from "@/components/activity/ToolCallTimeline";
 import { StatusPill } from "@/components/activity/StatusPill";
 import { useAgentActivity } from "@/components/activity/useAgentActivity";
+import { ActiveTurnBanner } from "@/components/activity/ActiveTurnBanner";
 
 // PLAN.md Phase 9's initial panel set, all four now wired: chat (step 3),
 // history (step 4), memory (step 5), cost (step 6). Phase 15 added the
@@ -39,7 +41,7 @@ import { useAgentActivity } from "@/components/activity/useAgentActivity";
 // ChatPanel's own `onActivity` prop docstring for the full reasoning.
 function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const { activeAgent, activeTool, timeline, handleActivity } = useAgentActivity();
+  const { activeAgent, activeTool, timeline, handleActivity, resetActivity } = useAgentActivity();
   // Home tab landing composer hand-off: `activeTab` is controlled (rather
   // than Tabs' own uncontrolled defaultValue) specifically so submitting a
   // message on Home can switch to Chat programmatically. pendingHomeMessage
@@ -121,6 +123,11 @@ function App() {
             <ThemeToggle />
           </div>
         </header>
+        {/* STEPS.md 121-122: visible from every tab, not just Chat — a
+            turn started by voice/phone/an automation is otherwise
+            invisible to the dashboard entirely, which is exactly how a
+            43-retry, 28-minute loop went unnoticed. */}
+        <ActiveTurnBanner />
         <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1">
           <TabsList variant="line" className="border-b border-border">
             <TabsTrigger
@@ -171,6 +178,12 @@ function App() {
             >
               Workflows
             </TabsTrigger>
+            <TabsTrigger
+              value="claude-code"
+              className="panel-label text-xs after:bg-operator data-active:text-operator"
+            >
+              Claude Code
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="home" className="min-h-0 h-full">
             <HomePage greetingName="Mohit" onStartChat={startChatFromHome} />
@@ -179,6 +192,7 @@ function App() {
             <ChatPanel
               key={activeThreadId ?? "pending"}
               onActivity={handleActivity}
+              onStreamEnded={resetActivity}
               initialMessage={pendingHomeMessage}
               onConsumeInitialMessage={() => setPendingHomeMessage(null)}
             />
@@ -200,6 +214,9 @@ function App() {
           </TabsContent>
           <TabsContent value="workflows" className="min-h-0">
             <WorkflowsPanel />
+          </TabsContent>
+          <TabsContent value="claude-code" className="min-h-0">
+            <ClaudeCodeSessionsPanel />
           </TabsContent>
         </Tabs>
       </main>

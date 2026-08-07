@@ -113,4 +113,44 @@ describe("useAgentActivity", () => {
       status: "running",
     });
   });
+
+  // A real, live-observed bug (STEPS.md): a stream can die mid-tool-call
+  // (backend restart, network drop, a user-requested stop) with no
+  // matching tool_end ever arriving. Without resetActivity, activeAgent and
+  // the timeline's "running" entry would stay stuck forever.
+  it("resetActivity clears in-flight state and marks stuck-running entries done", () => {
+    const { result } = renderHook(() => useAgentActivity());
+    act(() => {
+      result.current.handleActivity({
+        phase: "tool_start",
+        agent: "supervisor",
+        tool: "coding_agent",
+      });
+      result.current.handleActivity({
+        phase: "tool_start",
+        agent: "coding_agent",
+        tool: "execute_shell_command",
+      });
+    });
+    expect(result.current.activeAgent).toBe("coding_agent");
+    expect(result.current.activeTool).toBe("execute_shell_command");
+
+    act(() => {
+      result.current.resetActivity();
+    });
+    expect(result.current.activeAgent).toBeNull();
+    expect(result.current.activeTool).toBeNull();
+    expect(result.current.timeline.every((e) => e.status === "done")).toBe(true);
+
+    // A subsequent tool_start after the reset behaves normally — the
+    // cleared stack isn't left in some broken state.
+    act(() => {
+      result.current.handleActivity({
+        phase: "tool_start",
+        agent: "supervisor",
+        tool: "research_agent",
+      });
+    });
+    expect(result.current.activeAgent).toBe("research_agent");
+  });
 });
