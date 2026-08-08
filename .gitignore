@@ -25,6 +25,12 @@ tokens.json
 *.sqlite-shm
 *.sqlite-wal
 
+# SqliteSaver's own checkpoint/metadata blobs use a distinct
+# `<dbname>.sqlite-x-checkpoints-<id>-{checkpoint,metadata}.bin` naming
+# pattern that none of the globs above catch — found as untracked private
+# conversation-history files during a real commit pass (2026-08-08).
+*.sqlite-x-checkpoints-*.bin
+
 # LangGraph Studio (`langgraph dev`) local runtime state
 .langgraph_api/
 
@@ -41,6 +47,11 @@ tokens.json
 # integration into dashboard/ (oniMatchaTheme, KanbanBoard, HomePage, etc.).
 # Not part of the shipped app; never intended to enter the repo history.
 oni/
+
+# Instrument redesign sandbox — Obsidian-violet dashboard mockup (static
+# HTML/CSS/JS, no React) + its own handoff brief for porting into
+# dashboard/. Not part of the shipped app; never intended to enter history.
+instrument/
 
 # Claude Code skill-install artifacts — same standing policy as Phase 11's
 # skill-vetting cleanup (CLAUDE.md's security model): a skill is untrusted,

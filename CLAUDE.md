@@ -685,6 +685,14 @@ found as uncommitted changes and documented after the fact (STEPS.md
 119). Code complete but does not meet this project's normal done bar:
 no live verification, no growth in test coverage despite a large new
 surface area, not yet committed. See PLAN.md's own Phase 26 entry.
+Phase 27 (Obsidian vault: Oni's own note-store) was scoped 2026-08-06 via
+its own `/grill-with-docs` session (STEPS.md 124) and built + live-
+verified the next day (STEPS.md 126-127). Phase 28 (dashboard redesign:
+Obsidian-violet reskin, Project-grouped thread tree, radial chat
+selector, agent-activity physics upgrade) was scoped 2026-08-08 via its
+own `/grill-with-docs` session (STEPS.md 128), porting a standalone
+mockup (`instrument/`) built in an earlier session — PLANNED, not built.
+See PLAN.md.
 - **The Phase 5 menu-bar voice daemon is RETIRED, replaced by in-app
   voice I/O in the dashboard (2026-08-06, STEPS.md 123)** — not a
   numbered phase, a same-session architecture change at the user's
@@ -830,6 +838,294 @@ surface area, not yet committed. See PLAN.md's own Phase 26 entry.
   — see STEPS.md 125-127 for that work (125 for the population itself,
   127 for the `oni: true`-mislabeling bug found in it and fixed), which
   predates and is unrelated to this phase's own build.
+- **Phase 28 (dashboard redesign: Obsidian-violet reskin, Project-grouped
+  thread tree, radial chat selector, agent-activity physics upgrade) —
+  ALL 5 STEPS CODE-COMPLETE, a real fix pass done after the first
+  status-flip proposal turned out to be premature, re-proposed for
+  COMPLETE, not yet approved (scoped 2026-08-08 via a `/grill-with-docs`
+  session, STEPS.md 128; build started same day, STEPS.md 129-133; fix
+  pass STEPS.md 134).**
+  Ports `instrument/instrument.html` (a standalone,
+  gitignored, already-built interactive mockup) into the real
+  `dashboard/` app. Before the grilling session itself: independently
+  live-verified the mockup's one self-reported open gap (radial-node
+  drag-to-reposition, previously reasoned-not-observed due to a sandbox
+  limitation) using a separate Playwright/Chromium instance — the drag
+  genuinely works. Also found, unprompted by the mockup's own README, a
+  real terminology collision: the mockup names its sidebar data structure
+  `VAULT`, colliding with `CONTEXT.md`'s existing Vault term
+  (`~/Documents/OniVault`, Phase 27). Resolved during scoping —
+  `CONTEXT.md` now also defines `Thread` and `Project`; hierarchy is
+  `Oni → Project → Thread`, no Vault-like umbrella noun. Key decisions
+  locked (full reasoning in PLAN.md's Phase 28 entry): a new `projects`
+  table + nullable `project_id` FK on `thread_store.py`'s existing
+  `threads` table, one Project per Thread; manual-only assignment (no
+  agent/supervisor involvement, both a menu action AND tree drag-and-drop
+  are in scope); deleting a Project unassigns rather than cascade-deletes
+  its Threads (directly informed by Phase 27's own real accidental-delete
+  incident); `oniMatchaTheme` fully replaced by a new violet theme with
+  genuinely new light AND dark tuples (the mockup only ever designed
+  dark); radial-view project "bubbles" get an animated per-project hue
+  drift with no fixed color (the user's own idea), while the tree
+  sidebar/settings-panel legend keeps a stable round-robin-assigned tint;
+  one phase, five pieces, explicitly sequenced (data model → tree sidebar
+  → palette → activity-graph physics → radial selector) with per-piece
+  test coverage and live verification required throughout, an explicit
+  lesson carried over from Phase 26's own thin-coverage retrospective. No
+  ADR opened — every decision considered was judged too easy to reverse
+  to warrant one; recorded as prose in PLAN.md instead.
+  **Step 1 (`projects` table + API) is built and live-verified**
+  (STEPS.md 129): new `Project` dataclass + `projects` table +
+  `project_id` FK in `thread_store.py` (with an ALTER TABLE migration
+  path for pre-existing databases), `GET/POST/PATCH/DELETE /projects` +
+  `PATCH /threads/{id}/project` in `server.py`. 22/22 new
+  `test_thread_store.py` cases and 6/6 new `test_server.py` cases pass;
+  `ruff` clean. An unplanned but genuine live-verification event: this
+  Mac's own real, long-running Oni backend (`uvicorn --reload`) picked up
+  the edit automatically and migrated the REAL production `threads.sqlite`
+  live — confirmed non-destructive (all 73 pre-existing threads intact,
+  correctly ungrouped) and the live server still healthy afterward.
+  **Step 2 (Project-grouped tree sidebar) is also built** (STEPS.md 130):
+  new `dashboard/src/components/ui/dropdown-menu.tsx` (this project's
+  first dropdown menu, wraps `@base-ui/react/menu`); `ThreadSidebar.tsx`
+  rewritten with collapsible project folders, both locked assignment
+  mechanisms (a "Move to project" menu + tree drag-and-drop, both calling
+  one shared handler), and project create/rename/delete — every
+  pre-existing behavior/test-id preserved (verified, not assumed). A real
+  query-ambiguity bug (a project's own tree-header label collided with
+  its identically-named dropdown menu item under a plain text query,
+  silently toggling collapse instead of assigning) was found and fixed by
+  switching to role-scoped queries. 19 new frontend tests, 108/108 pass
+  suite-wide; `tsc`/`prettier`/`build` clean. Also confirmed live-building
+  cleanly in the user's own already-running Tauri dev app
+  (`vite --watch`, zero errors).
+  **Step 3 (full violet palette reskin) is also built** (STEPS.md 131):
+  `oniMatchaTheme` replaced outright by `oniObsidianTheme` (new
+  directory, old one deleted); every new light-mode color value verified
+  against real WCAG contrast ratios via a small `contrast.py` script, not
+  eyeballed (several initial picks failed AA and were darkened before
+  landing); a real terminology collision found (this app's own
+  pre-existing `--signal` token, Phase 14's "pending approval" color,
+  coincidentally shares a name with the mockup's own unrelated `--signal`
+  = "the violet accent" — no actual code collision resulted, documented
+  in both files regardless); `--operator` moves to the new violet accent
+  (it always just tracked the theme's own accent) while `--signal`/
+  `--alarm` deliberately do not, per `index.css`'s own pre-existing
+  rationale for keeping them decoupled. A real, pre-existing `astryx
+  theme build` tooling bug (classic vs. automatic JSX runtime mismatch,
+  unrelated to this phase, present since the theme was first generated)
+  was found and fixed with a one-line explicit React import. Confirmed
+  live in the user's running Tauri app. The user was asked directly
+  before this step given its all-at-once visual impact; approved.
+  **Step 4 (`AgentActivityGraph` physics upgrade) is also built**
+  (STEPS.md 132): organic drift, dispatch/response particles,
+  scramble-decode tool names, hover-highlight, all reconciled with the
+  real `useAgentActivity()` data (the mockup's own demo-only random
+  timer dropped entirely) — `activeTool` needed to actually be passed
+  down as a prop for the first time. A real React/rAF conflict (JSX
+  props fighting ref-driven position mutation, would have caused a
+  visible snap-back glitch) was caught and fixed before shipping. 8 new
+  tests (a jsdom `animationend` limitation confirmed directly and
+  documented rather than worked around with a misleading test); 116/116
+  pass suite-wide; confirmed live in the user's running Tauri app.
+  **Step 5 (radial chat selector) is also built** (STEPS.md 133): a new
+  DOM-free `radialSimulation.ts` holding the actual repel/link/center
+  physics (ported verbatim from the mockup, 12 tests exercising the math
+  directly — not just reasoned through) plus `RadialChatSelector.tsx`
+  (SVG rendering, pointer-capture drag, the full Filters/Groups/Display/
+  Forces settings panel), wired to real `projects`/`threads` data
+  including a case the mockup never had (an ungrouped thread, linked
+  directly to the hub). **A real unverified premise from this section's
+  own Decision 8 was caught and corrected while building on it:** "the
+  real app's right rail collapses below ~1040px" was never actually true
+  of `dashboard/src` — the real mechanism is a 768px (`md:`) off-canvas
+  drawer, traced directly to `App.tsx`; the settings panel now matches
+  that real pattern instead of an invented one. Several real bugs found
+  and fixed (an uncontrolled-input reset gap; two confirmed jsdom API
+  gaps — `setPointerCapture`, `createSVGPoint`/`getScreenCTM` — defended
+  against the same way the mockup's own code already did); a transient
+  live JSX syntax error, visible in the running dev server's own log
+  mid-edit, self-resolved once the edit completed (disclosed, not
+  glossed over — a real risk of editing files a live `--reload`/
+  `--watch` process is actively serving). 25 new tests across both new
+  files, 141/141 pass suite-wide; confirmed live-building cleanly
+  afterward. **One honestly-disclosed remaining gap:** the narrow-window
+  settings-panel fallback is built but not independently visually
+  verified at a real narrow width — the phase's own status-flip proposal
+  in PLAN.md names this explicitly rather than claiming full
+  live-verification it doesn't have.
+  **That first status-flip proposal turned out to be premature**
+  (STEPS.md 134): the user came back with `instrument/FIX_PLAN.md`/
+  `DESIGN.md` and real reference screenshots, diagnosing three concrete
+  bugs the live result actually had — a light-mode default reading as
+  generic (not Obsidian), the radial graph rendering all 73 real
+  (all-ungrouped) production threads with zero strategy (illegible
+  node-soup), and the settings panel docking left/over the sidebar
+  instead of right. Root-caused, not guessed at, each: bug 3 traced to
+  `App.tsx`'s legitimate mobile-drawer wrapper around `<ThreadSidebar>`
+  carrying a `transform` utility, which creates a CSS containing block
+  that trapped the radial overlay's `position:fixed` inside a 256px box
+  instead of the viewport — fixed with `createPortal(...,
+  document.body)`. Bug 2's fix was **redirected by the user away from
+  every option originally offered** (all three hid data) toward a
+  better, proven approach shown via a real screenshot of their own
+  Obsidian vault: never hide data, grow the canvas with node count
+  (`computeGraphDimensions`), add real pan/zoom (wheel-to-zoom centered
+  on the cursor, drag-to-pan the background), and hide text only once
+  zoomed out far enough to be illegible (a `radial-hide-labels` CSS
+  class toggled by zoom level) — exactly Obsidian's own graph-view
+  behavior. Bug 1 fixed per the user's own choice between FIX_PLAN's two
+  proposed paths: default fresh installs to dark (not "system"), since
+  the violet theme is dark-only by design; existing preferences
+  untouched. A fourth confirmed test-environment gap this session
+  surfaced while testing the theme fix: this environment's own
+  `localStorage` global is a non-functional Node.js native stub without
+  a `--localstorage-file` flag, silently shadowing jsdom's real one —
+  worked around with a small in-memory fake, same pattern as the
+  session's other confirmed gaps (AnimationEvent, setPointerCapture,
+  createSVGPoint/getScreenCTM). Every fix re-verified live via real
+  Playwright screenshots against the real 73-thread production database
+  (no Chrome-extension access in this session) — dynamic canvas
+  confirmed, zoom/LOD confirmed at three zoom levels, panel docking
+  confirmed via a measured 1440×900 bounding rect, dark-by-default
+  confirmed even with the OS forced to light. 157/157 tests pass
+  suite-wide (152 + 5 new theme tests); `tsc`/`prettier`/`build` clean.
+  All five steps are code-complete and tested; the flip to COMPLETE is
+  re-proposed in PLAN.md, now genuinely re-verified against the
+  reference rather than re-asserted from memory, awaiting the user's
+  explicit approval per this file's own standing rule.
+- **Phase 29 (full "Instrument" design-system replacement, not a
+  re-skin) — OPENED, ACTIVE, all 4 stages code-complete, NOT
+  live-verified (2026-08-08).**
+  The user judged Phase 28's live result "almost exactly the same" as
+  before — Phase 28 deliberately re-skinned colors/fonts onto the
+  EXISTING Astryx+shadcn architecture rather than replacing it; this
+  phase replaces it: zero-chrome chat (no message bubble at all — a
+  real one exists today, confirmed via a codebase survey, not assumed),
+  one shared `.instrument-card` primitive everywhere a card-shaped
+  object appears (kanban, gate confirmations, generative-UI, memory,
+  cost), and the full ten-technique motion grammar from
+  `instrument/instrument.html` (reveal-line, spotlight+tilt, draw-on,
+  trailing cursor, scramble-in, count-up, scanning border, animated tree
+  collapse, the already-built radial select). Scoped directly from the
+  user's own complete design brief, not a fresh `/grill-with-docs`
+  session — the brief left no real ambiguity, only sequencing. Full
+  survey findings, the 4-stage build plan, and the specific bugs
+  `instrument/DESIGN.md`'s own §12 already found once (never
+  `transform:scale()` on an animated SVG circle, never
+  `grid-template-rows` for the tree collapse, never bare `transition` +
+  class-toggle) are in PLAN.md's own Phase 29 entry. Astryx removal
+  (`@astryxdesign/core` usage) is confirmed cleanly isolated to exactly
+  6 files — the other 10+ panels have zero Astryx dependency already.
+  **Stage 1 (Foundation) is built and live-verified (STEPS.md 135):**
+  Instrument Serif/Sans fonts installed; the six semantic tokens (void/
+  paper/accent-signal/moss/rust/graphite) wired as real Tailwind
+  utilities (`--accent-signal` deliberately NOT named `--signal` — the
+  literal name collides with Phase 14's own pre-existing amber
+  "pending-approval" rail-grammar token); `.reveal`/`.instrument-card`/
+  `.instrument-card-scanning` CSS primitives plus a real `InstrumentCard`
+  React component (pointer-tracked spotlight+tilt, not yet adopted
+  anywhere — that's Stages 2-3); a new 9-item vertical `NavRail`
+  replacing the horizontal tab bar entirely; frame columns resized to
+  `instrument/DESIGN.md` §3's own proportions (thread list 216px, right
+  rail 260px). 157/157 tests pass unaffected; `tsc`/`build` clean;
+  confirmed live via a real Playwright screenshot (serif heading font,
+  working rail, resized columns all visibly correct — the right rail's
+  own cards still show old shadcn styling, expected, Stage 3's job).
+  **Stage 2 (Astryx removal + chat zero-chrome) is built and verified
+  (STEPS.md 136), started only after the user explicitly approved
+  proceeding.** This was the phase's single largest, most structurally
+  consequential piece — not a re-skin: `@astryxdesign/*` deleted
+  outright (package.json, `node_modules`, all CSS imports, 48 packages
+  removed via `npm install`), `AstryxThemeBridge.tsx` and the entire
+  `themes/` directory (`oniObsidian`/`matcha`) deleted, `main.tsx` no
+  longer wraps `<App>` in a theme bridge. All 6 files that used Astryx
+  rebuilt on shadcn/Tailwind + `InstrumentCard`: `ChatPanel.tsx` (the
+  real message bubble that contradicted "zero chrome" is gone, matching
+  `instrument/instrument.html`'s own `.msg`/`.who`/`.body` CSS exactly),
+  `InterruptGate.tsx` (done first and most carefully — every
+  `data-testid` and verbatim-content renderer byte-identical, all 23
+  `ChatPanel.test.tsx` tests pass unmodified, including the injection-
+  shaped-payload tests), `A2UIRenderer.tsx` (all 18 A2UI Basic Catalog
+  component renderers on native HTML, `ModalNode` rebuilt with
+  `createPortal` per Phase 28's own containing-block lesson, all 12
+  `A2UIRenderer.test.tsx` tests pass unmodified), `KanbanBoard.tsx` (no
+  test file — verified by drag-mechanics + API-call contract instead;
+  draggable cards deliberately use a plain `.instrument-card`-classed
+  div rather than the component, since drag hit-testing needs a real
+  external ref the component doesn't expose), and `HomePage.tsx` (both
+  tests pass unmodified). New shared primitives: `ui/chip.tsx`,
+  `ui/dialog.tsx`, `lib/relativeTime.ts`. A real jsdom gap found and
+  fixed along the way: `InstrumentCard`'s mousemove-driven tilt called
+  `window.matchMedia` unconditionally, which jsdom doesn't implement —
+  guarded, same class of environment gap as Phase 28's own four.
+  157/157 tests pass (unchanged count, no regressions); `tsc`/
+  `prettier`/`build` all clean. **Not live-verified in the real running
+  app** — no connected browser this session; the user's own auto-
+  reloading dev environment already has this live, pending their own
+  look. **Stage 3 (card-primitive rollout to Memory/Cost) is also built
+  and verified (STEPS.md 137):** `MemoryPanel.tsx`'s and
+  `CostPanel.tsx`/`CostSummaryCard.tsx`'s shadcn `Card` usages (neither
+  file ever used Astryx) rebuilt on `InstrumentCard`; new shared
+  `lib/useCountUp.ts` adds the design's own count-up technique to every
+  dollar/token/run figure, deliberately compatible with this file's own
+  prior no-sparkline decision (animates the number, no trend line) and
+  structurally safe in tests (jsdom has no `window.matchMedia`, so the
+  hook's initial-value-is-already-correct design keeps
+  `CostPanel.test.tsx`'s synchronous assertions passing). All 157 tests
+  still pass; `tsc`/`prettier`/`build` clean.
+  **Stage 4 (signature motion techniques) is also built and verified,
+  with two deliberate departures from the literal spec (STEPS.md 138)
+  — ALL FOUR STAGES of Phase 29 are now code-complete:** new
+  `BrandMark.tsx` (hand-drawn SVG draw-on, ported verbatim from
+  `instrument.html`'s own path data) in `App.tsx`'s header; rail-icon
+  redraw-on-switch confirmed structurally impossible against
+  lucide-react's actual API (no internal `<path>` access for
+  `pathLength` injection — `NavRail.tsx`'s own Stage 1 comment already
+  flagged this, now confirmed) and deliberately not built; new
+  `TrailingCursor.tsx` (global rAF-lerp cursor, `pointer:fine` +
+  reduced-motion gated) mounted once app-wide; the tree's collapse
+  adapted rather than built exactly per spec — the literal
+  always-mounted `max-height` technique conflicts with
+  `ThreadSidebar.test.tsx`'s own real, pre-existing a11y requirement
+  that a collapsed project's threads leave the DOM entirely, so only
+  EXPAND got an animated `.reveal` entrance, collapse stays instant.
+  157/157 tests pass unchanged; `tsc`/`prettier`/`build` clean.
+  **Not live-verified in the real running app across the ENTIRE
+  phase** — no connected browser existed in any session that built any
+  of Stages 1-4. Per this project's own Phase 26 precedent, that means
+  this phase does NOT meet the normal done bar yet — no COMPLETE status
+  flip should be proposed until the user has looked at the real,
+  already-live app themselves.
+- **A real live bug fix, same day: the new global trailing cursor
+  (Stage 4) was hiding the real OS cursor and making it disappear in
+  parts of the real app, reported directly by the user (STEPS.md 139).**
+  Root cause of the decorative overlay's own rendering gap wasn't
+  confirmed (no connected browser to inspect it). Fixed by no longer
+  hiding the real cursor at all — the dot/ring now render additively on
+  top of it, a deliberate departure from `DESIGN.md`'s own literal spec,
+  chosen because it structurally guarantees the reported symptom can't
+  recur. 157/157 tests pass; `tsc`/`prettier`/`build` clean.
+- **Home and Chat tabs merged into one, at the user's own direct
+  request — not part of Phase 29's own four stages (STEPS.md 140).**
+  `HomePage.tsx`'s landing view (greeting, category filter, suggestion
+  cards) moved verbatim into `ChatPanel.tsx` itself as a new `isNewChat`
+  branch, replacing the empty message log on a genuinely new/empty
+  thread; the SAME composer (attach/mic/send) already at the bottom of
+  the panel serves both states, so the mic is available on the landing
+  view for free. Sending a message (typed, spoken, or a suggestion-card
+  click) switches into normal chat mode instantly — `handleSend` already
+  appends the user's message synchronously before the network call.
+  `App.tsx`'s separate `"home"` tab and its `pendingHomeMessage` cross-
+  tab hand-off are gone; `NavRail.tsx` drops the `"home"` nav item (8
+  destinations now, not 9). `HomePage.tsx`/`HomePage.test.tsx` deleted
+  outright — its 2 tests ported into `ChatPanel.test.tsx` against the
+  real merged component. 159/159 tests pass (one earlier isolated
+  failure in an unrelated, untouched file — `RadialChatSelector.test
+  .tsx`'s own already-documented `localStorage`/jsdom gap — confirmed as
+  a pre-existing flake via 3 clean full-suite reruns, not a regression
+  from this change); `tsc`/`prettier`/`build` clean. Not live-verified —
+  same standing gap, no connected browser this session.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

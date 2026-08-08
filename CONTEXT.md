@@ -37,3 +37,17 @@ Notes link to each other via `[[wikilinks]]`; redundancy across notes is
 accepted by design, not treated as a defect — the Vault trades curation
 (which Facts have) for volume and connectivity.
 _Avoid_: fact, memory
+
+**Thread**:
+A single conversation with Oni — the checkpointed unit `thread_store.py`
+(Phase 15) registers and `/chat`/`/resume` operate on. Predates this file;
+named here for the first time because Project (below) now sits above it.
+_Avoid_: chat, conversation
+
+**Project**:
+A named grouping of Threads in the dashboard's sidebar — `Oni → Project →
+Thread`, replacing the old flat thread list (dashboard redesign port,
+PLAN.md). Deliberately NOT named "Vault" despite the mockup's own code using
+that word for this same tree — that would collide with the Vault entry
+above.
+_Avoid_: vault, folder
