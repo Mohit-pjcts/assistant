@@ -1336,6 +1336,81 @@ async def test_fire_automation_runs_through_the_real_graph_with_no_interrupt() -
         assert matching and matching[0]["outcome"] == "fired"
 
 
+# ---- Projects (PLAN.md Phase 28) — plain CRUD, no LLM calls needed.
+# Placed last and deliberately never let a project/thread creation here
+# become the shared active-thread pointer for an earlier real-graph test
+# that relies on it — thread_store.create_thread always reassigns the
+# pointer, so ordering these after every real-graph test avoids that
+# cross-test interference entirely.
+
+
+async def test_projects_crud_round_trips_through_the_api() -> None:
+    with TestClient(server.app) as client:
+        created = client.post("/projects", json={"name": "Coding"})
+        assert created.status_code == 200, created.text
+        project = created.json()
+        assert project["name"] == "Coding"
+        assert project["color"]
+
+        listed = client.get("/projects")
+        assert any(p["id"] == project["id"] for p in listed.json()["projects"])
+
+        renamed = client.patch(f"/projects/{project['id']}", json={"name": "Engineering"})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["name"] == "Engineering"
+
+
+async def test_rename_unknown_project_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.patch("/projects/does-not-exist", json={"name": "x"})
+        assert response.status_code == 404
+
+
+async def test_assigning_and_clearing_a_thread_project_round_trips_through_the_api() -> None:
+    with TestClient(server.app) as client:
+        project = client.post("/projects", json={"name": "Research"}).json()
+        thread = client.post("/threads", json={"title": "Roth vs traditional"}).json()
+
+        assigned = client.patch(f"/threads/{thread['id']}/project", json={"project_id": project["id"]})
+        assert assigned.status_code == 200, assigned.text
+        assert assigned.json()["project_id"] == project["id"]
+
+        cleared = client.patch(f"/threads/{thread['id']}/project", json={"project_id": None})
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["project_id"] is None
+
+
+async def test_assign_thread_project_unknown_ids_return_404() -> None:
+    with TestClient(server.app) as client:
+        project = client.post("/projects", json={"name": "Research"}).json()
+        bad_thread = client.patch("/threads/does-not-exist/project", json={"project_id": project["id"]})
+        assert bad_thread.status_code == 404
+
+        thread = client.post("/threads", json={"title": "x"}).json()
+        bad_project = client.patch(f"/threads/{thread['id']}/project", json={"project_id": "does-not-exist"})
+        assert bad_project.status_code == 404
+
+
+async def test_deleting_a_project_unassigns_its_threads_via_the_api() -> None:
+    with TestClient(server.app) as client:
+        project = client.post("/projects", json={"name": "Life Admin"}).json()
+        thread = client.post("/threads", json={"title": "Pack for Denver"}).json()
+        client.patch(f"/threads/{thread['id']}/project", json={"project_id": project["id"]})
+
+        deleted = client.delete(f"/projects/{project['id']}")
+        assert deleted.status_code == 200, deleted.text
+
+        threads = client.get("/threads").json()["threads"]
+        surviving = next(t for t in threads if t["id"] == thread["id"])
+        assert surviving["project_id"] is None
+
+
+async def test_delete_unknown_project_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.delete("/projects/does-not-exist")
+        assert response.status_code == 404
+
+
 if __name__ == "__main__":
     asyncio.run(test_chat_round_trips_through_the_real_graph())
     print("OK: /chat round-trips through the real graph")
@@ -1449,3 +1524,15 @@ if __name__ == "__main__":
     print("OK: firing an unknown automation returns 404")
     asyncio.run(test_fire_automation_runs_through_the_real_graph_with_no_interrupt())
     print("OK: firing a real automation runs through the real graph with no interrupt")
+    asyncio.run(test_projects_crud_round_trips_through_the_api())
+    print("OK: project create/list/rename round-trips through the API")
+    asyncio.run(test_rename_unknown_project_returns_404())
+    print("OK: renaming an unknown project returns 404")
+    asyncio.run(test_assigning_and_clearing_a_thread_project_round_trips_through_the_api())
+    print("OK: assigning and clearing a thread's project round-trips through the API")
+    asyncio.run(test_assign_thread_project_unknown_ids_return_404())
+    print("OK: assigning a thread's project with an unknown thread/project id returns 404")
+    asyncio.run(test_deleting_a_project_unassigns_its_threads_via_the_api())
+    print("OK: deleting a project unassigns rather than deletes its threads, via the API")
+    asyncio.run(test_delete_unknown_project_returns_404())
+    print("OK: deleting an unknown project returns 404")

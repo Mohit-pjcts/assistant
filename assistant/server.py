@@ -819,6 +819,22 @@ class RenameThreadRequest(BaseModel):
     title: str
 
 
+class CreateProjectRequest(BaseModel):
+    name: str
+
+
+class RenameProjectRequest(BaseModel):
+    name: str
+
+
+class AssignThreadProjectRequest(BaseModel):
+    # None clears a thread's project (Phase 28 Decision 2 — nullable,
+    # not just "some other project"). A plain `str | None` field (rather
+    # than an Optional-with-sentinel dance) is enough since this endpoint
+    # has no other fields that could be confused with an omitted one.
+    project_id: str | None
+
+
 async def _resolve_thread_id(explicit: str | None) -> str:
     """Explicit-thread_id-with-pointer-fallback (PLAN.md Phase 15 step 1):
     no thread_id means "the active pointer"; an explicit one must already
@@ -839,6 +855,16 @@ def _serialize_thread(thread: thread_store.Thread) -> dict[str, Any]:
         "title": thread.title,
         "created_at": thread.created_at,
         "last_active_at": thread.last_active_at,
+        "project_id": thread.project_id,
+    }
+
+
+def _serialize_project(project: thread_store.Project) -> dict[str, Any]:
+    return {
+        "id": project.id,
+        "name": project.name,
+        "color": project.color,
+        "created_at": project.created_at,
     }
 
 
@@ -1318,6 +1344,60 @@ async def delete_thread(thread_id: str) -> dict[str, Any]:
     except KeyError:
         raise HTTPException(status_code=404, detail=f"No thread with id {thread_id}")
     return {"deleted": True, "active_thread_id": active_thread_id}
+
+
+@app.patch("/threads/{thread_id}/project")
+async def assign_thread_project(thread_id: str, request: AssignThreadProjectRequest) -> dict[str, Any]:
+    """Both of Phase 28's UI paths (the tree's "Move to project" row
+    action and drag-and-drop) call this same endpoint — it's a plain
+    proxy to thread_store.assign_thread_project's own dual-error
+    behavior (KeyError for a bad thread_id, ValueError for a bad
+    project_id), which server.py resolves into the same 404 shape either
+    way since the client only needs to know the request failed."""
+    try:
+        thread = await thread_store.assign_thread_project(
+            thread_id, request.project_id, db_path=thread_store.DEFAULT_DB_PATH
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No thread with id {thread_id}")
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"No project with id {request.project_id}")
+    return _serialize_thread(thread)
+
+
+@app.get("/projects")
+async def list_projects() -> dict[str, Any]:
+    projects = await thread_store.list_projects(db_path=thread_store.DEFAULT_DB_PATH)
+    return {"projects": [_serialize_project(p) for p in projects]}
+
+
+@app.post("/projects")
+async def create_project(request: CreateProjectRequest) -> dict[str, Any]:
+    project = await thread_store.create_project(request.name, db_path=thread_store.DEFAULT_DB_PATH)
+    return _serialize_project(project)
+
+
+@app.patch("/projects/{project_id}")
+async def rename_project(project_id: str, request: RenameProjectRequest) -> dict[str, Any]:
+    try:
+        project = await thread_store.rename_project(
+            project_id, request.name, db_path=thread_store.DEFAULT_DB_PATH
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No project with id {project_id}")
+    return _serialize_project(project)
+
+
+@app.delete("/projects/{project_id}")
+async def delete_project(project_id: str) -> dict[str, Any]:
+    """Unassigns rather than deletes every Thread in this Project
+    (PLAN.md Phase 28 Decision 4) — see thread_store.delete_project's own
+    docstring for why."""
+    try:
+        await thread_store.delete_project(project_id, db_path=thread_store.DEFAULT_DB_PATH)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"No project with id {project_id}")
+    return {"deleted": True}
 
 
 @app.get("/history")

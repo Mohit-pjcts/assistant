@@ -32,6 +32,17 @@ body against DEFAULT_DB_PATH, not bound as a parameter default) — same
 convention as memory_store.py, for the same reason: a parameter default is
 bound once at function-definition time and would silently ignore a later
 monkeypatch in tests.
+
+Phase 28 adds a `projects` table + a nullable `project_id` column on
+`threads` — a Project groups Threads in the dashboard sidebar (`Oni ->
+Project -> Thread`, see CONTEXT.md). One Project per Thread, nullable;
+every thread that existed before this column was added stays ungrouped
+with no backfill needed. `_migrate_add_project_id_column` adds the column
+to an already-existing threads.sqlite via ALTER TABLE (SQLite's
+CREATE TABLE IF NOT EXISTS is a no-op against an existing table, so a
+fresh-DB-only column definition would never reach a real user's existing
+file) — this is the first schema change this module has needed since
+Phase 15 shipped.
 """
 
 from __future__ import annotations
@@ -58,7 +69,17 @@ CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
     title TEXT,
     created_at TEXT NOT NULL,
-    last_active_at TEXT NOT NULL
+    last_active_at TEXT NOT NULL,
+    project_id TEXT REFERENCES projects(id)
+)
+"""
+
+_CREATE_PROJECTS_SQL = """
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    created_at TEXT NOT NULL
 )
 """
 
@@ -69,6 +90,13 @@ CREATE TABLE IF NOT EXISTS active_pointer (
 )
 """
 
+# Real violet tints lifted from instrument/instrument.html's own design
+# tokens (--signal/--signal-bright/--p-coding/--p-admin/--p-research/
+# --p-vault) rather than invented fresh — Phase 28 Decision 5's "stable,
+# static, round-robin-assigned" legend color, kept ready for whenever the
+# real theme (same phase, sequenced later) lands so the two agree.
+PROJECT_COLORS: list[str] = ["#9b87f5", "#c3b2ff", "#7c6bc9", "#a695e8", "#b9a6ff"]
+
 
 @dataclass(frozen=True)
 class Thread:
@@ -76,6 +104,15 @@ class Thread:
     title: str | None
     created_at: str
     last_active_at: str
+    project_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Project:
+    id: str
+    name: str
+    color: str
+    created_at: str
 
 
 def _now() -> str:
@@ -86,11 +123,26 @@ def _resolve(db_path: Path | str | None) -> Path | str:
     return db_path if db_path is not None else DEFAULT_DB_PATH
 
 
+async def _migrate_add_project_id_column(db: aiosqlite.Connection) -> None:
+    """threads.sqlite files created before Phase 28 have no project_id
+    column — CREATE TABLE IF NOT EXISTS is a no-op against an
+    already-existing table, so a fresh-DB-only column definition would
+    never reach a real user's existing file. ALTER TABLE has no
+    IF NOT EXISTS form, so PRAGMA table_info is the standard way to check
+    first. Must run before row_factory is set (this reads plain tuples)."""
+    cursor = await db.execute("PRAGMA table_info(threads)")
+    columns = {row[1] async for row in cursor}
+    if "project_id" not in columns:
+        await db.execute("ALTER TABLE threads ADD COLUMN project_id TEXT REFERENCES projects(id)")
+
+
 @asynccontextmanager
 async def _connect(db_path: Path | str) -> AsyncIterator[aiosqlite.Connection]:
     async with aiosqlite.connect(str(db_path)) as db:
+        await db.execute(_CREATE_PROJECTS_SQL)
         await db.execute(_CREATE_THREADS_SQL)
         await db.execute(_CREATE_POINTER_SQL)
+        await _migrate_add_project_id_column(db)
         await db.commit()
         db.row_factory = aiosqlite.Row
         yield db
@@ -140,7 +192,7 @@ async def get_thread(thread_id: str, db_path: Path | str | None = None) -> Threa
     db_path = _resolve(db_path)
     async with _connect(db_path) as db:
         rows = await db.execute_fetchall(
-            "SELECT id, title, created_at, last_active_at FROM threads WHERE id = ?",
+            "SELECT id, title, created_at, last_active_at, project_id FROM threads WHERE id = ?",
             (thread_id,),
         )
         return Thread(**dict(rows[0])) if rows else None
@@ -152,7 +204,7 @@ async def list_threads(db_path: Path | str | None = None) -> list[Thread]:
     db_path = _resolve(db_path)
     async with _connect(db_path) as db:
         rows = await db.execute_fetchall(
-            "SELECT id, title, created_at, last_active_at FROM threads ORDER BY last_active_at DESC"
+            "SELECT id, title, created_at, last_active_at, project_id FROM threads ORDER BY last_active_at DESC"
         )
         return [Thread(**dict(row)) for row in rows]
 
@@ -184,7 +236,7 @@ async def set_active_thread(thread_id: str, db_path: Path | str | None = None) -
     db_path = _resolve(db_path)
     async with _connect(db_path) as db:
         rows = await db.execute_fetchall(
-            "SELECT id, title, created_at, last_active_at FROM threads WHERE id = ?",
+            "SELECT id, title, created_at, last_active_at, project_id FROM threads WHERE id = ?",
             (thread_id,),
         )
         if not rows:
@@ -203,7 +255,7 @@ async def rename_thread(thread_id: str, title: str, db_path: Path | str | None =
         if cursor.rowcount == 0:
             raise KeyError(thread_id)
         rows = await db.execute_fetchall(
-            "SELECT id, title, created_at, last_active_at FROM threads WHERE id = ?",
+            "SELECT id, title, created_at, last_active_at, project_id FROM threads WHERE id = ?",
             (thread_id,),
         )
         return Thread(**dict(rows[0]))
@@ -277,3 +329,92 @@ async def touch_thread(thread_id: str, db_path: Path | str | None = None) -> Non
     async with _connect(db_path) as db:
         await db.execute("UPDATE threads SET last_active_at = ? WHERE id = ?", (now, thread_id))
         await db.commit()
+
+
+# ---- Projects (Phase 28) ----
+
+
+async def create_project(name: str, db_path: Path | str | None = None) -> Project:
+    """Color is assigned round-robin by creation order (PLAN.md Phase 28
+    Decision 5) and stored on the row — never recomputed at render time,
+    so a project's color doesn't drift as other projects are added or
+    removed around it."""
+    db_path = _resolve(db_path)
+    project_id = str(uuid.uuid4())
+    now = _now()
+    async with _connect(db_path) as db:
+        count_rows = await db.execute_fetchall("SELECT COUNT(*) AS n FROM projects")
+        color = PROJECT_COLORS[count_rows[0]["n"] % len(PROJECT_COLORS)]
+        await db.execute(
+            "INSERT INTO projects (id, name, color, created_at) VALUES (?, ?, ?, ?)",
+            (project_id, name, color, now),
+        )
+        await db.commit()
+    return Project(id=project_id, name=name, color=color, created_at=now)
+
+
+async def list_projects(db_path: Path | str | None = None) -> list[Project]:
+    """Creation order — matches the round-robin color assignment's own
+    ordering and gives the sidebar a stable project order."""
+    db_path = _resolve(db_path)
+    async with _connect(db_path) as db:
+        rows = await db.execute_fetchall(
+            "SELECT id, name, color, created_at FROM projects ORDER BY created_at ASC"
+        )
+        return [Project(**dict(row)) for row in rows]
+
+
+async def rename_project(project_id: str, name: str, db_path: Path | str | None = None) -> Project:
+    """Raises KeyError if project_id isn't a real project."""
+    db_path = _resolve(db_path)
+    async with _connect(db_path) as db:
+        cursor = await db.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+        await db.commit()
+        if cursor.rowcount == 0:
+            raise KeyError(project_id)
+        rows = await db.execute_fetchall(
+            "SELECT id, name, color, created_at FROM projects WHERE id = ?", (project_id,)
+        )
+        return Project(**dict(rows[0]))
+
+
+async def delete_project(project_id: str, db_path: Path | str | None = None) -> None:
+    """Unassigns every Thread in this Project rather than deleting them
+    (PLAN.md Phase 28 Decision 4 — deliberately non-destructive, informed
+    directly by the real accidental-delete incident in STEPS.md 127).
+    Raises KeyError if project_id isn't a real project."""
+    db_path = _resolve(db_path)
+    async with _connect(db_path) as db:
+        cursor = await db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        if cursor.rowcount == 0:
+            await db.commit()
+            raise KeyError(project_id)
+        await db.execute("UPDATE threads SET project_id = NULL WHERE project_id = ?", (project_id,))
+        await db.commit()
+
+
+async def assign_thread_project(
+    thread_id: str, project_id: str | None, db_path: Path | str | None = None
+) -> Thread:
+    """Sets (project_id given) or clears (project_id=None) a Thread's
+    Project — the one mechanism behind both of Phase 28's UI paths (the
+    "Move to project" menu action and tree drag-and-drop both end up
+    calling this). Raises KeyError if thread_id isn't real; raises
+    ValueError if a given project_id isn't a real project (a different
+    exception type than KeyError so a caller — server.py — can tell which
+    id was bad and return the right 404 detail)."""
+    db_path = _resolve(db_path)
+    async with _connect(db_path) as db:
+        if project_id is not None:
+            project_rows = await db.execute_fetchall("SELECT id FROM projects WHERE id = ?", (project_id,))
+            if not project_rows:
+                raise ValueError(project_id)
+        cursor = await db.execute("UPDATE threads SET project_id = ? WHERE id = ?", (project_id, thread_id))
+        await db.commit()
+        if cursor.rowcount == 0:
+            raise KeyError(thread_id)
+        rows = await db.execute_fetchall(
+            "SELECT id, title, created_at, last_active_at, project_id FROM threads WHERE id = ?",
+            (thread_id,),
+        )
+        return Thread(**dict(rows[0]))
