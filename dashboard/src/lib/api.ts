@@ -320,6 +320,14 @@ export interface ThreadSummary {
   title: string | null;
   created_at: string;
   last_active_at: string;
+  // PLAN.md Phase 28 — null means ungrouped, not "no project yet vs.
+  // some project" ambiguity; every thread that existed before this field
+  // was added is (and stays) ungrouped, no backfill. Optional (not just
+  // nullable) purely to avoid touching every existing ThreadSummary test
+  // fixture across the codebase that predates this field — real API
+  // responses always include it; consuming code treats a missing value
+  // exactly like `null` (ungrouped), never as a distinct third state.
+  project_id?: string | null;
 }
 
 export async function fetchThreads(): Promise<{
@@ -371,6 +379,79 @@ export async function deleteThread(threadId: string): Promise<{ activeThreadId: 
   }
   const body = (await response.json()) as { deleted: boolean; active_thread_id: string };
   return { activeThreadId: body.active_thread_id };
+}
+
+// PLAN.md Phase 28 — Projects group Threads in the sidebar (`Oni ->
+// Project -> Thread`, see CONTEXT.md). `color` is assigned server-side,
+// round-robin, at creation — never computed client-side, so it stays
+// stable as other projects are added/removed (thread_store.py's own
+// create_project docstring).
+export interface Project {
+  id: string;
+  name: string;
+  color: string;
+  created_at: string;
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  const response = await fetch(`${API_BASE_URL}/projects`);
+  if (!response.ok) {
+    throw new Error(`/projects failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { projects: Project[] };
+  return body.projects;
+}
+
+export async function createProject(name: string): Promise<Project> {
+  return postJSON<Project>("/projects", { name });
+}
+
+export async function renameProject(projectId: string, name: string): Promise<Project> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `rename /projects/${projectId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  return response.json() as Promise<Project>;
+}
+
+// Unassigns rather than deletes every Thread in this Project — see
+// thread_store.delete_project's own docstring (PLAN.md Phase 28 Decision
+// 4) for why. The caller (ThreadSidebar) is responsible for re-fetching
+// threads afterward to see them fall out of this project's group.
+export async function deleteProject(projectId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(
+      `delete /projects/${projectId} failed (${response.status}): ${await response.text()}`,
+    );
+  }
+}
+
+// The one endpoint behind both of Phase 28's UI paths for moving a
+// Thread — the sidebar's "Move to project" menu action and its tree
+// drag-and-drop both call this. `projectId: null` clears the
+// assignment (thread becomes ungrouped again), not "no-op."
+export async function assignThreadProject(
+  threadId: string,
+  projectId: string | null,
+): Promise<ThreadSummary> {
+  const response = await fetch(`${API_BASE_URL}/threads/${threadId}/project`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `assign /threads/${threadId}/project failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  return response.json() as Promise<ThreadSummary>;
 }
 
 // Phase 7 Part B's durable facts, reviewed/managed here (PLAN.md Phase 9

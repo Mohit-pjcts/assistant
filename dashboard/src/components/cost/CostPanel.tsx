@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { InstrumentCard } from "@/components/ui/instrument-card";
+import { useCountUp } from "@/lib/useCountUp";
 import {
   fetchCost,
   CostSourceNotConfiguredError,
@@ -34,27 +35,30 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
 // 7 days / All time are overlapping windows, not points on a timeline, so a
 // trend line would misrepresent them rather than inform.
 function WindowCard({ label, stats }: { label: string; stats: CostWindow }) {
+  const cost = useCountUp(stats.total_cost);
+  const tokens = useCountUp(stats.total_tokens);
+  const runs = useCountUp(stats.run_count);
+  const promptTokens = useCountUp(stats.prompt_tokens);
+  const completionTokens = useCountUp(stats.completion_tokens);
   return (
-    <Card size="sm">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-1.5 text-sm font-normal text-muted-foreground">
-          <span aria-hidden className="size-1.5 rounded-full bg-operator" />
-          {label}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-1.5">
+    <InstrumentCard className="p-3">
+      <div className="mb-1.5 flex items-center gap-1.5 text-sm font-normal text-muted-foreground">
+        <span aria-hidden className="size-1.5 rounded-full bg-operator" />
+        {label}
+      </div>
+      <div className="flex flex-col gap-1.5">
         <p className="font-mono text-2xl font-semibold text-foreground">
-          {currencyFormatter.format(stats.total_cost)}
+          {currencyFormatter.format(cost)}
         </p>
         <p className="font-mono text-sm tabular-nums text-muted-foreground">
-          {stats.total_tokens.toLocaleString()} tokens · {stats.run_count.toLocaleString()} runs
+          {Math.round(tokens).toLocaleString()} tokens · {Math.round(runs).toLocaleString()} runs
         </p>
         <p className="font-mono text-xs tabular-nums text-muted-foreground">
-          {stats.prompt_tokens.toLocaleString()} prompt / {stats.completion_tokens.toLocaleString()}{" "}
-          completion
+          {Math.round(promptTokens).toLocaleString()} prompt /{" "}
+          {Math.round(completionTokens).toLocaleString()} completion
         </p>
-      </CardContent>
-    </Card>
+      </div>
+    </InstrumentCard>
   );
 }
 

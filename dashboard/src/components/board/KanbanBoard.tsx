@@ -1,42 +1,40 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
-'use client';
+"use client";
 
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
-} from 'react';
+} from "react";
 
+import { cn } from "@/lib/utils";
+import { relativeTime } from "@/lib/relativeTime";
+import { InstrumentCard } from "@/components/ui/instrument-card";
+import { Chip } from "@/components/ui/chip";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
-  Layout,
-  LayoutHeader,
-  LayoutContent,
-  LayoutFooter,
-  HStack,
-  VStack,
-} from '@astryxdesign/core/Layout';
-import {Text, Heading} from '@astryxdesign/core/Text';
-import {Card} from '@astryxdesign/core/Card';
-import {Badge} from '@astryxdesign/core/Badge';
-import {Button} from '@astryxdesign/core/Button';
-import {IconButton} from '@astryxdesign/core/IconButton';
-import {Icon} from '@astryxdesign/core/Icon';
-import {StatusDot} from '@astryxdesign/core/StatusDot';
-import {EmptyState} from '@astryxdesign/core/EmptyState';
-import {MoreMenu} from '@astryxdesign/core/MoreMenu';
-import {Tooltip} from '@astryxdesign/core/Tooltip';
-import {Toolbar} from '@astryxdesign/core/Toolbar';
-import {Section} from '@astryxdesign/core/Section';
-import {Timestamp} from '@astryxdesign/core/Timestamp';
-import {Dialog} from '@astryxdesign/core/Dialog';
-import {AlertDialog} from '@astryxdesign/core/AlertDialog';
-import {TextInput} from '@astryxdesign/core/TextInput';
-import {TextArea} from '@astryxdesign/core/TextArea';
-import {Selector} from '@astryxdesign/core/Selector';
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 import {
   PlusIcon,
@@ -45,7 +43,8 @@ import {
   InboxIcon,
   InformationCircleIcon,
   ClipboardDocumentCheckIcon,
-} from '@heroicons/react/24/outline';
+  EllipsisHorizontalIcon,
+} from "@heroicons/react/24/outline";
 
 import {
   fetchBoardTasks,
@@ -55,14 +54,27 @@ import {
   type BoardTask,
   type BoardColumnId,
   type BoardPriority,
-} from '@/lib/api';
+} from "@/lib/api";
+
+// PLAN.md Phase 29 Stage 2: Astryx's Layout/Card/Badge/Button/IconButton/
+// Icon/StatusDot/EmptyState/MoreMenu/Tooltip/Toolbar/Section/Timestamp/
+// Dialog/AlertDialog/TextInput/TextArea/Selector all replaced by this
+// app's own shadcn primitives + InstrumentCard + plain Tailwind — a pure
+// presentation swap, same discipline as InterruptGate.tsx/A2UIRenderer.tsx.
+// No test file exists for this component (confirmed before starting), so
+// the only real contracts to preserve are the drag-and-drop pointer
+// mechanics below (untouched) and the real /board/tasks API calls.
+
+function StatusDot({ className, label }: { className: string; label: string }) {
+  return <span aria-label={label} className={cn("inline-block size-2 rounded-full", className)} />;
+}
 
 // ============= TYPES =============
 
 interface ColumnMeta {
   id: BoardColumnId;
   title: string;
-  variant: 'neutral' | 'accent' | 'warning' | 'success';
+  dotClass: string;
   tooltip: string;
   emptyTitle: string;
   emptyDescription: string;
@@ -92,56 +104,53 @@ interface DragState {
 
 const COLUMNS: ColumnMeta[] = [
   {
-    id: 'todo',
-    title: 'To-do',
-    variant: 'neutral',
-    tooltip: 'Items assigned to this sprint, waiting to be picked up.',
-    emptyTitle: 'To-do is empty',
-    emptyDescription: 'Items pulled into this sprint appear here.',
+    id: "todo",
+    title: "To-do",
+    dotClass: "bg-muted-foreground",
+    tooltip: "Items assigned to this sprint, waiting to be picked up.",
+    emptyTitle: "To-do is empty",
+    emptyDescription: "Items pulled into this sprint appear here.",
     emptyIcon: InboxIcon,
   },
   {
-    id: 'in-progress',
-    title: 'In progress',
-    variant: 'accent',
-    tooltip: 'Items currently in progress.',
-    emptyTitle: 'Nothing in progress',
-    emptyDescription: 'Items being worked on appear here.',
+    id: "in-progress",
+    title: "In progress",
+    dotClass: "bg-accent-signal",
+    tooltip: "Items currently in progress.",
+    emptyTitle: "Nothing in progress",
+    emptyDescription: "Items being worked on appear here.",
     emptyIcon: ArrowPathIcon,
   },
   {
-    id: 'in-review',
-    title: 'In review',
-    variant: 'warning',
-    tooltip: 'Items waiting for your review.',
-    emptyTitle: 'Nothing in review',
-    emptyDescription: 'Items awaiting your review appear here.',
+    id: "in-review",
+    title: "In review",
+    dotClass: "bg-signal",
+    tooltip: "Items waiting for your review.",
+    emptyTitle: "Nothing in review",
+    emptyDescription: "Items awaiting your review appear here.",
     emptyIcon: ClipboardDocumentCheckIcon,
   },
   {
-    id: 'done',
-    title: 'Done',
-    variant: 'success',
-    tooltip: 'Items that have been handled.',
-    emptyTitle: 'Nothing done yet',
-    emptyDescription: 'Completed items appear here.',
+    id: "done",
+    title: "Done",
+    dotClass: "bg-moss",
+    tooltip: "Items that have been handled.",
+    emptyTitle: "Nothing done yet",
+    emptyDescription: "Completed items appear here.",
     emptyIcon: CheckCircleIcon,
   },
 ];
 
-const PRIORITY_META: Record<
-  BoardPriority,
-  {label: string; variant: 'error' | 'warning' | 'teal'}
-> = {
-  high: {label: 'High', variant: 'error'},
-  medium: {label: 'Medium', variant: 'warning'},
-  low: {label: 'Low', variant: 'teal'},
+const PRIORITY_META: Record<BoardPriority, { label: string; dotClass: string }> = {
+  high: { label: "High", dotClass: "bg-rust" },
+  medium: { label: "Medium", dotClass: "bg-signal" },
+  low: { label: "Low", dotClass: "bg-teal-500" },
 };
 
 const PRIORITY_OPTIONS = [
-  {value: 'high', label: 'High'},
-  {value: 'medium', label: 'Medium'},
-  {value: 'low', label: 'Low'},
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
 ];
 
 // How often to re-fetch while idle (not mid-drag, no dialog open) — the
@@ -154,49 +163,20 @@ const EXTERNAL_UPDATE_POLL_MS = 4000;
 // on card controls still register normally.
 const DRAG_THRESHOLD = 5;
 
-// Shared width for every board column, so they stay visually aligned.
-const COLUMN_WIDTH = 300;
-
 // ============= STYLES =============
-// Plain inline style objects — see the module's original note: the
-// downloaded template used StyleX, which needs a build-time compiler this
-// Vite project doesn't have configured. The one :hover effect
-// (`.kanban-card` below) is a real CSS class in index.css since inline
-// styles can't express pseudo-classes.
+// PLAN.md Phase 29 Stage 2: the Astryx-only CSS vars this object used to
+// reference (--spacing-4, --shadow-high, --radius-container, --color-
+// background-muted) don't exist once Astryx's theme is gone — the fixed
+// layout classes moved to plain Tailwind directly in JSX below; only the
+// genuinely DYNAMIC per-drag values (position/size, computed at pointer-
+// move time) still need inline styles, since Tailwind can't express those.
 
 const styles = {
-  boardColumns: {
-    overflowX: 'auto',
-    overflowY: 'hidden',
-    height: '100%',
-    padding: 'var(--spacing-4)',
-  } as const,
-  columnShell: {
-    flexShrink: 0,
-    flexBasis: COLUMN_WIDTH,
-    height: '100%',
-  } as const,
-  floating: {
-    position: 'fixed',
-    insetBlockStart: 0,
-    insetInlineStart: 0,
-    pointerEvents: 'none',
-    cursor: 'grabbing',
-    boxShadow: 'var(--shadow-high)',
-    zIndex: 1000,
-  } as const,
   floatingAt: (x: number, y: number, width: number) => ({
     width,
     transform: `translate(${x}px, ${y}px)`,
   }),
-  ghost: (height: number) => ({
-    height,
-    borderRadius: 'var(--radius-container)',
-    backgroundColor: 'var(--color-background-muted)',
-  }),
-  columnEmptyState: {
-    paddingBlock: 'var(--spacing-10)',
-  } as const,
+  ghost: (height: number) => ({ height }) as const,
 };
 
 // ============= TASK FORM (Add / Edit) =============
@@ -223,6 +203,9 @@ function TaskFormDialog({
   title: string;
 }) {
   const [value, setValue] = useState(initial);
+  const titleId = useId();
+  const descriptionId = useId();
+  const priorityId = useId();
 
   useEffect(() => {
     if (isOpen) setValue(initial);
@@ -230,54 +213,62 @@ function TaskFormDialog({
   }, [isOpen]);
 
   return (
-    <Dialog isOpen={isOpen} onOpenChange={onOpenChange} purpose="form" width={420}>
-      <Layout
-        header={
-          <LayoutHeader hasDivider>
-            <Heading level={3}>{title}</Heading>
-          </LayoutHeader>
-        }
-        content={
-          <LayoutContent>
-            <VStack gap={4}>
-              <TextInput
-                label="Title"
-                value={value.title}
-                onChange={(v) => setValue((s) => ({...s, title: v}))}
-                isRequired
-                hasAutoFocus
-              />
-              <TextArea
-                label="Description"
-                value={value.description}
-                onChange={(v) => setValue((s) => ({...s, description: v}))}
-                isOptional
-                rows={3}
-              />
-              <Selector
-                label="Priority"
-                value={value.priority}
-                onChange={(v) => setValue((s) => ({...s, priority: v as BoardPriority}))}
-                options={PRIORITY_OPTIONS}
-              />
-            </VStack>
-          </LayoutContent>
-        }
-        footer={
-          <LayoutFooter hasDivider>
-            <HStack gap={2} hAlign="end">
-              <Button label="Cancel" variant="secondary" onClick={() => onOpenChange(false)} />
-              <Button
-                label="Save"
-                variant="primary"
-                isLoading={isSaving}
-                isDisabled={!value.title.trim()}
-                onClick={() => onSubmit(value)}
-              />
-            </HStack>
-          </LayoutFooter>
-        }
-      />
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogTitle className="mb-3">{title}</DialogTitle>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1">
+            <label htmlFor={titleId} className="text-xs text-muted-foreground">
+              Title
+            </label>
+            <Input
+              id={titleId}
+              autoFocus
+              required
+              value={value.title}
+              onChange={(event) => setValue((s) => ({ ...s, title: event.target.value }))}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor={descriptionId} className="text-xs text-muted-foreground">
+              Description (optional)
+            </label>
+            <Textarea
+              id={descriptionId}
+              rows={3}
+              value={value.description}
+              onChange={(event) => setValue((s) => ({ ...s, description: event.target.value }))}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor={priorityId} className="text-xs text-muted-foreground">
+              Priority
+            </label>
+            <select
+              id={priorityId}
+              value={value.priority}
+              onChange={(event) =>
+                setValue((s) => ({ ...s, priority: event.target.value as BoardPriority }))
+              }
+              className="h-9 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring"
+            >
+              {PRIORITY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2 border-t border-graphite/20 pt-3">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button disabled={isSaving || !value.title.trim()} onClick={() => onSubmit(value)}>
+            {isSaving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </DialogContent>
     </Dialog>
   );
 }
@@ -298,49 +289,61 @@ function BoardCardBody({
   onDelete: (item: BoardTask) => void;
 }) {
   const priority = PRIORITY_META[item.priority];
-  const moveTargets = COLUMNS.filter(c => c.id !== item.column).map(c => ({
-    label: `Move to ${c.title}`,
-    onClick: () => onMove(item.id, c.id),
-  }));
 
   return (
-    <VStack gap={2}>
-      <HStack hAlign="between" vAlign="start">
-        <HStack gap={1} vAlign="center" wrap="wrap">
-          <Badge label={item.ref} variant="neutral" />
-          <Badge label={priority.label} variant={priority.variant} />
-        </HStack>
-        <MoreMenu
-          label="Work item actions"
-          size="sm"
-          items={[
-            {label: 'Edit', onClick: () => onEdit(item)},
-            {type: 'divider'},
-            ...moveTargets,
-            {type: 'divider'},
-            {label: 'Delete', onClick: () => onDelete(item)},
-          ]}
-        />
-      </HStack>
+    <div className="flex flex-col gap-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1">
+          <Chip>{item.ref}</Chip>
+          <Chip className="flex items-center gap-1">
+            <span className={cn("inline-block size-1.5 rounded-full", priority.dotClass)} />
+            {priority.label}
+          </Chip>
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            aria-label="Work item actions"
+            onPointerDown={(e) => e.stopPropagation()}
+            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-graphite/10 hover:text-foreground"
+          >
+            <EllipsisHorizontalIcon className="size-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => onEdit(item)}>Edit</DropdownMenuItem>
+            {COLUMNS.filter((c) => c.id !== item.column).map((c) => (
+              <DropdownMenuItem key={c.id} onClick={() => onMove(item.id, c.id)}>
+                Move to {c.title}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuItem onClick={() => onDelete(item)} className="text-destructive">
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
-      <VStack gap={1}>
-        <Heading level={4}>{item.title}</Heading>
+      <div className="flex flex-col gap-1">
+        <h4 className="font-heading text-sm font-semibold">{item.title}</h4>
         {item.description && (
-          <Text type="supporting" color="secondary" maxLines={2}>
-            {item.description}
-          </Text>
+          <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>
         )}
-      </VStack>
+      </div>
 
-      <Text type="supporting" color="secondary">
-        Updated <Timestamp value={item.updated_at} format="relative" />
-      </Text>
-    </VStack>
+      <p className="text-xs text-muted-foreground">Updated {relativeTime(item.updated_at)}</p>
+    </div>
   );
 }
 
 // ============= BOARD CARD =============
 
+// A plain div carrying the `.instrument-card` CSS class directly, NOT the
+// InstrumentCard *component* — this card needs a real external ref for the
+// drag/drop pointer hit-testing below, which InstrumentCard doesn't expose
+// (its own ref is used internally for the mousemove-driven tilt). Running
+// both the tilt effect's own `style.transform` writes and this file's drag
+// positioning on the same element would fight over the same property, so
+// the spotlight/tilt effect is deliberately dropped here — the hairline
+// border and hover-glow (both pure CSS, no JS) still apply.
 function BoardCard({
   item,
   cardRef,
@@ -357,13 +360,13 @@ function BoardCard({
   onDelete: (item: BoardTask) => void;
 }) {
   return (
-    <Card
+    <div
       ref={cardRef}
-      padding={3}
-      className="kanban-card"
-      onPointerDown={e => onPointerDown(e, item.id)}>
+      className="instrument-card kanban-card p-3"
+      onPointerDown={(e) => onPointerDown(e, item.id)}
+    >
       <BoardCardBody item={item} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />
-    </Card>
+    </div>
   );
 }
 
@@ -381,49 +384,25 @@ function BoardColumn({
   children: ReactNode;
 }) {
   return (
-    <Card variant="muted" padding={0} style={styles.columnShell}>
-      <Layout
-        height="fill"
-        header={
-          <LayoutHeader hasDivider padding={3}>
-            <HStack hAlign="between" vAlign="center">
-              <HStack gap={2} vAlign="center">
-                <StatusDot
-                  variant={meta.variant}
-                  label={`${meta.title} status`}
-                />
-                <Heading level={4}>{meta.title}</Heading>
-                <Tooltip content={meta.tooltip}>
-                  <Icon
-                    icon={InformationCircleIcon}
-                    size="sm"
-                    color="secondary"
-                  />
-                </Tooltip>
-              </HStack>
-              <Text type="supporting" color="secondary" hasTabularNumbers>
-                {count}
-              </Text>
-            </HStack>
-          </LayoutHeader>
-        }
-        content={
-          <LayoutContent ref={contentRef} padding={2}>
-            {children ?? (
-              <EmptyState
-                isCompact
-                style={styles.columnEmptyState}
-                icon={
-                  <Icon icon={meta.emptyIcon} size="lg" color="secondary" />
-                }
-                title={meta.emptyTitle}
-                description={meta.emptyDescription}
-              />
-            )}
-          </LayoutContent>
-        }
-      />
-    </Card>
+    <InstrumentCard className="flex h-full w-[300px] shrink-0 flex-col p-0">
+      <div className="flex items-center justify-between gap-2 border-b border-graphite/20 p-3">
+        <div className="flex items-center gap-2">
+          <StatusDot className={meta.dotClass} label={`${meta.title} status`} />
+          <h4 className="font-heading text-sm font-semibold">{meta.title}</h4>
+          <InformationCircleIcon className="size-3.5 text-muted-foreground" title={meta.tooltip} />
+        </div>
+        <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
+      </div>
+      <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto p-2">
+        {children ?? (
+          <div className="flex flex-col items-center gap-2 py-10 text-center">
+            <meta.emptyIcon className="size-6 text-muted-foreground" />
+            <p className="text-sm font-medium">{meta.emptyTitle}</p>
+            <p className="text-xs text-muted-foreground">{meta.emptyDescription}</p>
+          </div>
+        )}
+      </div>
+    </InstrumentCard>
   );
 }
 
@@ -468,18 +447,14 @@ export function KanbanBoard() {
   // Live element registries for pointer hit-testing (kept out of render state).
   const columnEls = useRef(new Map<BoardColumnId, HTMLElement>());
   const cardEls = useRef(new Map<string, HTMLElement>());
-  const columnRefCbs = useRef(
-    new Map<BoardColumnId, (el: HTMLDivElement | null) => void>(),
-  );
-  const cardRefCbs = useRef(
-    new Map<string, (el: HTMLDivElement | null) => void>(),
-  );
+  const columnRefCbs = useRef(new Map<BoardColumnId, (el: HTMLDivElement | null) => void>());
+  const cardRefCbs = useRef(new Map<string, (el: HTMLDivElement | null) => void>());
   const teardownRef = useRef<(() => void) | null>(null);
 
   const getColumnRef = (id: BoardColumnId) => {
     let cb = columnRefCbs.current.get(id);
     if (!cb) {
-      cb = el => {
+      cb = (el) => {
         if (el) columnEls.current.set(id, el);
         else columnEls.current.delete(id);
       };
@@ -491,7 +466,7 @@ export function KanbanBoard() {
   const getCardRef = (id: string) => {
     let cb = cardRefCbs.current.get(id);
     if (!cb) {
-      cb = el => {
+      cb = (el) => {
         if (el) cardEls.current.set(id, el);
         else cardEls.current.delete(id);
       };
@@ -503,8 +478,8 @@ export function KanbanBoard() {
   const itemsByColumn = useMemo(() => {
     const map: Record<BoardColumnId, BoardTask[]> = {
       todo: [],
-      'in-progress': [],
-      'in-review': [],
+      "in-progress": [],
+      "in-review": [],
       done: [],
     };
     for (const item of items) {
@@ -514,26 +489,20 @@ export function KanbanBoard() {
   }, [items]);
 
   const moveItem = (id: string, to: BoardColumnId) => {
-    setItems(prev => prev.map(item => (item.id === id ? {...item, column: to} : item)));
-    updateBoardTask(id, {column: to}).catch((err: unknown) =>
+    setItems((prev) => prev.map((item) => (item.id === id ? { ...item, column: to } : item)));
+    updateBoardTask(id, { column: to }).catch((err: unknown) =>
       setError(err instanceof Error ? err.message : String(err)),
     );
   };
 
-  const computeTarget = (
-    px: number,
-    py: number,
-    draggedId: string,
-  ): DropTarget | null => {
+  const computeTarget = (px: number, py: number, draggedId: string): DropTarget | null => {
     for (const [colId, el] of Array.from(columnEls.current.entries())) {
       const r = el.getBoundingClientRect();
       if (px < r.left || px > r.right || py < r.top || py > r.bottom) {
         continue;
       }
 
-      const ids = itemsByColumn[colId]
-        .filter(it => it.id !== draggedId)
-        .map(it => it.id);
+      const ids = itemsByColumn[colId].filter((it) => it.id !== draggedId).map((it) => it.id);
 
       let index = ids.length;
       for (let i = 0; i < ids.length; i++) {
@@ -545,19 +514,19 @@ export function KanbanBoard() {
           break;
         }
       }
-      return {column: colId, index};
+      return { column: colId, index };
     }
     return null;
   };
 
   const commitDrag = (id: string, target: DropTarget) => {
-    setItems(prev => {
-      const moved = prev.find(it => it.id === id);
+    setItems((prev) => {
+      const moved = prev.find((it) => it.id === id);
       if (!moved) return prev;
 
-      const rest = prev.filter(it => it.id !== id);
-      const updated: BoardTask = {...moved, column: target.column};
-      const colItems = rest.filter(it => it.column === target.column);
+      const rest = prev.filter((it) => it.id !== id);
+      const updated: BoardTask = { ...moved, column: target.column };
+      const colItems = rest.filter((it) => it.column === target.column);
       const anchor = colItems[target.index];
 
       if (!anchor) {
@@ -566,18 +535,14 @@ export function KanbanBoard() {
       const at = rest.indexOf(anchor);
       return [...rest.slice(0, at), updated, ...rest.slice(at)];
     });
-    updateBoardTask(id, {column: target.column, position: target.index}).catch(
-      (err: unknown) => setError(err instanceof Error ? err.message : String(err)),
+    updateBoardTask(id, { column: target.column, position: target.index }).catch((err: unknown) =>
+      setError(err instanceof Error ? err.message : String(err)),
     );
   };
 
   const onCardPointerDown = (e: ReactPointerEvent, id: string) => {
     if (e.button !== 0) return;
-    if (
-      (e.target as HTMLElement).closest(
-        'button, [role="menuitem"], [role="menu"]',
-      )
-    ) {
+    if ((e.target as HTMLElement).closest('button, [role="menuitem"], [role="menu"]')) {
       return;
     }
 
@@ -589,7 +554,7 @@ export function KanbanBoard() {
     const startY = e.clientY;
     const offsetX = startX - rect.left;
     const offsetY = startY - rect.top;
-    const {width, height} = rect;
+    const { width, height } = rect;
 
     let started = false;
     let target: DropTarget | null = null;
@@ -597,8 +562,7 @@ export function KanbanBoard() {
     const onMove = (ev: PointerEvent) => {
       if (
         !started &&
-        Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) <
-          DRAG_THRESHOLD
+        Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) < DRAG_THRESHOLD
       ) {
         return;
       }
@@ -625,23 +589,23 @@ export function KanbanBoard() {
     };
 
     const teardown = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
       teardownRef.current = null;
     };
     teardownRef.current = teardown;
 
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
-  const draggedItem = drag ? items.find(it => it.id === drag.id) : undefined;
+  const draggedItem = drag ? items.find((it) => it.id === drag.id) : undefined;
   const isDragging = drag !== null;
 
   useEffect(() => {
     if (!isDragging) return;
     const previous = document.body.style.userSelect;
-    document.body.style.userSelect = 'none';
+    document.body.style.userSelect = "none";
     return () => {
       document.body.style.userSelect = previous;
     };
@@ -651,15 +615,14 @@ export function KanbanBoard() {
 
   const renderColumnCards = (colId: BoardColumnId): ReactNode => {
     const colItems = itemsByColumn[colId];
-    const visible = drag ? colItems.filter(it => it.id !== drag.id) : colItems;
-    const ghostTarget =
-      drag && drag.target && drag.target.column === colId ? drag : null;
+    const visible = drag ? colItems.filter((it) => it.id !== drag.id) : colItems;
+    const ghostTarget = drag && drag.target && drag.target.column === colId ? drag : null;
 
     if (visible.length === 0 && !ghostTarget) {
       return null;
     }
 
-    const nodes: ReactNode[] = visible.map(it => (
+    const nodes: ReactNode[] = visible.map((it) => (
       <BoardCard
         key={it.id}
         item={it}
@@ -676,18 +639,22 @@ export function KanbanBoard() {
       nodes.splice(
         index,
         0,
-        <VStack key="drag-ghost" style={styles.ghost(ghostTarget.height)} />,
+        <div
+          key="drag-ghost"
+          className="rounded-md bg-muted"
+          style={styles.ghost(ghostTarget.height)}
+        />,
       );
     }
 
-    return <VStack gap={2}>{nodes}</VStack>;
+    return <div className="flex flex-col gap-2">{nodes}</div>;
   };
 
   async function handleCreate(value: TaskFormValue) {
     setIsSaving(true);
     try {
-      const created = await createBoardTask({column: 'todo', ...value});
-      setItems(prev => [...prev, created]);
+      const created = await createBoardTask({ column: "todo", ...value });
+      setItems((prev) => [...prev, created]);
       setIsAddOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -701,7 +668,7 @@ export function KanbanBoard() {
     setIsSaving(true);
     try {
       const updated = await updateBoardTask(editTarget.id, value);
-      setItems(prev => prev.map(it => (it.id === updated.id ? updated : it)));
+      setItems((prev) => prev.map((it) => (it.id === updated.id ? updated : it)));
       setEditTarget(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -715,7 +682,7 @@ export function KanbanBoard() {
     setIsSaving(true);
     try {
       await deleteBoardTask(deleteTarget.id);
-      setItems(prev => prev.filter(it => it.id !== deleteTarget.id));
+      setItems((prev) => prev.filter((it) => it.id !== deleteTarget.id));
       setDeleteTarget(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -725,87 +692,66 @@ export function KanbanBoard() {
   }
 
   return (
-    <Section height="100%">
-      <Layout
-        height="fill"
-        header={
-          <LayoutHeader hasDivider padding={4}>
-            <Toolbar
-              label="Board actions"
-              gap={2}
-              startContent={
-                <>
-                  <Heading level={3}>Kanban Board</Heading>
-                  <Badge label={items.length} variant="neutral" />
-                  {error && (
-                    <Text type="supporting" style={{color: 'var(--color-error)'}}>
-                      {error}
-                    </Text>
-                  )}
-                </>
-              }
-              endContent={
-                <HStack gap={2}>
-                  <IconButton
-                    icon={<Icon icon={ArrowPathIcon} size="sm" />}
-                    label="Refresh"
-                    onClick={refetch}
-                  />
-                  <Button
-                    label="Add task"
-                    variant="primary"
-                    icon={<Icon icon={PlusIcon} size="sm" />}
-                    onClick={() => setIsAddOpen(true)}
-                  />
-                </HStack>
-              }
-            />
-          </LayoutHeader>
-        }
-        content={
-          <LayoutContent padding={0}>
-            {!loaded ? (
-              <EmptyState isCompact title="Loading board…" style={styles.columnEmptyState} />
-            ) : (
-              <HStack gap={4} style={styles.boardColumns}>
-                {COLUMNS.map(meta => (
-                  <BoardColumn
-                    key={meta.id}
-                    meta={meta}
-                    count={itemsByColumn[meta.id].length}
-                    contentRef={getColumnRef(meta.id)}>
-                    {renderColumnCards(meta.id)}
-                  </BoardColumn>
-                ))}
-              </HStack>
-            )}
-          </LayoutContent>
-        }
-      />
+    <div className="flex h-full flex-col gap-3">
+      <div className="flex items-center justify-between gap-3 border-b border-graphite/20 pb-3">
+        <div className="flex items-center gap-2">
+          <h3 className="font-heading text-lg font-semibold">Kanban Board</h3>
+          <Chip>{items.length}</Chip>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" aria-label="Refresh" onClick={refetch}>
+            <ArrowPathIcon className="size-4" />
+          </Button>
+          <Button onClick={() => setIsAddOpen(true)}>
+            <PlusIcon className="size-4" />
+            Add task
+          </Button>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1">
+        {!loaded ? (
+          <p className="p-10 text-center text-sm text-muted-foreground">Loading board…</p>
+        ) : (
+          <div className="flex h-full gap-4 overflow-x-auto overflow-y-hidden">
+            {COLUMNS.map((meta) => (
+              <BoardColumn
+                key={meta.id}
+                meta={meta}
+                count={itemsByColumn[meta.id].length}
+                contentRef={getColumnRef(meta.id)}
+              >
+                {renderColumnCards(meta.id)}
+              </BoardColumn>
+            ))}
+          </div>
+        )}
+      </div>
       {drag && draggedItem ? (
-        <Card
-          padding={3}
+        <div
+          className="instrument-card fixed top-0 left-0 z-[1000] cursor-grabbing p-3 shadow-lg"
           style={{
-            ...styles.floating,
+            pointerEvents: "none",
             ...styles.floatingAt(
               drag.pointerX - drag.offsetX,
               drag.pointerY - drag.offsetY,
               drag.width,
             ),
-          }}>
+          }}
+        >
           <BoardCardBody
             item={draggedItem}
             onMove={() => {}}
             onEdit={() => {}}
             onDelete={() => {}}
           />
-        </Card>
+        </div>
       ) : null}
 
       <TaskFormDialog
         isOpen={isAddOpen}
         onOpenChange={setIsAddOpen}
-        initial={{title: '', description: '', priority: 'medium'}}
+        initial={{ title: "", description: "", priority: "medium" }}
         onSubmit={handleCreate}
         isSaving={isSaving}
         title="Add task"
@@ -820,22 +766,33 @@ export function KanbanBoard() {
                 description: editTarget.description,
                 priority: editTarget.priority,
               }
-            : {title: '', description: '', priority: 'medium'}
+            : { title: "", description: "", priority: "medium" }
         }
         onSubmit={handleEditSave}
         isSaving={isSaving}
-        title={`Edit ${editTarget?.ref ?? 'task'}`}
+        title={`Edit ${editTarget?.ref ?? "task"}`}
       />
       <AlertDialog
-        isOpen={deleteTarget !== null}
+        open={deleteTarget !== null}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
-        title={`Delete ${deleteTarget?.ref ?? 'task'}?`}
-        description={`"${deleteTarget?.title ?? ''}" will be permanently deleted. This can't be undone.`}
-        actionLabel="Delete"
-        actionVariant="destructive"
-        onAction={handleDeleteConfirm}
-        isActionLoading={isSaving}
-      />
-    </Section>
+      >
+        <AlertDialogContent>
+          <AlertDialogTitle>{`Delete ${deleteTarget?.ref ?? "task"}?`}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {`"${deleteTarget?.title ?? ""}" will be permanently deleted. This can't be undone.`}
+          </AlertDialogDescription>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={isSaving}
+              onClick={handleDeleteConfirm}
+            >
+              {isSaving ? "Deleting…" : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
   );
 }

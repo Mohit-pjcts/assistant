@@ -74,7 +74,12 @@ describe("A2UIRenderer", () => {
     const surface: A2UISurface = {
       surfaceId: "s1",
       components: [
-        { id: "root", component: "Image", url: "data:image/png;base64,AAAA", description: "a chart" },
+        {
+          id: "root",
+          component: "Image",
+          url: "data:image/png;base64,AAAA",
+          description: "a chart",
+        },
       ],
     };
     render(<A2UIRenderer surface={surface} />);
@@ -106,9 +111,18 @@ describe("A2UIRenderer", () => {
     const surface: A2UISurface = {
       surfaceId: "form-1",
       components: [
-        { id: "root", component: "Column", children: ["name", "attending", "meal", "go_label", "go"] },
+        {
+          id: "root",
+          component: "Column",
+          children: ["name", "attending", "meal", "go_label", "go"],
+        },
         { id: "name", component: "TextField", label: "Guest name", value: { path: "/name" } },
-        { id: "attending", component: "CheckBox", label: "Attending?", value: { path: "/attending" } },
+        {
+          id: "attending",
+          component: "CheckBox",
+          label: "Attending?",
+          value: { path: "/attending" },
+        },
         {
           id: "meal",
           component: "ChoicePicker",

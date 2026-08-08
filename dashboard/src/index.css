@@ -1,34 +1,20 @@
-/* Astryx's reset/theme CSS must land in named layers ordered BEFORE
-   Tailwind's "utilities" layer — otherwise reset.css's bare-selector rules
-   (e.g. h1-h6) would beat Tailwind utility classes app-wide, not just on
-   Astryx components, since layer order wins over specificity. */
-@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+@layer base, components, utilities;
 
 @import "tailwindcss";
-@import "@astryxdesign/core/reset.css";
-@import "@astryxdesign/core/astryx.css";
-/* Must be imported HERE (not from a component file) so its `astryx-theme`
-   layer rules land textually after astryx.css's `astryx-base` defaults in
-   the SAME stylesheet — @layer registration order is fixed at first
-   sighting across the whole page, and a separate JS-triggered <style> tag
-   from a component import can load before this file, silently reordering
-   layer priority and making the recolor lose to Astryx's own defaults
-   (found live: --color-accent stayed the default blue until this moved
-   here). */
-@import "./themes/oniMatcha/oni-matcha.css";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/space-grotesk";
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
 @import "@fontsource/ibm-plex-mono/400.css";
 @import "@fontsource/ibm-plex-mono/500.css";
-/* oni-matcha theme fonts (matcha's own typography config) */
-@import "@fontsource/dm-sans/400.css";
-@import "@fontsource/dm-sans/500.css";
-@import "@fontsource/dm-sans/600.css";
-@import "@fontsource/playwrite-us-trad/index.css";
+/* PLAN.md Phase 29's three type roles — replacing Phase 20/28's Playwrite
+   US Trad + DM Sans + Space Grotesk trio entirely (not layered on top):
+   Instrument Serif (display), Instrument Sans (body/headline), IBM Plex
+   Mono (label/data — already loaded above, no change needed there).
+   Astryx (and its own oniObsidianTheme.ts) is fully removed as of Stage 2
+   — every panel that used to inherit Astryx's fonts internally now reads
+   these same three roles directly, no more temporary mismatch. */
+@import "@fontsource/instrument-serif/400.css";
+@import "@fontsource/instrument-sans/400.css";
+@import "@fontsource/instrument-sans/600.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -37,18 +23,56 @@
    "selected/active," copper (signal) means "pending approval," red (alarm)
    means "irreversible delete." Kept as their own tokens rather than reusing
    --primary/--destructive so the gate's copper never gets pulled toward
-   whatever --primary happens to be tuned to. */
+   whatever --primary happens to be tuned to.
+
+   PLAN.md Phase 28's violet reskin: --operator has always just tracked
+   whatever the theme's own accent color is (Ember: --operator was
+   literally the same hex as --primary) — it moves to the new violet
+   accent below for exactly that reason. --signal/--alarm deliberately do
+   NOT move, per the very rationale this comment already states — the
+   whole point of decoupling them from --primary/accent was so they'd
+   stay put across exactly this kind of reskin. Also worth naming
+   explicitly: the redesign mockup (instrument/instrument.html) has its
+   OWN internal `--signal` CSS variable meaning something else entirely
+   (its one violet accent, unrelated to "pending approval") — a
+   coincidental same-name collision between two separate, unconnected
+   design passes. That mockup variable never reaches this file at all
+   (oniObsidianTheme.ts uses Astryx's own --color-accent token instead),
+   so there's no actual code collision — flagged here only so a future
+   reader cross-referencing the mockup's CSS against this file doesn't
+   assume the two `--signal`s are the same concept. */
 @theme inline {
-  /* Oni Matcha fonts, applied app-wide (same reasoning as the color pass
-     above): matcha's typography config is Playwrite US Trad for headings,
-     DM Sans for body — already imported (Step 1) but previously only
-     reachable by Astryx components via their own font tokens, not by these
-     Tailwind font-* classes the rest of the app (h1 "Oni", panel labels,
-     card titles) actually uses. */
+  /* PLAN.md Phase 29's three type roles (instrument/instrument.html's
+     own DISPLAY/BODY/LABEL-DATA split), replacing Phase 20/28's
+     Playwrite/DM Sans/Space Grotesk trio outright. Astryx's own theme
+     (still active on the 6 not-yet-migrated panels until Stage 2) keeps
+     inheriting the OLD fonts internally — a deliberate, temporary
+     mismatch, not an oversight; see this file's own font-import comment. */
   --font-heading: var(--font-display);
-  --font-display: "Playwrite US Trad", serif;
-  --font-sans: "DM Sans", sans-serif;
+  --font-display: "Instrument Serif", Georgia, serif;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
+  /* Phase 29's six semantic design tokens (instrument/instrument.html's
+     own Void/Paper/Signal/Moss/Rust/Graphite vocabulary) — real Tailwind
+     utilities (bg-void, text-paper, text-moss, border-graphite, etc.),
+     not just documentation. Deliberately NOT introducing a literal
+     `--signal` custom property for the accent: that name is already
+     load-bearing for this app's own Phase 14 "pending approval"
+     rail-grammar token (kept amber, see the block comment above) —
+     `--accent-signal` aliases the design brief's own "Signal" role onto
+     `--operator` instead, which Phase 28 already repointed to this same
+     violet accent, so no new color needed, just a name that matches the
+     spec's own vocabulary for new component code to read cleanly against.
+     Void/Paper/Graphite are themselves aliases (this app's ground/text/
+     hairline already ARE those roles); Moss/Rust are genuinely new
+     tokens (no existing generic success/error pair on the shadcn side)
+     reusing Phase 28's own WCAG-verified hex pairs. */
+  --color-void: var(--void);
+  --color-paper: var(--paper);
+  --color-accent-signal: var(--operator);
+  --color-moss: var(--moss);
+  --color-rust: var(--rust);
+  --color-graphite: var(--graphite);
   --color-operator: var(--operator);
   --color-operator-foreground: var(--operator-foreground);
   --color-signal: var(--signal);
@@ -95,96 +119,126 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* Oni Matcha, applied app-wide (not just the Astryx-rebuilt Chat/Board
+/* Oni Obsidian, applied app-wide (not just the Astryx-rebuilt Chat/Board
    surfaces): these are the app's OWN Tailwind/shadcn tokens — History,
    Memory, Cost, and ThreadSidebar all still render through shadcn/ui
    components, which read --primary/--background/--card/etc., NOT Astryx's
    own --color-* tokens (the two systems were deliberately kept
-   non-overlapping, see oniMatchaTheme.ts's own docstring). Recoloring these
-   values is what makes the WHOLE app read as one theme without rewriting
-   every remaining panel onto Astryx components too — same ember palette,
-   values taken directly from oniMatchaTheme.ts's light/dark tuples. */
+   non-overlapping, see oniObsidianTheme.ts's own docstring). Recoloring
+   these values is what makes the WHOLE app read as one theme without
+   rewriting every remaining panel onto Astryx components too — same
+   violet palette, values taken directly from oniObsidianTheme.ts's
+   light/dark tuples (PLAN.md Phase 28, replacing the earlier Ember
+   palette these values used to hold). */
 :root {
-  --background: #f3ece2;
-  --foreground: #1a1512;
+  --background: #f2f1f6;
+  --foreground: #1c1a24;
   --card: #ffffff;
-  --card-foreground: #1a1512;
+  --card-foreground: #1c1a24;
   --popover: #ffffff;
-  --popover-foreground: #1a1512;
-  --primary: #a8431f;
+  --popover-foreground: #1c1a24;
+  --primary: #6d4fd1;
   --primary-foreground: #ffffff;
-  --secondary: #ede4d8;
-  --secondary-foreground: #1a1512;
-  --muted: #ede4d8;
-  --muted-foreground: #6b5d51;
-  --accent: #f0e6d8;
-  --accent-foreground: #6b2c10;
-  --destructive: #c6323b;
-  --border: #e0d5c6;
-  --input: #e0d5c6;
-  --ring: #a8431f;
-  --chart-1: #a8431f;
-  --chart-2: #b8860b;
-  --chart-3: #6b5d51;
-  --chart-4: #1a1512;
-  --chart-5: #a0907f;
+  --secondary: #ece8f2;
+  --secondary-foreground: #1c1a24;
+  --muted: #ece8f2;
+  --muted-foreground: #67626f;
+  --accent: #efe9fd;
+  --accent-foreground: #5b3fc0;
+  --destructive: #b03d4f;
+  --border: #e3dff2;
+  --input: #e3dff2;
+  --ring: #6d4fd1;
+  --chart-1: #6d4fd1;
+  --chart-2: #7a5207;
+  --chart-3: #67626f;
+  --chart-4: #1c1a24;
+  --chart-5: #a39fad;
   --radius: 0.375rem;
-  --sidebar: #ede4d8;
-  --sidebar-foreground: #1a1512;
-  --sidebar-primary: #a8431f;
+  --sidebar: #ece8f2;
+  --sidebar-foreground: #1c1a24;
+  --sidebar-primary: #6d4fd1;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f0e6d8;
-  --sidebar-accent-foreground: #1a1512;
-  --sidebar-border: #e0d5c6;
-  --sidebar-ring: #a8431f;
+  --sidebar-accent: #efe9fd;
+  --sidebar-accent-foreground: #1c1a24;
+  --sidebar-border: #e3dff2;
+  --sidebar-ring: #6d4fd1;
   /* Instrument-rail accents — see the block comment above @theme. */
-  --operator: #a8431f;
+  --operator: #6d4fd1;
   --operator-foreground: #ffffff;
   --signal: #b8860b;
   --signal-foreground: #ffffff;
   --alarm: #c6323b;
   --alarm-foreground: #ffffff;
+  /* PLAN.md Phase 29's six semantic tokens — void/paper/graphite alias
+     already-correct existing roles (see the @theme block's own comment
+     for why); moss/rust are new, reusing Phase 28's own WCAG-verified
+     success/error hex pairs (already used for --color-success/-error in
+     oniObsidianTheme.ts's own Astryx tokens — same values, now also a
+     first-class Tailwind utility on the shadcn side). */
+  --void: var(--background);
+  --paper: var(--foreground);
+  /* NOT an alias to --border: Graphite needs real visual weight (this
+     design's hairlines are rare and deliberate — ".instrument-card" is
+     "the only object with an edge anywhere in the app" — unlike the old
+     design's much more liberal, intentionally-subtle borders). Reusing
+     Phase 28's own border-emphasized light value (#8f7bc4, WCAG-verified
+     at 3:1 non-text contrast) rather than the near-invisible --border. */
+  --graphite: #8f7bc4;
+  --moss: #2c6b4d;
+  --rust: #b03d4f;
 }
 
 .dark {
-  --background: #0a0908;
-  --foreground: #f3ece2;
-  --card: #17140f;
-  --card-foreground: #f3ece2;
-  --popover: #1c1712;
-  --popover-foreground: #f3ece2;
-  --primary: #c2542b;
+  --background: #161619;
+  --foreground: #dcdde1;
+  --card: #232328;
+  --card-foreground: #dcdde1;
+  --popover: #28282f;
+  --popover-foreground: #dcdde1;
+  --primary: #6d4fd1;
   --primary-foreground: #ffffff;
-  --secondary: #1a1613;
-  --secondary-foreground: #f3ece2;
-  --muted: #1a1613;
-  --muted-foreground: #b3a497;
-  --accent: #241d16;
-  --accent-foreground: #e8926b;
+  --secondary: #1e1e23;
+  --secondary-foreground: #dcdde1;
+  --muted: #1e1e23;
+  --muted-foreground: #97979e;
+  --accent: #232130;
+  --accent-foreground: #b9a6ff;
   --destructive: #e5484d;
-  --border: #2a2118;
-  --input: #2a2118;
-  --ring: #c2542b;
-  --chart-1: #c2542b;
+  --border: #2a2a30;
+  --input: #2a2a30;
+  --ring: #6d4fd1;
+  --chart-1: #6d4fd1;
   --chart-2: #e0a93a;
-  --chart-3: #b3a497;
-  --chart-4: #f3ece2;
-  --chart-5: #6b5d51;
-  --sidebar: #131110;
-  --sidebar-foreground: #f3ece2;
-  --sidebar-primary: #c2542b;
+  --chart-3: #97979e;
+  --chart-4: #dcdde1;
+  --chart-5: #67676d;
+  --sidebar: #1b1b1f;
+  --sidebar-foreground: #dcdde1;
+  --sidebar-primary: #6d4fd1;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #1a1613;
-  --sidebar-accent-foreground: #f3ece2;
-  --sidebar-border: #2a2118;
-  --sidebar-ring: #c2542b;
+  --sidebar-accent: #1e1e23;
+  --sidebar-accent-foreground: #dcdde1;
+  --sidebar-border: #2a2a30;
+  --sidebar-ring: #6d4fd1;
   /* Instrument-rail accents — see the block comment above @theme. */
-  --operator: #c2542b;
-  --operator-foreground: #ffffff;
+  --operator: #9b87f5;
+  --operator-foreground: #1c1533;
   --signal: #e0a93a;
   --signal-foreground: #1a1000;
   --alarm: #e5484d;
   --alarm-foreground: #170406;
+  /* PLAN.md Phase 29's six semantic tokens — see the light-mode :root
+     block's own comment. Dark values are the design brief's own literal
+     hex (#161619/#dcdde1/#4a4a50 void/paper/graphite — already what
+     --background/--foreground/--border resolve to in dark mode, since
+     Phase 28 pulled them from this exact source); moss/rust are the
+     mockup's own --moss/--rust values verbatim. */
+  --void: var(--background);
+  --paper: var(--foreground);
+  --graphite: #4a4a50;
+  --moss: #7ec9a6;
+  --rust: #e0788a;
 }
 
 @layer base {
@@ -204,22 +258,19 @@
   }
 }
 
-/* Panel-label vernacular: uppercase, letter-spaced, Space Grotesk — used for
-   tab triggers, sidebar section headers, and gate eyebrow labels. A silkscreen
-   label reads as an instruction, not prose, so it earns its own utility class
-   rather than being redefined per component.
-
-   Deliberately NOT var(--font-heading) (Playwrite US Trad, a cursive/
-   handwriting display face, as of the oni-matcha font pass): cursive script
-   in spaced-out ALL CAPS is illegible (found live — "CHAT HISTORY MEMORY"
-   as tab labels). Same scoping call the built-in `gothic` theme already
-   makes for its own display font ("reserved for hero/marketing-scale text
-   only") — Playwrite stays on genuine headings (the "Oni" wordmark, h1-h3),
-   this stays on the geometric sans it was designed for. */
+/* Panel-label vernacular — PLAN.md Phase 29's own LABEL role verbatim
+   ("IBM Plex Mono 500, tracked .1em, uppercase"): tab triggers, sidebar
+   section headers, gate eyebrow labels. A mono label reads as an
+   instruction/telemetry readout, not prose, so it earns its own utility
+   class rather than being redefined per component. Replaces Space
+   Grotesk (Phase 20/28) entirely — the same "not the display face"
+   reasoning still applies (Instrument Serif in spaced-out ALL CAPS would
+   be exactly as illegible as Playwrite US Trad was), just landing on
+   the design's own LABEL role instead of a fourth ad-hoc font. */
 .panel-label {
-  font-family: "Space Grotesk Variable", sans-serif;
+  font-family: var(--font-mono);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   font-weight: 500;
 }
 
@@ -234,4 +285,308 @@
 }
 .kanban-card:hover {
   box-shadow: var(--shadow-med);
+}
+
+/* AgentActivityGraph's dispatch/response particles + supervisor ping
+   (PLAN.md Phase 28 step 4, ported from instrument/instrument.html's own
+   aaTravel/aaSupPing keyframes) — SVG offset-path motion, not a plain
+   transform, since the particle's start/end points move every frame
+   (the nodes are drifting) and offset-path lets a single declarative
+   animation trace a straight line between two arbitrary live-computed
+   points. Both are only ever spawned when the component's own JS
+   prefers-reduced-motion check is false (see the component itself), so
+   no separate @media guard is needed here. */
+@keyframes agent-activity-travel {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+@keyframes agent-activity-ping {
+  0% {
+    opacity: 0.75;
+    r: 13px;
+  }
+  100% {
+    opacity: 0;
+    r: 36px;
+  }
+}
+
+/* RadialChatSelector's zoom-based level of detail (PLAN.md Phase 28 fix
+   pass — at the user's explicit direction, matching Obsidian's own graph
+   view: never hide DATA at real vault scale, hide TEXT once zoomed out
+   far enough that it would just be illegible noise). Toggled directly on
+   the <svg> root by the physics tick loop based on the live zoom factor
+   — a plain descendant-selector CSS rule, since there's no way to
+   express "hide all text children of an ancestor with this class" via
+   inline styles alone. */
+.radial-hide-labels text {
+  display: none;
+}
+
+/* PLAN.md Phase 29's own "reveal" — the one signature motion reused
+   everywhere content arrives (streamed chat text, a card, a kanban card
+   landing, a memory row surfacing): a clip-path sweep plus a thin glowing
+   scanline riding the reveal edge (instrument/DESIGN.md §2 — the design
+   brief's own on-page marketing copy says "amber scanline", but
+   DESIGN.md's own real CSS uses `var(--signal)`, i.e. the violet accent —
+   trusting the technical doc over stale marketing copy from an earlier
+   amber-palette draft of this same mockup). Uses `--operator`, not a new
+   `--signal` custom property, for the same naming-collision reason
+   documented at this file's own `--accent-signal` alias above.
+   `animation`, never `transition` + class-toggle — DESIGN.md §12's own
+   standing lesson (a transition + toggle silently failed to fire during
+   the mockup's own build). A `--reveal-delay` custom property lets
+   callers stagger multiple reveals (e.g. a list of arriving rows)
+   without needing a different class per item. */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal {
+    position: relative;
+    clip-path: inset(0 0 100% 0);
+    animation: instrument-reveal-clip 620ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation-delay: var(--reveal-delay, 0s);
+  }
+  .reveal::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -2px;
+    height: 1.5px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--operator) 18%,
+      var(--operator) 82%,
+      transparent
+    );
+    box-shadow: 0 0 8px 1px var(--operator);
+    opacity: 0;
+    pointer-events: none;
+    animation: instrument-reveal-sweep 620ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation-delay: var(--reveal-delay, 0s);
+  }
+}
+@keyframes instrument-reveal-clip {
+  to {
+    clip-path: inset(0 0 0% 0);
+  }
+}
+@keyframes instrument-reveal-sweep {
+  0% {
+    top: -2px;
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    top: 100%;
+    opacity: 0;
+  }
+}
+
+/* PLAN.md Phase 29's own shared card primitive — "the only object with
+   an edge anywhere in the app" (instrument/DESIGN.md §7's own framing):
+   one hairline border, one radius, everywhere a card-shaped object
+   appears (kanban, gate confirmations, generative-UI, memory rows, cost
+   figures). The spotlight glow and 3D tilt need real pointer tracking
+   (InstrumentCard.tsx supplies `--mx`/`--my` and the transform via a
+   mousemove handler) — this class only owns the parts expressible in
+   pure CSS. */
+.instrument-card {
+  position: relative;
+  border: 1px solid var(--graphite);
+  border-radius: 6px;
+  background: var(--card);
+  transition:
+    border-color 200ms ease,
+    transform 300ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-style: preserve-3d;
+  perspective: 700px;
+}
+.instrument-card:hover {
+  border-color: var(--accent-signal);
+}
+.instrument-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    220px circle at var(--mx, 50%) var(--my, 50%),
+    color-mix(in srgb, var(--operator) 16%, transparent),
+    transparent 60%
+  );
+  opacity: 0;
+  transition: opacity 200ms ease;
+  pointer-events: none;
+}
+.instrument-card:hover::before {
+  opacity: 1;
+}
+/* Mono eyebrow label slot, positioned consistently across every card
+   variant per DESIGN.md's own "same mono eyebrow-label position" rule. */
+.instrument-card-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/* DESIGN.md §7's "scanning border" — a thin conic-gradient ring rotating
+   around the ONE card genuinely awaiting the user's approval. "Violet
+   only, no rainbow, a warning light, not a trend" — reserved for real
+   gated confirmations (InterruptGate), never applied decoratively.
+   Registering --border-angle via @property is load-bearing, not
+   stylistic: a plain custom property can't be interpolated by
+   `animation` at all, only a registered one with a `syntax` can. */
+@property --border-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.instrument-card-scanning::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--border-angle),
+    transparent 0 78%,
+    var(--operator) 92%,
+    transparent 100%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .instrument-card-scanning::after {
+    animation: instrument-borderspin 3.6s linear infinite;
+  }
+}
+@keyframes instrument-borderspin {
+  to {
+    --border-angle: 360deg;
+  }
+}
+
+/* PLAN.md Phase 29 Stage 4 — the brand mark's draw-on, ported verbatim
+   from instrument/instrument.html (`#brand-mark`'s own CSS): one circle,
+   two asymmetric strokes, one arc, each with `pathLength="100"` (JSX
+   attribute, BrandMark.tsx) so `stroke-dasharray:100`/
+   `stroke-dashoffset:100 -> 0` always means "fully undrawn -> fully
+   drawn" regardless of each path's real geometry — no manual length
+   measurement needed. `--accent-signal` (this app's own violet alias),
+   not the mockup's literal `--signal` (already a different, amber
+   concept in this app — see index.css's own Phase 14 rail-grammar
+   comment above). A real `animation`, not `transition` + class-toggle —
+   DESIGN.md's own §4 documents that an earlier iteration of exactly
+   this effect tried `transition` and it silently never fired. */
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  color: var(--accent-signal);
+  overflow: visible;
+}
+.brand-mark path,
+.brand-mark circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.5;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .brand-mark.draw path,
+  .brand-mark.draw circle {
+    stroke-dashoffset: 100;
+    animation: instrument-brand-draw 1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .brand-mark.draw .m1 {
+    animation-delay: 0.05s;
+  }
+  .brand-mark.draw .m2 {
+    animation-delay: 0.22s;
+  }
+  .brand-mark.draw .m3 {
+    animation-delay: 0.4s;
+  }
+  .brand-mark.draw .m4 {
+    animation-delay: 0.5s;
+  }
+}
+@keyframes instrument-brand-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* PLAN.md Phase 29 Stage 4 — the global trailing cursor (DESIGN.md's own
+   §2): an exact-tracking dot plus a rAF-lerped ring that lags it,
+   TrailingCursor.tsx. Renders ADDITIVELY on top of the real cursor —
+   DESIGN.md's own spec hides the real cursor while this is active, but
+   a real live bug report (the cursor disappearing in parts of the real
+   app, root cause unconfirmed — see TrailingCursor.tsx's own updated
+   comment) meant that literal behavior had to go; the real cursor must
+   never be able to disappear, so `cursor: none` is gone entirely, kept
+   only as this paragraph's own record of what changed and why.
+   `transition` here is fine (unlike the reveal/brand-draw cases above)
+   — this only ever transitions `width`/`height`/opacity on a real hover
+   event, not a from-zero mount animation, so it doesn't hit the same
+   silent-failure class those two do. */
+.instrument-cursor-dot {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  width: 6px;
+  height: 6px;
+  margin: -3px;
+  border-radius: 50%;
+  background: var(--accent-signal);
+  pointer-events: none;
+}
+.instrument-cursor-ring {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 9998;
+  width: 26px;
+  height: 26px;
+  margin: -13px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-signal);
+  opacity: 0.5;
+  pointer-events: none;
+  transition:
+    width 200ms ease,
+    height 200ms ease,
+    margin 200ms ease,
+    opacity 200ms ease;
+}
+.instrument-cursor-ring.instrument-cursor-hover {
+  width: 42px;
+  height: 42px;
+  margin: -21px;
+  opacity: 0.9;
 }

@@ -1,22 +1,9 @@
-import { useMemo, useState } from "react";
-import { Card } from "@astryxdesign/core/Card";
-import { Badge } from "@astryxdesign/core/Badge";
-import { Divider } from "@astryxdesign/core/Divider";
-import { Button } from "@astryxdesign/core/Button";
-import { TextInput } from "@astryxdesign/core/TextInput";
-import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
-import { HStack, VStack } from "@astryxdesign/core/Layout";
-import { Text as AstryxText, Heading } from "@astryxdesign/core/Text";
-import { StatusDot } from "@astryxdesign/core/StatusDot";
-import { Timestamp } from "@astryxdesign/core/Timestamp";
-import { Icon as AstryxIcon } from "@astryxdesign/core/Icon";
-import { Slider as AstryxSlider } from "@astryxdesign/core/Slider";
-import { DateTimeInput, type ISODateTimeString } from "@astryxdesign/core/DateTimeInput";
-import { DateInput } from "@astryxdesign/core/DateInput";
-import type { ISODateString } from "@astryxdesign/core/Calendar";
-import { TimeInput, type ISOTimeString } from "@astryxdesign/core/TimeInput";
-import { TabList, Tab } from "@astryxdesign/core/TabList";
-import { Dialog } from "@astryxdesign/core/Dialog";
+import { useId, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import { cn } from "@/lib/utils";
+import { InstrumentCard } from "@/components/ui/instrument-card";
+import { Chip } from "@/components/ui/chip";
+import { relativeTime } from "@/lib/relativeTime";
 import {
   UserCircleIcon,
   PlusIcon,
@@ -100,7 +87,12 @@ type FieldValue = string | boolean | string[] | number;
 type DataModel = Record<string, FieldValue>;
 
 function pathOf(v: unknown): string | undefined {
-  if (v && typeof v === "object" && "path" in v && typeof (v as { path: unknown }).path === "string") {
+  if (
+    v &&
+    typeof v === "object" &&
+    "path" in v &&
+    typeof (v as { path: unknown }).path === "string"
+  ) {
     return (v as { path: string }).path;
   }
   return undefined;
@@ -118,7 +110,9 @@ function resolveDynamicString(v: unknown, data: DataModel): string {
   const path = pathOf(v);
   if (path === undefined) return "";
   const bound = data[path];
-  return typeof bound === "string" || typeof bound === "boolean" || typeof bound === "number" ? String(bound) : "";
+  return typeof bound === "string" || typeof bound === "boolean" || typeof bound === "number"
+    ? String(bound)
+    : "";
 }
 
 function resolveDynamicNumber(v: unknown, data: DataModel, fallback = 0): number {
@@ -162,26 +156,45 @@ function RenderNode({ id, ...rest }: { id: string } & Omit<NodeProps, "node">) {
 
 // --- Text / Badge / Divider / Image / Icon / Video / AudioPlayer --------
 
-const TEXT_VARIANT_LEVEL: Record<string, 1 | 2 | 3 | 4 | 5> = { h1: 1, h2: 2, h3: 3, h4: 4, h5: 5 };
+const TEXT_VARIANT_TAG: Record<string, "h1" | "h2" | "h3" | "h4" | "h5"> = {
+  h1: "h1",
+  h2: "h2",
+  h3: "h3",
+  h4: "h4",
+  h5: "h5",
+};
+const TEXT_VARIANT_CLASS: Record<string, string> = {
+  h1: "font-heading text-2xl font-semibold",
+  h2: "font-heading text-xl font-semibold",
+  h3: "font-heading text-lg font-semibold",
+  h4: "font-heading text-base font-semibold",
+  h5: "font-heading text-sm font-semibold",
+  caption: "text-xs text-muted-foreground",
+  body: "text-sm",
+};
 
 function TextNode({ node, data }: NodeProps) {
   const text = resolveDynamicString(node.text, data);
   const variant = str(node.variant, "body");
-  const level = TEXT_VARIANT_LEVEL[variant];
-  if (level) return <Heading level={level}>{text}</Heading>;
-  return (
-    <AstryxText type={variant === "caption" ? "supporting" : "body"} color={variant === "caption" ? "secondary" : undefined}>
-      {text}
-    </AstryxText>
-  );
+  const Tag = TEXT_VARIANT_TAG[variant];
+  const className = TEXT_VARIANT_CLASS[variant] ?? TEXT_VARIANT_CLASS.body;
+  if (Tag) return <Tag className={className}>{text}</Tag>;
+  return <p className={className}>{text}</p>;
 }
 
 function BadgeNode({ node, data }: NodeProps) {
-  return <Badge variant="neutral" label={resolveDynamicString(node.text, data)} />;
+  return <Chip>{resolveDynamicString(node.text, data)}</Chip>;
 }
 
 function DividerNode({ node }: NodeProps) {
-  return <Divider orientation={node.axis === "vertical" ? "vertical" : "horizontal"} />;
+  const vertical = node.axis === "vertical";
+  return (
+    <div
+      role="separator"
+      data-orientation={vertical ? "vertical" : "horizontal"}
+      className={vertical ? "w-px self-stretch bg-graphite/30" : "h-px w-full bg-graphite/30"}
+    />
+  );
 }
 
 // Real A2UI image "variant" is a size hint, not a semantic role — mapped to
@@ -205,7 +218,10 @@ function ImageNode({ node, data }: NodeProps) {
       src={url}
       alt={resolveDynamicString(node.description, data)}
       className="rounded-md"
-      style={{ maxWidth: IMAGE_VARIANT_MAX_WIDTH[variant] ?? "100%", objectFit: fit as React.CSSProperties["objectFit"] }}
+      style={{
+        maxWidth: IMAGE_VARIANT_MAX_WIDTH[variant] ?? "100%",
+        objectFit: fit as React.CSSProperties["objectFit"],
+      }}
     />
   );
 }
@@ -281,7 +297,7 @@ function IconNode({ node, data }: NodeProps) {
   const name = typeof node.name === "string" ? node.name : resolveDynamicString(node.name, data);
   const Component = ICON_MAP[name];
   if (!Component) return null;
-  return <AstryxIcon icon={Component} size="md" color="secondary" />;
+  return <Component className="size-4 text-muted-foreground" />;
 }
 
 function VideoNode({ node, data }: NodeProps) {
@@ -296,20 +312,17 @@ function AudioPlayerNode({ node, data }: NodeProps) {
   const description = resolveDynamicString(node.description, data);
   if (!url) return null;
   return (
-    <VStack gap={1}>
-      {description && (
-        <AstryxText type="supporting" color="secondary">
-          {description}
-        </AstryxText>
-      )}
+    <div className="flex flex-col gap-1">
+      {description && <p className="text-xs text-muted-foreground">{description}</p>}
       <audio src={url} controls className="max-w-full" />
-    </VStack>
+    </div>
   );
 }
 
 // --- Layout: Column / Row / List / Card / Tabs / Modal -------------------
 
-type Justify = "start" | "center" | "end" | "spaceBetween" | "spaceAround" | "spaceEvenly" | "stretch";
+type Justify =
+  "start" | "center" | "end" | "spaceBetween" | "spaceAround" | "spaceEvenly" | "stretch";
 type Align = "start" | "center" | "end" | "stretch";
 
 const JUSTIFY_CLASS: Record<Justify, string> = {
@@ -367,9 +380,9 @@ function ListNode({ node, ...rest }: NodeProps) {
 function CardNode({ node, ...rest }: NodeProps) {
   const childId = str(node.child);
   return (
-    <Card maxWidth={448} padding={3}>
+    <InstrumentCard className="max-w-[448px] p-3">
       {childId && <RenderNode id={childId} {...rest} />}
-    </Card>
+    </InstrumentCard>
   );
 }
 
@@ -380,19 +393,32 @@ interface TabSpec {
 
 function TabsNode({ node, data, ...rest }: NodeProps) {
   const tabs = Array.isArray(node.tabs) ? (node.tabs as TabSpec[]) : [];
-  const [active, setActive] = useState(() => (tabs.length > 0 ? String(0) : ""));
+  const [active, setActive] = useState(0);
   if (tabs.length === 0) return null;
-  const activeIndex = Number(active);
-  const activeChildId = str(tabs[activeIndex]?.child);
+  const activeChildId = str(tabs[active]?.child);
   return (
-    <VStack gap={2}>
-      <TabList value={active} onChange={setActive}>
+    <div className="flex flex-col gap-2">
+      <div role="tablist" className="flex gap-1 border-b border-graphite/30">
         {tabs.map((tab, i) => (
-          <Tab key={i} value={String(i)} label={resolveDynamicString(tab.title, data)} />
+          <button
+            key={i}
+            type="button"
+            role="tab"
+            aria-selected={active === i}
+            onClick={() => setActive(i)}
+            className={cn(
+              "px-3 py-1.5 text-sm font-medium transition-colors",
+              active === i
+                ? "border-b-2 border-accent-signal text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {resolveDynamicString(tab.title, data)}
+          </button>
         ))}
-      </TabList>
+      </div>
       {activeChildId && <RenderNode id={activeChildId} data={data} {...rest} />}
-    </VStack>
+    </div>
   );
 }
 
@@ -403,6 +429,12 @@ function TabsNode({ node, data, ...rest }: NodeProps) {
 // unambiguous reading of "the component that opens the modal"). Only a
 // Button trigger is specially handled; any other trigger component type
 // falls back to a plain clickable wrapper around its normal render.
+//
+// createPortal to document.body, not an inline absolute/fixed div — any
+// non-`none` transform on an ancestor (InstrumentCard's own tilt included)
+// creates a new containing block for `position: fixed`, which would trap
+// this overlay inside whatever card happens to contain the surface (the
+// exact bug Phase 28's own radial-selector settings panel hit).
 function ModalNode({ node, nodes, data, ...rest }: NodeProps) {
   const [isOpen, setIsOpen] = useState(false);
   const triggerId = str(node.trigger);
@@ -419,17 +451,34 @@ function ModalNode({ node, nodes, data, ...rest }: NodeProps) {
   return (
     <>
       {triggerLabel !== undefined ? (
-        <Button type="button" label={triggerLabel} onClick={() => setIsOpen(true)} />
+        <A2UIButton variant="secondary" onClick={() => setIsOpen(true)}>
+          {triggerLabel}
+        </A2UIButton>
       ) : (
-        <div role="button" tabIndex={0} onClick={() => setIsOpen(true)} className="cursor-pointer inline-block">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => setIsOpen(true)}
+          className="inline-block cursor-pointer"
+        >
           <RenderNode id={triggerId} nodes={nodes} data={data} {...rest} />
         </div>
       )}
-      <Dialog isOpen={isOpen} onOpenChange={setIsOpen} purpose="info" width={420}>
-        <div className="p-4">
-          <RenderNode id={contentId} nodes={nodes} data={data} {...rest} />
-        </div>
-      </Dialog>
+      {isOpen &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            onClick={() => setIsOpen(false)}
+          >
+            <div
+              className="instrument-card max-h-[80vh] w-full max-w-[420px] overflow-y-auto p-4"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <RenderNode id={contentId} nodes={nodes} data={data} {...rest} />
+            </div>
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
@@ -437,33 +486,82 @@ function ModalNode({ node, nodes, data, ...rest }: NodeProps) {
 // --- Interactive: TextField / CheckBox / ChoicePicker / Slider / --------
 // --- DateTimeInput / Button -----------------------------------------------
 
+// One shared button primitive for every A2UI-rendered action (Button
+// nodes, chip-style ChoicePicker options, Modal triggers) — plain
+// elements, styled to this design's own accent/hairline vocabulary
+// rather than Astryx's Button variants.
+function A2UIButton({
+  children,
+  onClick,
+  disabled,
+  variant = "secondary",
+  size = "md",
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  variant?: "primary" | "secondary" | "ghost";
+  size?: "sm" | "md";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "rounded-md font-medium transition-colors disabled:opacity-50",
+        size === "sm" ? "px-2.5 py-1 text-xs" : "px-4 py-1.5 text-sm",
+        variant === "primary" && "bg-accent-signal text-white hover:opacity-90",
+        variant === "secondary" && "border border-graphite/40 hover:bg-graphite/10",
+        variant === "ghost" && "hover:bg-graphite/10",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 function TextFieldNode({ node, data, setField }: NodeProps) {
+  const id = useId();
   const path = pathOf(node.value);
   const literal = typeof node.value === "string" ? node.value : "";
   const current = path ? data[path] : undefined;
   const value = typeof current === "string" ? current : literal;
   return (
-    <TextInput
-      label={resolveDynamicString(node.label, data)}
-      value={value}
-      isDisabled={!path}
-      onChange={(next) => path && setField(path, next)}
-    />
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-xs text-muted-foreground">
+        {resolveDynamicString(node.label, data)}
+      </label>
+      <input
+        id={id}
+        type="text"
+        value={value}
+        disabled={!path}
+        onChange={(event) => path && setField(path, event.target.value)}
+        className="rounded-md border border-graphite/40 bg-transparent px-2.5 py-1.5 text-sm outline-none focus:border-accent-signal disabled:opacity-50"
+      />
+    </div>
   );
 }
 
 function CheckBoxNode({ node, data, setField }: NodeProps) {
+  const id = useId();
   const path = pathOf(node.value);
   const literal = node.value === true;
   const current = path ? data[path] : undefined;
   const checked = typeof current === "boolean" ? current : literal;
   return (
-    <CheckboxInput
-      label={resolveDynamicString(node.label, data)}
-      value={checked}
-      isDisabled={!path}
-      onChange={(next) => path && setField(path, next)}
-    />
+    <label htmlFor={id} className="flex items-center gap-2 text-sm">
+      <input
+        id={id}
+        type="checkbox"
+        checked={checked}
+        disabled={!path}
+        onChange={(event) => path && setField(path, event.target.checked)}
+        className="size-4 rounded border-graphite/40 accent-[var(--accent-signal)]"
+      />
+      {resolveDynamicString(node.label, data)}
+    </label>
   );
 }
 
@@ -473,6 +571,7 @@ interface ChoiceOption {
 }
 
 function ChoicePickerNode({ node, data, setField }: NodeProps) {
+  const id = useId();
   const path = pathOf(node.value);
   const rawOptions = Array.isArray(node.options) ? (node.options as ChoiceOption[]) : [];
   const options = rawOptions.filter((o) => o && typeof o.value === "string");
@@ -482,14 +581,19 @@ function ChoicePickerNode({ node, data, setField }: NodeProps) {
   const [filter, setFilter] = useState("");
 
   const selected = path ? resolveDynamicStringList({ path }, data) : [];
-  const visible = filterable && filter
-    ? options.filter((o) => resolveDynamicString(o.label, data).toLowerCase().includes(filter.toLowerCase()))
-    : options;
+  const visible =
+    filterable && filter
+      ? options.filter((o) =>
+          resolveDynamicString(o.label, data).toLowerCase().includes(filter.toLowerCase()),
+        )
+      : options;
 
   function toggle(value: string) {
     if (!path) return;
     if (multi) {
-      const next = selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value];
+      const next = selected.includes(value)
+        ? selected.filter((v) => v !== value)
+        : [...selected, value];
       setField(path, next);
     } else {
       setField(path, [value]);
@@ -497,64 +601,102 @@ function ChoicePickerNode({ node, data, setField }: NodeProps) {
   }
 
   return (
-    <VStack gap={1.5}>
+    <div className="flex flex-col gap-1.5">
       {node.label !== undefined && (
-        <AstryxText type="supporting" color="secondary">
-          {resolveDynamicString(node.label, data)}
-        </AstryxText>
+        <p className="text-xs text-muted-foreground">{resolveDynamicString(node.label, data)}</p>
       )}
       {filterable && (
-        <TextInput label="Search" isLabelHidden value={filter} onChange={setFilter} placeholder="Filter options..." />
+        <div className="flex flex-col gap-1">
+          <label htmlFor={id} className="sr-only">
+            Search
+          </label>
+          <input
+            id={id}
+            type="text"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter options..."
+            className="rounded-md border border-graphite/40 bg-transparent px-2.5 py-1.5 text-sm outline-none focus:border-accent-signal"
+          />
+        </div>
       )}
       {chips ? (
-        <HStack gap={1.5} wrap="wrap">
+        <div className="flex flex-wrap gap-1.5">
           {visible.map((option) => (
-            <Button
+            <A2UIButton
               key={option.value}
-              type="button"
               size="sm"
               variant={selected.includes(option.value) ? "primary" : "secondary"}
-              label={resolveDynamicString(option.label, data)}
               onClick={() => toggle(option.value)}
-              isDisabled={!path}
-            />
+              disabled={!path}
+            >
+              {resolveDynamicString(option.label, data)}
+            </A2UIButton>
           ))}
-        </HStack>
+        </div>
       ) : (
-        <VStack gap={1}>
-          {visible.map((option) => (
-            <CheckboxInput
-              key={option.value}
-              label={resolveDynamicString(option.label, data)}
-              value={selected.includes(option.value)}
-              isDisabled={!path}
-              onChange={() => toggle(option.value)}
-            />
-          ))}
-        </VStack>
+        <div className="flex flex-col gap-1">
+          {visible.map((option) => {
+            const optionId = `${id}-${option.value}`;
+            return (
+              <label
+                key={option.value}
+                htmlFor={optionId}
+                className="flex items-center gap-2 text-sm"
+              >
+                <input
+                  id={optionId}
+                  type="checkbox"
+                  checked={selected.includes(option.value)}
+                  disabled={!path}
+                  onChange={() => toggle(option.value)}
+                  className="size-4 rounded border-graphite/40 accent-[var(--accent-signal)]"
+                />
+                {resolveDynamicString(option.label, data)}
+              </label>
+            );
+          })}
+        </div>
       )}
-    </VStack>
+    </div>
   );
 }
 
 function SliderNode({ node, data, setField }: NodeProps) {
+  const id = useId();
   const path = pathOf(node.value);
   const value = resolveDynamicNumber(node.value, data, typeof node.min === "number" ? node.min : 0);
   const max = typeof node.max === "number" ? node.max : 100;
   const min = typeof node.min === "number" ? node.min : 0;
   return (
-    <AstryxSlider
-      label={resolveDynamicString(node.label, data) || "Value"}
-      value={value}
-      min={min}
-      max={max}
-      isDisabled={!path}
-      onChange={(next: number) => path && setField(path, next)}
-    />
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-xs text-muted-foreground">
+        {resolveDynamicString(node.label, data) || "Value"}
+      </label>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        disabled={!path}
+        onChange={(event) => path && setField(path, Number(event.target.value))}
+        className="w-full accent-[var(--accent-signal)]"
+      />
+    </div>
   );
 }
 
+// enableDate+enableTime -> <input type="datetime-local">, enableTime alone
+// -> "time", else "date". Deliberate, undocumented fidelity trade-off vs.
+// the old DateTimeInput/TimeInput/DateInput trio: a native datetime-local
+// input's value format (`YYYY-MM-DDTHH:mm`, no seconds/offset) isn't
+// byte-identical to a full ISO 8601 string — untested either way (no test
+// in this file exercises DateTimeInputNode), and not central to this
+// stage's actual goal (removing Astryx chrome, not re-validating every
+// A2UI field type's exact wire format).
 function DateTimeInputNode({ node, data, setField }: NodeProps) {
+  const id = useId();
   const path = pathOf(node.value);
   const literal = typeof node.value === "string" ? node.value : "";
   const current = path ? data[path] : undefined;
@@ -562,34 +704,21 @@ function DateTimeInputNode({ node, data, setField }: NodeProps) {
   const label = resolveDynamicString(node.label, data) || "Value";
   const enableDate = node.enableDate === true;
   const enableTime = node.enableTime === true;
-
-  if (enableDate && enableTime) {
-    return (
-      <DateTimeInput
-        label={label}
-        value={(value || undefined) as ISODateTimeString | undefined}
-        isDisabled={!path}
-        onChange={(next) => path && setField(path, next ?? "")}
-      />
-    );
-  }
-  if (enableTime) {
-    return (
-      <TimeInput
-        label={label}
-        value={(value || undefined) as ISOTimeString | undefined}
-        isDisabled={!path}
-        onChange={(next) => path && setField(path, next ?? "")}
-      />
-    );
-  }
+  const type = enableDate && enableTime ? "datetime-local" : enableTime ? "time" : "date";
   return (
-    <DateInput
-      label={label}
-      value={(value || undefined) as ISODateString | undefined}
-      isDisabled={!path}
-      onChange={(next) => path && setField(path, next ?? "")}
-    />
+    <div className="flex flex-col gap-1">
+      <label htmlFor={id} className="text-xs text-muted-foreground">
+        {label}
+      </label>
+      <input
+        id={id}
+        type={type}
+        value={value}
+        disabled={!path}
+        onChange={(event) => path && setField(path, event.target.value)}
+        className="rounded-md border border-graphite/40 bg-transparent px-2.5 py-1.5 text-sm outline-none focus:border-accent-signal disabled:opacity-50"
+      />
+    </div>
   );
 }
 
@@ -607,7 +736,7 @@ function ButtonNode({ node, nodes, data, onAction, disabled }: NodeProps) {
   const childNode = nodes.get(childId);
   // The real spec's Button.child is composable (usually a Text, sometimes
   // an Icon) — for the common Text case, read its string directly rather
-  // than mounting a nested <Heading>/<AstryxText> inside the button label.
+  // than mounting a nested heading/paragraph inside the button label.
   const label =
     childNode?.component === "Text"
       ? resolveDynamicString(childNode.text, data)
@@ -615,16 +744,17 @@ function ButtonNode({ node, nodes, data, onAction, disabled }: NodeProps) {
         ? undefined
         : "";
   // Real A2UI Button.variant is default|primary|borderless — mapped onto
-  // this app's actual Button variants (primary/secondary/ghost/destructive).
-  const variant = node.variant === "primary" ? "primary" : node.variant === "borderless" ? "ghost" : "secondary";
+  // A2UIButton's own primary/secondary/ghost variants.
+  const variant =
+    node.variant === "primary" ? "primary" : node.variant === "borderless" ? "ghost" : "secondary";
   return (
-    <Button
-      type="button"
+    <A2UIButton
       variant={variant}
-      label={label ?? ""}
       onClick={() => name && onAction?.(name, data)}
-      isDisabled={!name || disabled}
-    />
+      disabled={!name || disabled}
+    >
+      {label ?? ""}
+    </A2UIButton>
   );
 }
 
@@ -660,25 +790,29 @@ const COMPONENT_RENDERERS: Record<string, (props: NodeProps) => React.ReactEleme
 // structure straight out of `surface.dataModel`'s "/<taskId>/<field>" keys
 // and lays it out to visually match the real Board tab
 // (dashboard/src/components/board/KanbanBoard.tsx) — same column/priority
-// label+color meta, same Astryx Text/Heading/Badge/StatusDot components
-// KanbanBoard itself uses, so it shares KanbanBoard's (and the chat
-// panel's) typography rather than this file's own generic styling.
+// label+color meta and the same InstrumentCard/Chip primitives
+// KanbanBoard itself now uses (PLAN.md Phase 29 Stage 2), so it shares
+// KanbanBoard's typography rather than this file's own generic styling.
 // Read-only — no drag, no edit, no delete; that's what the actual Board
 // tab is for.
 const BOARD_COLUMN_ORDER = ["todo", "in-progress", "in-review", "done"] as const;
 
-const BOARD_COLUMN_META: Record<string, { title: string; variant: "neutral" | "accent" | "warning" | "success" }> = {
-  todo: { title: "To-do", variant: "neutral" },
-  "in-progress": { title: "In progress", variant: "accent" },
-  "in-review": { title: "In review", variant: "warning" },
-  done: { title: "Done", variant: "success" },
+const BOARD_COLUMN_META: Record<string, { title: string; dotClass: string }> = {
+  todo: { title: "To-do", dotClass: "bg-muted-foreground" },
+  "in-progress": { title: "In progress", dotClass: "bg-accent-signal" },
+  "in-review": { title: "In review", dotClass: "bg-signal" },
+  done: { title: "Done", dotClass: "bg-moss" },
 };
 
-const BOARD_PRIORITY_META: Record<string, { label: string; variant: "error" | "warning" | "teal" }> = {
-  high: { label: "High", variant: "error" },
-  medium: { label: "Medium", variant: "warning" },
-  low: { label: "Low", variant: "teal" },
+const BOARD_PRIORITY_META: Record<string, { label: string; dotClass: string }> = {
+  high: { label: "High", dotClass: "bg-rust" },
+  medium: { label: "Medium", dotClass: "bg-signal" },
+  low: { label: "Low", dotClass: "bg-teal-500" },
 };
+
+function StatusDot({ className, label }: { className: string; label: string }) {
+  return <span aria-label={label} className={cn("inline-block size-2 rounded-full", className)} />;
+}
 
 interface BoardTaskView {
   id: string;
@@ -717,7 +851,12 @@ function parseBoardTasks(dataModel: A2UISurface["dataModel"]): BoardTaskView[] {
 function BoardSurfaceView({ surface }: { surface: A2UISurface }) {
   const tasks = useMemo(() => parseBoardTasks(surface.dataModel), [surface]);
   const byColumn = useMemo(() => {
-    const map: Record<string, BoardTaskView[]> = { todo: [], "in-progress": [], "in-review": [], done: [] };
+    const map: Record<string, BoardTaskView[]> = {
+      todo: [],
+      "in-progress": [],
+      "in-review": [],
+      done: [],
+    };
     for (const task of tasks) {
       if (map[task.column]) map[task.column].push(task);
     }
@@ -725,59 +864,63 @@ function BoardSurfaceView({ surface }: { surface: A2UISurface }) {
   }, [tasks]);
 
   return (
-    <div data-testid="a2ui-surface" className="flex gap-3 overflow-x-auto max-w-full self-start">
+    <div data-testid="a2ui-surface" className="flex max-w-full gap-3 overflow-x-auto self-start">
       {BOARD_COLUMN_ORDER.map((column) => {
         const meta = BOARD_COLUMN_META[column];
         const items = byColumn[column] ?? [];
         return (
-          <Card key={column} variant="muted" padding={3} style={{ flexShrink: 0, width: 260 }}>
-            <VStack gap={2}>
-              <HStack gap={2} vAlign="center" hAlign="between">
-                <HStack gap={2} vAlign="center">
-                  <StatusDot variant={meta.variant} label={`${meta.title} status`} />
-                  <Heading level={4}>{meta.title}</Heading>
-                </HStack>
-                <AstryxText type="supporting" color="secondary" hasTabularNumbers>
-                  {items.length}
-                </AstryxText>
-              </HStack>
+          <InstrumentCard key={column} className="w-[260px] shrink-0 p-3">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <StatusDot className={meta.dotClass} label={`${meta.title} status`} />
+                  <h4 className="font-heading text-sm font-semibold">{meta.title}</h4>
+                </div>
+                <span className="text-xs tabular-nums text-muted-foreground">{items.length}</span>
+              </div>
               {items.length === 0 ? (
-                <AstryxText type="supporting" color="secondary">
-                  No tasks
-                </AstryxText>
+                <p className="text-xs text-muted-foreground">No tasks</p>
               ) : (
-                <VStack gap={2}>
+                <div className="flex flex-col gap-2">
                   {items.map((item) => {
                     const priority = BOARD_PRIORITY_META[item.priority] ?? {
                       label: item.priority,
-                      variant: "teal" as const,
+                      dotClass: "bg-teal-500",
                     };
                     return (
-                      <Card key={item.id} padding={3}>
-                        <VStack gap={2}>
-                          <HStack gap={1} vAlign="center" wrap="wrap">
-                            <Badge label={item.ref} variant="neutral" />
-                            <Badge label={priority.label} variant={priority.variant} />
-                          </HStack>
-                          <Heading level={4}>{item.title}</Heading>
+                      <InstrumentCard key={item.id} className="p-3">
+                        <div className="flex flex-col gap-2">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <Chip>{item.ref}</Chip>
+                            <Chip className="flex items-center gap-1">
+                              <span
+                                className={cn(
+                                  "inline-block size-1.5 rounded-full",
+                                  priority.dotClass,
+                                )}
+                              />
+                              {priority.label}
+                            </Chip>
+                          </div>
+                          <h4 className="font-heading text-sm font-semibold">{item.title}</h4>
                           {item.description && (
-                            <AstryxText type="supporting" color="secondary" maxLines={2}>
+                            <p className="line-clamp-2 text-xs text-muted-foreground">
                               {item.description}
-                            </AstryxText>
+                            </p>
                           )}
                           {item.updatedAt && (
-                            <AstryxText type="supporting" color="secondary">
-                              Updated <Timestamp value={item.updatedAt} format="relative" />
-                            </AstryxText>
+                            <p className="text-xs text-muted-foreground">
+                              Updated {relativeTime(item.updatedAt)}
+                            </p>
                           )}
-                        </VStack>
-                      </Card>
+                        </div>
+                      </InstrumentCard>
                     );
                   })}
-                </VStack>
+                </div>
               )}
-            </VStack>
-          </Card>
+            </div>
+          </InstrumentCard>
         );
       })}
     </div>

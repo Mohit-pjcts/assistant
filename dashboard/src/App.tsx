@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { Menu, PanelRight } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { NavRail } from "@/components/nav/NavRail";
+import { BrandMark } from "@/components/nav/BrandMark";
+import { TrailingCursor } from "@/components/nav/TrailingCursor";
 import { ChatPanel } from "@/components/chat/ChatPanel";
-import { HomePage } from "@/components/home/HomePage";
 import { HistoryPanel } from "@/components/history/HistoryPanel";
 import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { CostPanel } from "@/components/cost/CostPanel";
@@ -16,6 +18,8 @@ import { ClaudeCodeSessionsPanel } from "@/components/claude-code/ClaudeCodeSess
 import { InProgressTasksCard } from "@/components/board/InProgressTasksCard";
 import { ThreadSidebar } from "@/components/threads/ThreadSidebar";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
+import { ResizeHandle } from "@/components/ui/resize-handle";
+import { useResizableWidth } from "@/lib/useResizableWidth";
 import { AgentActivityGraph } from "@/components/activity/AgentActivityGraph";
 import { ToolCallTimeline } from "@/components/activity/ToolCallTimeline";
 import { StatusPill } from "@/components/activity/StatusPill";
@@ -42,14 +46,14 @@ import { ActiveTurnBanner } from "@/components/activity/ActiveTurnBanner";
 function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const { activeAgent, activeTool, timeline, handleActivity, resetActivity } = useAgentActivity();
-  // Home tab landing composer hand-off: `activeTab` is controlled (rather
-  // than Tabs' own uncontrolled defaultValue) specifically so submitting a
-  // message on Home can switch to Chat programmatically. pendingHomeMessage
-  // travels with it and is consumed exactly once by ChatPanel's own
-  // initialMessage effect (see ChatPanel.tsx) — cleared via
-  // onConsumeInitialMessage so it can't resend on a later tab revisit.
-  const [activeTab, setActiveTab] = useState("home");
-  const [pendingHomeMessage, setPendingHomeMessage] = useState<string | null>(null);
+  // The user's own explicit call: no separate Home/Chat tabs — Chat itself
+  // shows the landing view (greeting, category suggestions) whenever the
+  // active thread is genuinely empty, and switches into normal chat mode
+  // the instant a first message is sent, all inside ChatPanel.tsx itself
+  // (see its own `isNewChat` — this file no longer hands anything off to
+  // it). Defaults straight to "chat" — there's no separate landing tab to
+  // default to anymore.
+  const [activeTab, setActiveTab] = useState("chat");
   // iPhone-access feature: below the `md` breakpoint the thread sidebar
   // and right context rail (both fixed-width, together wider than a
   // phone screen) stop taking up permanent layout space and become
@@ -60,14 +64,29 @@ function App() {
   // and up) ignores this entirely — both stay always-visible flex
   // siblings exactly as before.
   const [mobileNav, setMobileNav] = useState<"sidebar" | "rail" | null>(null);
-
-  function startChatFromHome(message: string) {
-    setPendingHomeMessage(message);
-    setActiveTab("chat");
-  }
+  // Draggable column widths, persisted (localStorage, same shape as
+  // uiScale.tsx) so a resize survives a reload/relaunch. NavRail stays
+  // fixed-width (it's a 52px icon-only column, not a candidate for
+  // resizing); main always fills whatever space these two leave it.
+  const { width: sidebarWidth, setWidth: setSidebarWidth } = useResizableWidth({
+    storageKey: "pa-sidebar-width",
+    defaultWidth: 216,
+    min: 180,
+    max: 420,
+  });
+  const { width: railWidth, setWidth: setRailWidth } = useResizableWidth({
+    storageKey: "pa-rail-width",
+    defaultWidth: 260,
+    min: 220,
+    max: 480,
+  });
 
   return (
     <div className="flex h-screen bg-background">
+      {/* PLAN.md Phase 29 Stage 4 — mounted once, app-wide; the component
+          itself no-ops entirely on touch/reduced-motion (see its own
+          guard), so this is never forced on anyone it shouldn't be. */}
+      <TrailingCursor />
       {/* Backdrop: mobile-only, closes whichever drawer is open on tap.
           Absent on md+ (mobileNav never gets set there since the toggle
           buttons that set it are themselves md:hidden). */}
@@ -78,6 +97,10 @@ function App() {
           aria-hidden
         />
       )}
+      {/* PLAN.md Phase 29's own left icon rail — always visible, even on
+          mobile (52px is thin enough not to need the slide-over-drawer
+          treatment the wider thread list/right rail still get below). */}
+      <NavRail activeTab={activeTab} onChange={setActiveTab} />
       <div
         className={cn(
           // iPhone-access feature, PWA fix: `top-[env(safe-area-inset-top)]`
@@ -91,8 +114,12 @@ function App() {
           mobileNav === "sidebar" && "translate-x-0",
         )}
       >
-        <ThreadSidebar onActiveThreadChange={setActiveThreadId} />
+        <ThreadSidebar onActiveThreadChange={setActiveThreadId} width={sidebarWidth} />
       </div>
+      <ResizeHandle
+        ariaLabel="Resize thread sidebar"
+        onResize={(delta) => setSidebarWidth((prev) => prev + delta)}
+      />
       <main className="flex h-screen min-w-0 flex-1 flex-col gap-4 p-4">
         {/* PWA fix (same reasoning as the sidebar drawer above): the
             hamburger/title/status row is the exact content that was
@@ -108,6 +135,7 @@ function App() {
             >
               <Menu className="size-5" />
             </button>
+            <BrandMark />
             <h1 className="font-heading text-lg font-semibold tracking-tight">Oni</h1>
             <StatusPill agent={activeAgent} tool={activeTool} />
           </div>
@@ -128,73 +156,17 @@ function App() {
             invisible to the dashboard entirely, which is exactly how a
             43-retry, 28-minute loop went unnoticed. */}
         <ActiveTurnBanner />
+        {/* PLAN.md Phase 29 — the horizontal TabsList/TabsTrigger bar is
+            gone entirely, replaced by NavRail (the left icon column
+            above); Tabs/TabsContent still own the actual panel-switching
+            logic, just with no visible tab strip of their own anymore. */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1">
-          <TabsList variant="line" className="border-b border-border">
-            <TabsTrigger
-              value="home"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Home
-            </TabsTrigger>
-            <TabsTrigger
-              value="chat"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Chat
-            </TabsTrigger>
-            <TabsTrigger
-              value="history"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              History
-            </TabsTrigger>
-            <TabsTrigger
-              value="memory"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Memory
-            </TabsTrigger>
-            <TabsTrigger
-              value="cost"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Cost
-            </TabsTrigger>
-            <TabsTrigger
-              value="board"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Board
-            </TabsTrigger>
-            <TabsTrigger
-              value="automations"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Automations
-            </TabsTrigger>
-            <TabsTrigger
-              value="workflows"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Workflows
-            </TabsTrigger>
-            <TabsTrigger
-              value="claude-code"
-              className="panel-label text-xs after:bg-operator data-active:text-operator"
-            >
-              Claude Code
-            </TabsTrigger>
-          </TabsList>
-          <TabsContent value="home" className="min-h-0 h-full">
-            <HomePage greetingName="Mohit" onStartChat={startChatFromHome} />
-          </TabsContent>
           <TabsContent value="chat" className="min-h-0">
             <ChatPanel
               key={activeThreadId ?? "pending"}
+              greetingName="Mohit"
               onActivity={handleActivity}
               onStreamEnded={resetActivity}
-              initialMessage={pendingHomeMessage}
-              onConsumeInitialMessage={() => setPendingHomeMessage(null)}
             />
           </TabsContent>
           <TabsContent value="history" className="min-h-0">
@@ -220,12 +192,20 @@ function App() {
           </TabsContent>
         </Tabs>
       </main>
+      <ResizeHandle
+        ariaLabel="Resize activity rail"
+        onResize={(delta) => setRailWidth((prev) => prev - delta)}
+      />
       <aside
         className={cn(
           // Same Dynamic Island fix as the sidebar drawer above.
-          "fixed top-[env(safe-area-inset-top)] bottom-0 right-0 z-50 flex w-96 max-w-[85vw] translate-x-full flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground transition-transform duration-200 md:static md:top-0 md:z-auto md:h-screen md:max-w-none md:translate-x-0 md:shrink-0",
+          // PLAN.md Phase 29: 384px (w-96) -> 260px, matching
+          // instrument/DESIGN.md §3's own frame-body proportions — now
+          // just the default until dragged (see useResizableWidth above).
+          "fixed top-[env(safe-area-inset-top)] bottom-0 right-0 z-50 flex w-[260px] max-w-[85vw] translate-x-full flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground transition-transform duration-200 md:static md:top-0 md:z-auto md:h-screen md:max-w-none md:translate-x-0 md:shrink-0",
           mobileNav === "rail" && "translate-x-0",
         )}
+        style={{ width: railWidth }}
       >
         <Card size="sm">
           <CardHeader>
@@ -244,7 +224,7 @@ function App() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <AgentActivityGraph activeAgent={activeAgent} />
+            <AgentActivityGraph activeAgent={activeAgent} activeTool={activeTool} />
           </CardContent>
         </Card>
         <Card size="sm">

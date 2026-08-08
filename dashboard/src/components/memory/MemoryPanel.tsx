@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter } from "@/components/ui/card";
+import { InstrumentCard } from "@/components/ui/instrument-card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -207,31 +207,33 @@ export function MemoryPanel() {
             Pending review — from last night&rsquo;s scan
           </p>
           {pending.map((p) => (
-            <Card key={p.id} size="sm" data-testid="pending-fact-row">
-              <CardContent>
-                <p className="whitespace-pre-wrap text-sm">{p.content}</p>
-                {p.provenance && (
-                  <p className="mt-1 text-xs text-muted-foreground">Source: {p.provenance}</p>
-                )}
-              </CardContent>
-              <CardFooter className="gap-2">
-                <Button
-                  size="sm"
-                  onClick={() => void handleApprovePending(p.id)}
-                  disabled={decidingId === p.id}
-                >
-                  {decidingId === p.id ? "Approving…" : "Approve"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void handleDeclinePending(p.id)}
-                  disabled={decidingId === p.id}
-                >
-                  Decline
-                </Button>
-              </CardFooter>
-            </Card>
+            <InstrumentCard key={p.id} className="p-3" data-testid="pending-fact-row">
+              <div className="flex flex-col gap-2">
+                <div>
+                  <p className="whitespace-pre-wrap text-sm">{p.content}</p>
+                  {p.provenance && (
+                    <p className="mt-1 text-xs text-muted-foreground">Source: {p.provenance}</p>
+                  )}
+                </div>
+                <div className="flex gap-2 border-t border-graphite/20 pt-2">
+                  <Button
+                    size="sm"
+                    onClick={() => void handleApprovePending(p.id)}
+                    disabled={decidingId === p.id}
+                  >
+                    {decidingId === p.id ? "Approving…" : "Approve"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void handleDeclinePending(p.id)}
+                    disabled={decidingId === p.id}
+                  >
+                    Decline
+                  </Button>
+                </div>
+              </div>
+            </InstrumentCard>
           ))}
         </div>
       )}
@@ -264,76 +266,78 @@ export function MemoryPanel() {
             <p className="text-sm text-muted-foreground">No facts stored yet.</p>
           )}
           {facts.map((fact) => (
-            <Card key={fact.id} size="sm" data-testid="memory-fact-row">
-              <CardContent>
-                {editingId === fact.id ? (
-                  <Textarea
-                    value={editText}
-                    onChange={(e) => setEditText(e.target.value)}
-                    disabled={savingEditId === fact.id}
-                    rows={2}
-                    data-testid="edit-fact-input"
-                  />
-                ) : (
-                  // Verbatim — the same no-re-summarization principle as the
-                  // chat panel's interrupt gate, even though this isn't
-                  // itself gated: this is the exact string that was
-                  // approved/saved, unless the user has since edited it.
-                  <p className="whitespace-pre-wrap text-sm">{fact.content}</p>
-                )}
-                {fact.provenance && (
-                  <p className="mt-1 text-xs text-muted-foreground">Source: {fact.provenance}</p>
-                )}
-                <p className="mt-1 font-mono text-xs text-muted-foreground">{fact.created_at}</p>
-              </CardContent>
-              <CardFooter className="gap-2">
-                {editingId === fact.id ? (
-                  <>
-                    <Button variant="ghost" size="sm" onClick={cancelEditing}>
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => void handleSaveEdit(fact.id)}
-                      disabled={savingEditId === fact.id || !editText.trim()}
-                    >
-                      {savingEditId === fact.id ? "Saving…" : "Save"}
-                    </Button>
-                  </>
-                ) : (
-                  <Button variant="outline" size="sm" onClick={() => startEditing(fact)}>
-                    Edit
-                  </Button>
-                )}
-                <AlertDialog
-                  open={openDialogId === fact.id}
-                  onOpenChange={(open) => setOpenDialogId(open ? fact.id : null)}
-                >
-                  <AlertDialogTrigger
-                    render={
-                      <Button variant="destructive" size="sm" disabled={deletingId === fact.id}>
-                        {deletingId === fact.id ? "Deleting…" : "Delete"}
+            <InstrumentCard key={fact.id} className="p-3" data-testid="memory-fact-row">
+              <div className="flex flex-col gap-2">
+                <div>
+                  {editingId === fact.id ? (
+                    <Textarea
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      disabled={savingEditId === fact.id}
+                      rows={2}
+                      data-testid="edit-fact-input"
+                    />
+                  ) : (
+                    // Verbatim — the same no-re-summarization principle as the
+                    // chat panel's interrupt gate, even though this isn't
+                    // itself gated: this is the exact string that was
+                    // approved/saved, unless the user has since edited it.
+                    <p className="whitespace-pre-wrap text-sm">{fact.content}</p>
+                  )}
+                  {fact.provenance && (
+                    <p className="mt-1 text-xs text-muted-foreground">Source: {fact.provenance}</p>
+                  )}
+                  <p className="mt-1 font-mono text-xs text-muted-foreground">{fact.created_at}</p>
+                </div>
+                <div className="flex gap-2 border-t border-graphite/20 pt-2">
+                  {editingId === fact.id ? (
+                    <>
+                      <Button variant="ghost" size="sm" onClick={cancelEditing}>
+                        Cancel
                       </Button>
-                    }
-                  />
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Delete this fact?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This removes it from long-term memory permanently. The assistant will no
-                        longer recall: &ldquo;{fact.content}&rdquo;
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction onClick={() => void handleConfirmDelete(fact.id)}>
-                        Delete
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </CardFooter>
-            </Card>
+                      <Button
+                        size="sm"
+                        onClick={() => void handleSaveEdit(fact.id)}
+                        disabled={savingEditId === fact.id || !editText.trim()}
+                      >
+                        {savingEditId === fact.id ? "Saving…" : "Save"}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button variant="outline" size="sm" onClick={() => startEditing(fact)}>
+                      Edit
+                    </Button>
+                  )}
+                  <AlertDialog
+                    open={openDialogId === fact.id}
+                    onOpenChange={(open) => setOpenDialogId(open ? fact.id : null)}
+                  >
+                    <AlertDialogTrigger
+                      render={
+                        <Button variant="destructive" size="sm" disabled={deletingId === fact.id}>
+                          {deletingId === fact.id ? "Deleting…" : "Delete"}
+                        </Button>
+                      }
+                    />
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete this fact?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This removes it from long-term memory permanently. The assistant will no
+                          longer recall: &ldquo;{fact.content}&rdquo;
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => void handleConfirmDelete(fact.id)}>
+                          Delete
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+              </div>
+            </InstrumentCard>
           ))}
         </div>
       </ScrollArea>

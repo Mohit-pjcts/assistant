@@ -137,33 +137,50 @@ describe("ChatPanel", () => {
     );
   });
 
-  it("sends a hand-off message from the Home tab once history has loaded, then consumes it exactly once", async () => {
-    // PLAN.md landing page: HomePage hands a message to App.tsx, which
-    // passes it down as initialMessage — this must auto-send through the
-    // same real handleSend path a typed message takes, and must call
-    // onConsumeInitialMessage so App.tsx clears it (no resend on a later
-    // re-render or tab revisit).
+  // PLAN.md: the user's own direct request — no separate Home/Chat tabs;
+  // Chat itself shows a landing view on a genuinely empty/new thread, and
+  // switches into normal chat mode the instant a message is sent, all in
+  // ONE component. Folded in from the now-deleted standalone HomePage.tsx
+  // (and its own now-deleted HomePage.test.tsx) — same two behaviors,
+  // proven against the real merged component instead.
+  it("shows the landing view (greeting + suggestions) on a new/empty thread, then switches into chat mode on send", async () => {
+    const user = userEvent.setup();
     mockedSendChat.mockResolvedValue({ type: "message", content: "pong" });
-    const onConsumeInitialMessage = vi.fn();
 
-    render(
-      <ChatPanel
-        initialMessage="ping from home"
-        onConsumeInitialMessage={onConsumeInitialMessage}
-      />,
-    );
+    render(<ChatPanel greetingName="Mohit" />);
     await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
 
-    expect(await screen.findByText("ping from home")).toBeInTheDocument();
+    expect(await screen.findByText(/hi, mohit/i)).toBeInTheDocument();
+    expect(screen.getByText("Where should we start?")).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText(/message the assistant/i), "ping");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
     expect(await screen.findByText("pong")).toBeInTheDocument();
+    // The landing view is gone the instant a real message exists.
+    expect(screen.queryByText("Where should we start?")).not.toBeInTheDocument();
+  });
+
+  it("sends a suggestion card's prompt directly, without needing the composer at all", async () => {
+    const user = userEvent.setup();
+    mockedSendChat.mockResolvedValue({ type: "message", content: "Here you go." });
+
+    render(<ChatPanel />);
+    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
+    await screen.findByText("Where should we start?");
+
+    await user.click(screen.getByRole("button", { name: /coding/i }));
+    const card = await screen.findByText(/debug my code/i);
+    await user.click(card);
+
     expect(mockedSendChat).toHaveBeenCalledWith(
-      "ping from home",
+      "Help me debug the following code:",
       expect.any(Function),
       expect.any(Function),
       expect.any(Function),
       [],
     );
-    expect(onConsumeInitialMessage).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Here you go.")).toBeInTheDocument();
   });
 
   it("shows a live streaming bubble that updates as tokens arrive, then finalizes into a real message", async () => {

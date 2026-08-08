@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchCost, type CostStats } from "@/lib/api";
+import { useCountUp } from "@/lib/useCountUp";
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -32,6 +33,14 @@ export function CostSummaryCard() {
     };
   }, []);
 
+  // Hooks called unconditionally, ABOVE the unavailable/loading early
+  // returns below (falling back to 0 with no `stats` yet) — count-up must
+  // stay a stable hook call across every render of this component.
+  const week = stats?.windows.week;
+  const cost = useCountUp(week?.total_cost ?? 0);
+  const tokens = useCountUp(week?.total_tokens ?? 0);
+  const runs = useCountUp(week?.run_count ?? 0);
+
   if (unavailable) {
     return <p className="text-xs text-muted-foreground">Cost data unavailable.</p>;
   }
@@ -39,14 +48,13 @@ export function CostSummaryCard() {
     return <p className="text-xs text-muted-foreground">Loading…</p>;
   }
 
-  const week = stats.windows.week;
   return (
     <div className="flex flex-col gap-1">
       <p className="font-mono text-xl font-semibold text-foreground">
-        {currencyFormatter.format(week.total_cost)}
+        {currencyFormatter.format(cost)}
       </p>
       <p className="font-mono text-[11px] text-muted-foreground">
-        {week.total_tokens.toLocaleString()} tokens · {week.run_count.toLocaleString()} runs
+        {Math.round(tokens).toLocaleString()} tokens · {Math.round(runs).toLocaleString()} runs
       </p>
     </div>
   );

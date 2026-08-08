@@ -1,10 +1,43 @@
 import { ShieldAlert, Keyboard, Mic } from "lucide-react";
-import { Card } from "@astryxdesign/core/Card";
-import { VStack, HStack } from "@astryxdesign/core/Stack";
-import { Heading, Text } from "@astryxdesign/core/Text";
-import { Button } from "@astryxdesign/core/Button";
-import { Badge } from "@astryxdesign/core/Badge";
+import { InstrumentCard } from "@/components/ui/instrument-card";
+import { Chip as Pill } from "@/components/ui/chip";
 import type { InterruptPayload } from "@/lib/api";
+
+// PLAN.md Phase 29 Stage 2: Astryx's Card/VStack/HStack/Heading/Text/
+// Button/Badge replaced by InstrumentCard + plain elements — a pure
+// presentation swap, same discipline Phase 20's own Astryx migration
+// documented for this exact file: every data-testid, every per-action
+// field, and every piece of verbatim text stays byte-identical. Nothing
+// about WHAT this component shows or WHEN it calls onApprove/onDecline
+// changed — see this file's own module docstring below for the
+// still-load-bearing security contract.
+
+function GateButton({
+  children,
+  onClick,
+  disabled,
+  primary,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={
+        primary
+          ? "rounded-md bg-accent-signal px-4 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          : "rounded-md border border-graphite/40 px-4 py-1.5 text-sm font-medium transition-colors hover:bg-graphite/10 disabled:opacity-50"
+      }
+    >
+      {children}
+    </button>
+  );
+}
 
 interface InterruptGateProps {
   payload: InterruptPayload;
@@ -383,7 +416,7 @@ function WorkflowPlanGateBody({ payload }: { payload: InterruptPayload }) {
             data-testid={`interrupt-workflow-step-${i}`}
           >
             <div className="mb-1 flex items-center gap-2">
-              <Badge variant="neutral" label={`Step ${i + 1}`} />
+              <Pill>{`Step ${i + 1}`}</Pill>
               <span className="text-sm font-medium">{str(step.action, "(unknown action)")}</span>
               {typeof step.specialist === "string" && step.specialist && (
                 <span className="text-xs text-muted-foreground">via {step.specialist}</span>
@@ -449,38 +482,35 @@ export function InterruptGate({ payload, onApprove, onDecline, disabled }: Inter
   const voiceApprovable = payload.voice_approvable !== false;
 
   return (
-    <Card
-      className="border-l-4 border-l-signal bg-signal/5"
-      padding={4}
+    <InstrumentCard
+      className="border-l-4 border-l-accent-signal p-4"
+      awaitingApproval
       data-testid="interrupt-gate"
     >
-      <VStack gap={3}>
-        <HStack justify="between" align="center">
-          <HStack gap={2} align="center" className="panel-label text-[0.7rem] text-signal">
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="panel-label flex items-center gap-2 text-[0.7rem] text-accent-signal">
             <ShieldAlert className="size-3.5" aria-hidden />
             Approval required
-          </HStack>
-          <HStack gap={1.5} align="center">
-            {source && <Badge variant="neutral" label={source} />}
-            {/* No Tooltip wrapper here (unlike the original's `title` attr):
-                Astryx's Tooltip renders its content into the DOM rather than
-                a native title attribute, which put the word "voice" into the
-                document even for memory-write gates — breaking the test that
-                requires ZERO voice-related text on that specific gate. The
-                badge's own visible label already conveys the state. */}
-            <Badge
-              variant="neutral"
-              label={voiceApprovable ? "Voice OK" : "Text only"}
-              icon={voiceApprovable ? <Mic className="size-3" /> : <Keyboard className="size-3" />}
-            />
-          </HStack>
-        </HStack>
-        <VStack gap={1}>
-          <Heading level={4}>Confirmation needed</Heading>
-          <Text color="secondary" size="sm">
-            {description}
-          </Text>
-        </VStack>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {source && <Pill>{source}</Pill>}
+            {/* No title-attr tooltip here — the badge's own visible label
+                already conveys the state, and a hidden title would put the
+                word "voice" into the document even for gates that must
+                render ZERO voice-related text (a real test requirement). */}
+            <Pill>
+              <span className="inline-flex items-center gap-1">
+                {voiceApprovable ? <Mic className="size-3" /> : <Keyboard className="size-3" />}
+                {voiceApprovable ? "Voice OK" : "Text only"}
+              </span>
+            </Pill>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <h4 className="font-heading text-base font-semibold">Confirmation needed</h4>
+          <p className="text-sm text-muted-foreground">{description}</p>
+        </div>
         <div>
           {ActionBody ? (
             <ActionBody payload={payload} />
@@ -492,11 +522,15 @@ export function InterruptGate({ payload, onApprove, onDecline, disabled }: Inter
             )
           )}
         </div>
-        <HStack gap={2}>
-          <Button label="Approve" onClick={onApprove} isDisabled={disabled} />
-          <Button label="Decline" variant="secondary" onClick={onDecline} isDisabled={disabled} />
-        </HStack>
-      </VStack>
-    </Card>
+        <div className="flex gap-2">
+          <GateButton onClick={onApprove} disabled={disabled} primary>
+            Approve
+          </GateButton>
+          <GateButton onClick={onDecline} disabled={disabled}>
+            Decline
+          </GateButton>
+        </div>
+      </div>
+    </InstrumentCard>
   );
 }

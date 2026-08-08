@@ -1,18 +1,14 @@
-import { Fragment, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Mic, Square } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Fragment, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { Mic, Paperclip, Send, Square, X } from "lucide-react";
 import {
-  ChatMessageList,
-  ChatMessage,
-  ChatMessageBubble,
-  ChatComposer,
-  ChatComposerDrawer,
-  ChatSendButton,
-} from "@astryxdesign/core/Chat";
-import { TextArea } from "@astryxdesign/core/TextArea";
-import { Text } from "@astryxdesign/core/Text";
-import { FileInput } from "@astryxdesign/core/FileInput";
-import { Thumbnail } from "@astryxdesign/core/Thumbnail";
+  SparklesIcon,
+  PencilSquareIcon,
+  CodeBracketIcon,
+  MagnifyingGlassIcon,
+  LightBulbIcon,
+} from "@heroicons/react/24/outline";
+import { cn } from "@/lib/utils";
+import { InstrumentCard } from "@/components/ui/instrument-card";
 import { InterruptGate } from "./InterruptGate";
 import { A2UIRenderer } from "./A2UIRenderer";
 import {
@@ -100,6 +96,78 @@ function attachPersistedSurfaces(raw: HistoryMessage[]): DisplayMessage[] {
   return result;
 }
 
+// PLAN.md: the landing view shown on a genuinely empty/new thread —
+// greeting, category filter, prompt-suggestion cards — folded in from the
+// now-deleted standalone HomePage.tsx/Home tab at the user's direct
+// request ("i dont want separate tabs for both... landing page comes up
+// when i start a new chat then i go into chat mode when i send a
+// prompt"). Content moved verbatim; only the composer it sits above
+// changed — it's now the SAME composer this panel already renders at the
+// bottom (attach/mic/send included), not a separate one, which is what
+// makes the mic available on the landing view for free.
+type Category = "writing" | "coding" | "research" | "creative";
+
+const CATEGORIES: Array<{ key: Category; label: string; icon: typeof SparklesIcon }> = [
+  { key: "writing", label: "Writing", icon: PencilSquareIcon },
+  { key: "coding", label: "Coding", icon: CodeBracketIcon },
+  { key: "research", label: "Research", icon: MagnifyingGlassIcon },
+  { key: "creative", label: "Creative", icon: LightBulbIcon },
+];
+
+const CATEGORY_SUGGESTIONS: Record<
+  Category,
+  Array<{ heading: string; body: string; prompt: string }>
+> = {
+  writing: [
+    {
+      heading: "Draft a professional email",
+      body: "Compose a clear, polished email for any audience",
+      prompt: "Help me draft a professional email",
+    },
+    {
+      heading: "Improve my writing",
+      body: "Enhance the clarity, tone, and flow of my text",
+      prompt: "Review and improve the following text:",
+    },
+  ],
+  coding: [
+    {
+      heading: "Debug my code",
+      body: "Find and fix issues in a code snippet",
+      prompt: "Help me debug the following code:",
+    },
+    {
+      heading: "Explain this code",
+      body: "Break down complex code into understandable pieces",
+      prompt: "Explain what the following code does:",
+    },
+  ],
+  research: [
+    {
+      heading: "Compare options",
+      body: "Analyze pros and cons of different approaches",
+      prompt: "Compare the pros and cons of",
+    },
+    {
+      heading: "Find best practices",
+      body: "Research standards and recommended approaches",
+      prompt: "What are the best practices for",
+    },
+  ],
+  creative: [
+    {
+      heading: "Brainstorm ideas",
+      body: "Generate creative concepts for a project",
+      prompt: "Brainstorm ideas for",
+    },
+    {
+      heading: "Write a story",
+      body: "Create an engaging narrative with characters",
+      prompt: "Write a short story about",
+    },
+  ],
+};
+
 // The dashboard's live chat panel — talks to assistant/server.py, which
 // shares the CLI/voice daemon's actual conversation_memory.sqlite thread
 // (STEPS.md 54/55). This is deliberately the SAME confirmation-gate loop
@@ -132,21 +200,16 @@ interface ChatPanelProps {
   // (a real, live-observed bug — a stale "coding_agent" node stuck
   // highlighted in the activity graph long after that turn had ended).
   onStreamEnded?: () => void;
-  // PLAN.md: set by App.tsx when the Home tab's landing composer (or one of
-  // its prompt-suggestion cards) hands off a message — this panel sends it
-  // through the exact same handleSend path a typed message would take, once
-  // history has loaded. onConsumeInitialMessage clears the parent's copy so
-  // it can't re-fire on a later re-render or a subsequent tab switch back to
-  // Chat with nothing new to send.
-  initialMessage?: string | null;
-  onConsumeInitialMessage?: () => void;
+  // Shown by the landing view (below) on a genuinely empty/new thread —
+  // "Hi, {greetingName}". Not persisted anywhere server-side; a plain
+  // display-only prop, same as it was on the old, now-folded-in HomePage.
+  greetingName?: string;
 }
 
 export function ChatPanel({
   onActivity = () => {},
   onStreamEnded = () => {},
-  initialMessage = null,
-  onConsumeInitialMessage = () => {},
+  greetingName = "Mohit",
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
@@ -155,6 +218,9 @@ export function ChatPanel({
   const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  // Landing-view category filter — only meaningful while isNewChat (below)
+  // is true; harmless, inert state once the thread has real messages.
+  const [category, setCategory] = useState<Category | null>(null);
   // File/photo upload feature: the only addition to this component's state
   // layer (see this file's own module docstring reasoning above) — every
   // other piece of ChatPanel's logic (streaming, interrupt, A2UI, the
@@ -259,18 +325,6 @@ export function ChatPanel({
     bottomRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [messages, pendingInterrupt, streamingText, pendingA2ui]);
 
-  // Fires once history has loaded, if the Home tab handed off a message.
-  // Deliberately depends on `historyLoaded` only (not `initialMessage` or
-  // `handleSend`, both of which are fresh closures every render) — this
-  // must run exactly once per handed-off message, right when history
-  // finishes loading, not on every re-render those closures would trigger.
-  useEffect(() => {
-    if (historyLoaded && initialMessage) {
-      onConsumeInitialMessage();
-      void handleSend(initialMessage);
-    }
-  }, [historyLoaded]);
-
   function appendToken(chunk: string) {
     streamingTextRef.current += chunk;
     setStreamingText(streamingTextRef.current);
@@ -368,8 +422,23 @@ export function ChatPanel({
     onStreamEnded();
   }
 
+  // PLAN.md Phase 29 Stage 2: Astryx's own FileInput validated maxSize/
+  // maxFiles before ever calling onChange — replaced by a native
+  // <input type="file">, so those two limits move here instead, same
+  // values the old props passed (20MB, 5 attachments).
+  const MAX_ATTACHMENT_BYTES = 20_000_000;
+  const MAX_ATTACHMENTS = 5;
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const selected = event.target.files ? Array.from(event.target.files) : [];
+    event.target.value = "";
+    handleFilesSelected(selected);
+  }
+
   function handleFilesSelected(next: File | File[] | null) {
-    const files = next == null ? [] : Array.isArray(next) ? next : [next];
+    const requested = next == null ? [] : Array.isArray(next) ? next : [next];
+    const room = Math.max(0, MAX_ATTACHMENTS - attachments.length);
+    const files = requested.filter((f) => f.size <= MAX_ATTACHMENT_BYTES).slice(0, room);
     for (const file of files) {
       const id = `${file.name}-${file.size}-${Date.now()}-${Math.random()}`;
       const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
@@ -545,6 +614,198 @@ export function ChatPanel({
       !m.synthetic,
   );
 
+  // PLAN.md Phase 29 Stage 2: instrument/DESIGN.md §2's own "zero chrome"
+  // chat — no bubble, no fill, no border. A message is just a mono sender
+  // label (`.who`) above plain body text (`.body`), exact selectors/values
+  // from instrument.html's own CSS (`.msg`/`.msg .who`/`.msg .body`).
+  // ChatMessageList/ChatMessage/ChatMessageBubble (Astryx) are gone
+  // entirely — replaced by plain divs carrying the same semantics
+  // (`role="log"` on the scroll container, same as Astryx's own default).
+  const sendDisabled =
+    (!input.trim() && attachments.length === 0) ||
+    pendingInterrupt !== null ||
+    attachments.some((a) => a.status === "uploading");
+
+  // A genuinely empty/new thread — nothing sent, nothing streaming, no
+  // gate, no rendered surface. Shows the landing view (below) in place of
+  // the empty message log; flips to false the instant a first message is
+  // sent (handleSend appends the user's own message to `messages`
+  // synchronously, before the network call even starts), which is what
+  // makes "send a prompt -> go into chat mode" feel instant rather than
+  // waiting on a reply.
+  const isNewChat =
+    historyLoaded &&
+    visibleMessages.length === 0 &&
+    !streamingText &&
+    !pendingInterrupt &&
+    pendingA2ui.length === 0;
+  const suggestions = category ? CATEGORY_SUGGESTIONS[category] : null;
+
+  // PLAN.md: the user's own direct follow-up — the composer itself
+  // stays centered (with the greeting/suggestions) on a new chat, and
+  // only relocates to the bottom bar once real chat mode starts. Built
+  // as one shared JSX value rendered from exactly one of two positions
+  // below (never both) — `isNewChat` flipping moves it in the tree, so
+  // React unmounts/remounts it at its new position; harmless here since
+  // `input` lives in this component's own state (survives the remount)
+  // and the remount always happens at the exact moment `handleSend` has
+  // just cleared it anyway.
+  const composerBar = (
+    <div className="flex items-end gap-2">
+      <label
+        aria-label="Attach files"
+        className={cn(
+          "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:text-foreground",
+          (busy || pendingInterrupt !== null) && "pointer-events-none opacity-50",
+        )}
+      >
+        <Paperclip className="size-4" />
+        <input
+          type="file"
+          multiple
+          className="hidden"
+          accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json"
+          onChange={handleFileInputChange}
+          disabled={busy || pendingInterrupt !== null}
+        />
+      </label>
+      <textarea
+        aria-label="Message the assistant"
+        value={input}
+        onChange={(event) => setInput(event.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Message the assistant…"
+        disabled={busy || pendingInterrupt !== null}
+        rows={1}
+        className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.5] outline-none placeholder:text-muted-foreground disabled:opacity-50"
+      />
+      <button
+        type="button"
+        aria-label={recording ? "Stop recording" : "Record a voice message"}
+        onClick={() => void toggleRecording()}
+        disabled={transcribing || busy || pendingInterrupt !== null}
+        className={cn(
+          "flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground disabled:opacity-50",
+          recording && "animate-pulse text-destructive",
+        )}
+      >
+        {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+      </button>
+      {busy ? (
+        <button
+          type="button"
+          aria-label="Stop"
+          onClick={() => void handleStop()}
+          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-signal text-white hover:opacity-90"
+        >
+          <Square className="size-3.5" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          aria-label="Send"
+          onClick={() => void handleSend()}
+          disabled={sendDisabled}
+          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-signal text-white hover:opacity-90 disabled:opacity-40"
+        >
+          <Send className="size-4" />
+        </button>
+      )}
+    </div>
+  );
+
+  const attachmentsPreview = attachments.length > 0 && (
+    <div className="flex flex-wrap gap-2">
+      {attachments.map((a) => (
+        <div
+          key={a.id}
+          className="flex items-center gap-1.5 rounded-md border border-graphite/40 py-1 pl-1.5 pr-2 text-xs"
+        >
+          {a.previewUrl ? (
+            <img src={a.previewUrl} alt={a.file.name} className="size-5 rounded object-cover" />
+          ) : (
+            <Paperclip className="size-3.5 text-muted-foreground" />
+          )}
+          <span className="max-w-[140px] truncate">{a.file.name}</span>
+          {a.status === "uploading" && <span className="text-muted-foreground">…</span>}
+          {a.status === "error" && <span className="text-destructive">failed</span>}
+          <button
+            type="button"
+            aria-label={`Remove ${a.file.name}`}
+            onClick={() => removeAttachment(a.id)}
+            disabled={busy || pendingInterrupt !== null}
+            className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+
+  const errorBanner = error && <p className="text-sm text-destructive">{error}</p>;
+
+  if (isNewChat) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-8 overflow-y-auto px-3 py-4">
+        <div className="flex flex-col items-center gap-1 text-center">
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <SparklesIcon className="size-4 text-accent-signal" />
+            <span className="text-base">Hi, {greetingName}</span>
+          </div>
+          <h1 className="font-heading text-3xl">Where should we start?</h1>
+        </div>
+        <div className="flex w-full max-w-[640px] flex-col gap-3">
+          {errorBanner}
+          {attachmentsPreview}
+          {composerBar}
+        </div>
+        <div className="flex w-full max-w-[520px] flex-col gap-6">
+          <div className="flex flex-wrap justify-center gap-2" role="group" aria-label="Category">
+            {CATEGORIES.map((cat) => {
+              const active = category === cat.key;
+              return (
+                <button
+                  key={cat.key}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setCategory(active ? null : cat.key)}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors",
+                    active
+                      ? "border-accent-signal bg-accent-signal/10 text-accent-signal"
+                      : "border-graphite/40 text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <cat.icon className="size-4" />
+                  {cat.label}
+                </button>
+              );
+            })}
+          </div>
+          {suggestions && (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {suggestions.map((suggestion) => (
+                <InstrumentCard
+                  key={suggestion.heading}
+                  className="cursor-pointer p-3"
+                  onClick={() => void handleSend(suggestion.prompt)}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="flex flex-col gap-0.5">
+                    <h4 className="font-heading text-sm font-semibold">{suggestion.heading}</h4>
+                    <p className="text-xs text-muted-foreground">{suggestion.body}</p>
+                  </div>
+                </InstrumentCard>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col gap-3">
       {/* min-h-0: flex items default to min-height:auto, so without this a
@@ -554,149 +815,78 @@ export function ChatPanel({
           effect below) leaves the header/tabs scrolled out of view above
           the fold. Found live in the real Tauri window, not in any test —
           jsdom doesn't do real layout, so this class of bug is invisible
-          to vitest. ChatMessageList itself is a plain role="log" container
-          (no built-in scroll — that's ChatLayout's job, not adopted here),
-          so this wrapper div still owns scrolling exactly as ScrollArea
-          used to. */}
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-md border p-4">
-        <ChatMessageList density="balanced">
-          {!historyLoaded && <Text color="secondary">Loading conversation…</Text>}
-          {visibleMessages.map((message, index) => (
-            <Fragment key={index}>
-              {message.content.trim().length > 0 && (
-                <ChatMessage sender={message.role === "user" ? "user" : "assistant"}>
-                  <ChatMessageBubble variant={message.role === "user" ? "filled" : "ghost"}>
-                    {message.content}
-                  </ChatMessageBubble>
-                </ChatMessage>
-              )}
-              {message.a2uiSurfaces?.map((surface, surfaceIndex) => (
-                <A2UIRenderer
-                  key={surfaceIndex}
-                  surface={surface}
-                  onAction={handleA2UIAction}
-                  disabled={busy || pendingInterrupt !== null}
-                />
-              ))}
-            </Fragment>
-          ))}
-          {streamingText && (
-            <ChatMessage sender="assistant">
-              <ChatMessageBubble variant="ghost" data-testid="streaming-bubble">
-                {streamingText}
-              </ChatMessageBubble>
-            </ChatMessage>
-          )}
-          {pendingA2ui.map((surface, surfaceIndex) => (
-            <A2UIRenderer
-              key={surfaceIndex}
-              surface={surface}
-              onAction={handleA2UIAction}
-              disabled={busy || pendingInterrupt !== null}
-            />
-          ))}
-          {pendingInterrupt && (
-            <InterruptGate
-              payload={pendingInterrupt}
-              onApprove={() => void handleResume(true)}
-              onDecline={() => void handleResume(false)}
-              disabled={busy}
-            />
-          )}
-        </ChatMessageList>
+          to vitest. */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-4" role="log">
+        {!historyLoaded && <p className="text-sm text-muted-foreground">Loading conversation…</p>}
+        {visibleMessages.map((message, index) => (
+          <Fragment key={index}>
+            {message.content.trim().length > 0 && (
+              <div
+                className={cn(
+                  "mb-[22px] flex max-w-[640px] flex-col",
+                  message.role === "user" ? "ml-auto items-end" : "items-start",
+                )}
+              >
+                <div
+                  className={cn(
+                    "panel-label mb-1.5 text-[10px]",
+                    message.role === "user" ? "text-muted-foreground/70" : "text-accent-signal",
+                  )}
+                >
+                  {message.role === "user" ? "You" : "Oni"}
+                </div>
+                <div
+                  className={cn(
+                    "whitespace-pre-wrap text-[14.5px] leading-[1.7]",
+                    message.role === "user" ? "text-right text-muted-foreground" : "text-left",
+                  )}
+                >
+                  {message.content}
+                </div>
+              </div>
+            )}
+            {message.a2uiSurfaces?.map((surface, surfaceIndex) => (
+              <A2UIRenderer
+                key={surfaceIndex}
+                surface={surface}
+                onAction={handleA2UIAction}
+                disabled={busy || pendingInterrupt !== null}
+              />
+            ))}
+          </Fragment>
+        ))}
+        {streamingText && (
+          <div className="mb-[22px] max-w-[640px]">
+            <div className="panel-label mb-1.5 text-[10px] text-accent-signal">Oni</div>
+            <div
+              className="reveal whitespace-pre-wrap text-[14.5px] leading-[1.7]"
+              data-testid="streaming-bubble"
+            >
+              {streamingText}
+            </div>
+          </div>
+        )}
+        {pendingA2ui.map((surface, surfaceIndex) => (
+          <A2UIRenderer
+            key={surfaceIndex}
+            surface={surface}
+            onAction={handleA2UIAction}
+            disabled={busy || pendingInterrupt !== null}
+          />
+        ))}
+        {pendingInterrupt && (
+          <InterruptGate
+            payload={pendingInterrupt}
+            onApprove={() => void handleResume(true)}
+            onDecline={() => void handleResume(false)}
+            disabled={busy}
+          />
+        )}
         <div ref={bottomRef} />
       </div>
-      {error && (
-        <Text size="sm" style={{ color: "var(--color-error)" }}>
-          {error}
-        </Text>
-      )}
-      <ChatComposer
-        value={input}
-        onChange={setInput}
-        onSubmit={() => void handleSend()}
-        onStop={() => void handleStop()}
-        isStopShown={busy}
-        isDisabled={pendingInterrupt !== null}
-        placeholder="Message the assistant…"
-        input={
-          // Astryx's default ChatComposerInput is a contentEditable div with
-          // no `placeholder` attribute — swapped for a real TextArea here so
-          // getByPlaceholderText(/message the assistant/i) in
-          // ChatPanel.test.tsx keeps working unmodified. Trade-off, accepted
-          // deliberately: this skips ChatComposerInput's token-chip/mention
-          // affordances for now.
-          <TextArea
-            label="Message the assistant"
-            isLabelHidden
-            value={input}
-            onChange={setInput}
-            onKeyDown={handleKeyDown}
-            placeholder="Message the assistant…"
-            isDisabled={busy || pendingInterrupt !== null}
-            rows={1}
-          />
-        }
-        drawer={
-          attachments.length > 0 ? (
-            <ChatComposerDrawer count={attachments.length} label="Attachments">
-              {attachments.map((a) => (
-                <Thumbnail
-                  key={a.id}
-                  src={a.previewUrl}
-                  alt={a.file.name}
-                  label={a.file.name}
-                  isLoading={a.status === "uploading"}
-                  isDisabled={busy || pendingInterrupt !== null}
-                  onRemove={() => removeAttachment(a.id)}
-                />
-              ))}
-            </ChatComposerDrawer>
-          ) : undefined
-        }
-        footerActions={
-          <Fragment>
-            <FileInput
-              label="Attach files"
-              isLabelHidden
-              isMultiple
-              value={null}
-              onChange={handleFilesSelected}
-              accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json"
-              maxSize={20_000_000}
-              maxFiles={5}
-              isDisabled={busy || pendingInterrupt !== null}
-            />
-            <button
-              type="button"
-              aria-label={recording ? "Stop recording" : "Record a voice message"}
-              onClick={() => void toggleRecording()}
-              disabled={transcribing || busy || pendingInterrupt !== null}
-              className={cn(
-                "flex size-8 items-center justify-center rounded-full text-muted-foreground disabled:opacity-50",
-                recording && "animate-pulse",
-              )}
-              style={recording ? { color: "var(--color-error)" } : undefined}
-            >
-              {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
-            </button>
-          </Fragment>
-        }
-        sendButton={
-          // Default ChatSendButton only enables on non-empty TEXT (canSend =
-          // value.trim().length > 0) — doesn't know about attachments, which
-          // would block sending a photo with no caption. Explicit isDisabled
-          // override here mirrors handleSend's own guard exactly.
-          <ChatSendButton
-            isStopShown={busy}
-            isDisabled={
-              (!input.trim() && attachments.length === 0) ||
-              pendingInterrupt !== null ||
-              attachments.some((a) => a.status === "uploading")
-            }
-          />
-        }
-      />
+      {errorBanner && <div className="px-1">{errorBanner}</div>}
+      {attachmentsPreview && <div className="px-1">{attachmentsPreview}</div>}
+      <div className="border-t border-graphite/20 pt-3">{composerBar}</div>
     </div>
   );
 }
