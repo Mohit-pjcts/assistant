@@ -12580,3 +12580,103 @@ re-syncing prompts to Langfuse for the iMessage-routing fix did not
 introduce or worsen it, only re-affirmed a pre-existing gap. Not
 committed — this is new work on top of STEPS.md 147's own 6 commits,
 proposed as its own separate commit(s) rather than folded into those.
+
+## 149. Live Claude Code session visibility + a kill switch (backlog Section 3 feature idea)
+
+**What:** the first item tackled from the backlog's Section 3 (new feature
+ideas), scoped via a further `/grill-with-docs` session in the same
+conversation. The user explicitly declined `run_claude_code`'s own
+self-authored access-hardening TODO list ("leave it as it is") but wanted
+this separate gap closed: a `run_claude_code` session can run up to 30
+minutes fully unattended with nothing showing it's happening — the exact
+standing rule ("I always want to know if there's a process going on in
+the background") that produced `active_turns.py` (STEPS.md 122), applied
+here to a different shape of in-flight thing (a real OS subprocess, not a
+graph turn). Scope confirmed explicitly: visibility AND a kill switch,
+not visibility alone.
+
+**Key enabling fact, checked before designing anything:** `claude --print`
+supports `--session-id <uuid>`, letting a session id be pre-assigned
+before the process even starts — this is what makes the whole feature
+possible, since the id is otherwise only knowable after the CLI generates
+its own. Also verified live, not assumed: the session's own `.jsonl`
+transcript (`claude_code_sessions.py` already reads these) is written
+INCREMENTALLY while the process runs, not only at completion — watched a
+real file grow from 17 to 19 lines between two checks while `ps` showed
+the process still alive. Both facts together mean a dashboard poll of the
+existing read path can show real, growing progress on a session that's
+still in flight.
+
+**Built:**
+- New `assistant/claude_code_live.py` — a small in-memory registry
+  (session_id -> real process handle + prompt preview + start time),
+  deliberately separate from `active_turns.py` rather than folded into
+  it: that registry is keyed by `thread_id`, read from
+  `langgraph.config.get_config()` at the supervisor's own top level — a
+  nested specialist's own inner tool call (exactly what `run_claude_code`
+  is) has no `configurable.thread_id` available either, per that module's
+  own documented scope limit, and a claude-code session has no natural
+  thread_id to key on regardless. `stop()` sends SIGTERM first, escalates
+  to SIGKILL after a 5s grace period (so the CLI can flush its own
+  transcript on a clean terminate), and unregisters immediately rather
+  than waiting for the matching `run_claude_code` call's own `finally` to
+  notice — found as a real bug during testing: without this, `is_live`
+  stayed `True` for a moment after `stop()` returned, racing the actual
+  cleanup instead of reflecting it.
+- `assistant/claude_code_tool.py`: `run_claude_code` now generates a
+  session id up front, passes `--session-id`, and switched from
+  `subprocess.run` (blocking, no reachable process handle) to
+  `asyncio.create_subprocess_exec` specifically so the process stays
+  killable from a separate request. Registers with `claude_code_live` the
+  moment the process starts, unregisters in a `finally` on every exit path
+  (success, timeout, an unexpected exception).
+- `assistant/claude_code_sessions.py`: `list_sessions()` gained an
+  `is_live` field, cross-referencing the new registry — a session whose
+  process is still running is otherwise indistinguishable from a finished
+  one in the `.jsonl` file alone.
+- `assistant/server.py`: new `GET /claude-code-sessions/live` (lightweight
+  poll target for the dashboard banner — just the running sessions, not
+  the full list `GET /claude-code-sessions` computes by re-reading every
+  `.jsonl` on disk) and `POST /claude-code-sessions/{id}/stop` (the kill
+  switch). The `live` route is registered BEFORE the existing
+  `/claude-code-sessions/{session_id}` path-param route — route
+  registration order matters here, since "live" would otherwise be
+  swallowed as a (nonexistent) session id.
+- Dashboard: new `useLiveClaudeCodeSessions` hook (mirrors
+  `useActiveTurns`'s own 4s-poll, best-effort-failure pattern exactly).
+  `ActiveTurnBanner.tsx` gained a live-Claude-Code-session row (prompt
+  preview, elapsed time, a pointer to the full panel for the live
+  transcript, a Stop button). `ClaudeCodeSessionsPanel.tsx` gained a
+  pulsing "Live" badge and its own Stop button per live session, plus a
+  real fix found while building this: the expanded detail view used to
+  fetch once and freeze — now it keeps re-polling on the same 4s cadence
+  while (and only while) the session is still live, so an expanded live
+  session's transcript keeps growing on screen instead of silently
+  going stale the moment it was first opened.
+
+**A real bug found and fixed during frontend testing, not just backend:**
+the Stop button was placed as a nested `<button>` inside the row's own
+existing toggle `<button>` — invalid HTML (a button cannot contain
+another button), which made `getByRole("button", {name: /stop/i})` fail
+to find it in tests even though the DOM dump showed the element present.
+Restructured so the Stop button is a sibling positioned over the same row
+via flex layout, not a descendant of the toggle.
+
+**Verification:** live end-to-end smoke tests against the REAL `claude`
+CLI (not mocked) before writing any test file: confirmed a session
+registers while running and unregisters after completion; confirmed
+`stop()` actually sends SIGTERM and the killed process reports exit code
+143. New `tests/test_claude_code_live.py` (7 tests, fake process object,
+no real subprocess/API cost) and new/extended tests in
+`tests/test_claude_code_sessions.py` and `tests/test_server.py` (mocked
+process objects, same convention). Frontend: `ActiveTurnBanner.test.tsx`
+and `ClaudeCodeSessionsPanel.test.tsx` extended (9 new tests total).
+`ruff check .` clean, `tsc --noEmit` clean, `npx prettier --check` clean
+(2 files needed reformatting after the button-nesting fix, applied),
+full frontend `vitest run` 175/175 pass (6 new), `npm run build`
+succeeds. Full backend `pytest`: 418 passed (11 new), 3 failed — the same
+3 confirmed pre-existing/unrelated failures as STEPS.md 148 (transient
+`APIConnectionError`, the documented `threads.sqlite` active-thread-
+pointer flake, the pre-existing "APPLE" gap in `SUPERVISOR_SYSTEM_PROMPT_FALLBACK`)
+— this round's edits never touch `supervisor.py`'s prompt text or
+`thread_store.py` at all. Not committed.

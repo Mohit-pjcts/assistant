@@ -80,6 +80,25 @@ def test_list_sessions_finds_sdk_cli_sessions(monkeypatch, tmp_path) -> None:
     assert sessions[0]["event_count"] == 5
     assert sessions[0]["started_at"] == "2026-08-06T11:50:36.000Z"
     assert sessions[0]["ended_at"] == "2026-08-06T11:50:39.000Z"
+    assert sessions[0]["is_live"] is False
+
+
+def test_list_sessions_marks_a_currently_running_session_as_live(monkeypatch, tmp_path) -> None:
+    """STEPS.md 149: is_live cross-references claude_code_live's registry —
+    a session whose real process is still running looks identical to a
+    finished one from the .jsonl file alone."""
+    import assistant.claude_code_live as ccl
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    project_dir = tmp_path / ".claude" / "projects" / str(tmp_path).replace("/", "-")
+    _write_session(project_dir, "session-a")
+
+    ccl.register("session-a", process=object(), prompt="still going")
+    try:
+        sessions = ccs.list_sessions()
+        assert sessions[0]["is_live"] is True
+    finally:
+        ccl.unregister("session-a")
 
 
 def test_list_sessions_excludes_non_sdk_cli_sessions(monkeypatch, tmp_path) -> None:

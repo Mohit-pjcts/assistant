@@ -83,6 +83,7 @@ from assistant import (  # noqa: E402
     active_turns,
     automation_store,
     board_store,
+    claude_code_live,
     claude_code_sessions,
     cost_cache,
     memory_review_agent,
@@ -1934,6 +1935,32 @@ async def get_workflow(run_id: str) -> dict[str, Any]:
 @app.get("/claude-code-sessions")
 async def list_claude_code_sessions() -> dict[str, Any]:
     return {"sessions": claude_code_sessions.list_sessions()}
+
+
+@app.get("/claude-code-sessions/live")
+async def list_live_claude_code_sessions() -> dict[str, Any]:
+    """Lightweight poll target for ActiveTurnBanner (STEPS.md 149) — just
+    the running sessions, not the full session list `GET
+    /claude-code-sessions` computes (reads and parses every .jsonl on
+    disk). Registered BEFORE `/claude-code-sessions/{session_id}` below:
+    route order matters here, since "live" would otherwise be swallowed
+    by that path param route and treated as a (nonexistent) session id."""
+    return {"sessions": claude_code_live.list_live()}
+
+
+@app.post("/claude-code-sessions/{session_id}/stop")
+async def stop_claude_code_session(session_id: str) -> dict[str, Any]:
+    """Kill switch for a live run_claude_code session (STEPS.md 149) — at
+    the user's own direct request, since nothing else gates this tool at
+    all. Terminates the real OS process; the session's own .jsonl
+    transcript up to that point is left intact and still readable via the
+    existing GET endpoints."""
+    stopped = await claude_code_live.stop(session_id)
+    if not stopped:
+        raise HTTPException(
+            status_code=404, detail=f"No LIVE Claude Code session with id {session_id}"
+        )
+    return {"stopped": True}
 
 
 @app.get("/claude-code-sessions/{session_id}")

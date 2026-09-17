@@ -1,4 +1,7 @@
+import { useState } from "react";
 import { useActiveTurns } from "@/components/activity/useActiveTurns";
+import { useLiveClaudeCodeSessions } from "@/components/activity/useLiveClaudeCodeSessions";
+import { stopClaudeCodeSession } from "@/lib/api";
 
 // STEPS.md 121-122: mounted in App.tsx's shell (not inside ChatPanel), so
 // it's visible on every tab and reflects every channel — the exact gap that
@@ -25,15 +28,57 @@ function formatElapsed(seconds: number): string {
 
 export function ActiveTurnBanner() {
   const { turns, recentlyEnded } = useActiveTurns();
+  const liveClaudeCodeSessions = useLiveClaudeCodeSessions();
+  // Per-session "stopping..." state so a double-click can't fire two stop
+  // requests, and so the button reflects the in-flight request instead of
+  // just sitting there until the next 4s poll happens to notice the
+  // session is gone.
+  const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
+
+  function handleStop(sessionId: string) {
+    setStoppingIds((prev) => new Set(prev).add(sessionId));
+    stopClaudeCodeSession(sessionId).catch(() => {
+      // Best-effort — if this failed, the next poll will just keep showing
+      // the session as live, and the user can try again.
+    });
+  }
+
   // Only the non-clean outcomes are worth an unprompted notice — a turn
   // that finished normally doesn't need one (ChatPanel's own transcript
   // already shows a normal reply); this is specifically for the case a
   // turn on ANY channel ended broken with nothing else around to say so.
   const failedRecently = recentlyEnded.filter((t) => t.outcome !== "completed");
-  if (turns.length === 0 && failedRecently.length === 0) return null;
+  if (turns.length === 0 && failedRecently.length === 0 && liveClaudeCodeSessions.length === 0) {
+    return null;
+  }
 
   return (
     <div className="flex flex-col gap-1.5" data-testid="active-turn-banner">
+      {liveClaudeCodeSessions.map((session) => (
+        <div
+          key={session.session_id}
+          data-testid="active-claude-code-session"
+          className="flex items-center gap-2 rounded-md border border-signal/35 bg-signal/10 px-3 py-1.5 text-xs text-signal"
+        >
+          <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-signal" />
+          <span className="font-medium">Claude Code</span>
+          <span className="opacity-70">·</span>
+          <span className="truncate">{session.prompt_preview}</span>
+          <span className="opacity-70">·</span>
+          <span>{formatElapsed(session.elapsed_seconds)}</span>
+          <span className="opacity-70">
+            — see the Claude Code Sessions tab for the live transcript
+          </span>
+          <button
+            type="button"
+            onClick={() => handleStop(session.session_id)}
+            disabled={stoppingIds.has(session.session_id)}
+            className="ml-auto shrink-0 rounded border border-alarm/40 px-2 py-0.5 font-medium text-alarm hover:bg-alarm/10 disabled:opacity-50"
+          >
+            {stoppingIds.has(session.session_id) ? "Stopping…" : "Stop"}
+          </button>
+        </div>
+      ))}
       {turns.map((turn) => (
         <div
           key={turn.thread_id}

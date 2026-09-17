@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ActiveTurnBanner } from "./ActiveTurnBanner";
 import * as api from "@/lib/api";
 
@@ -8,10 +9,20 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     fetchActiveTurns: vi.fn(),
+    fetchLiveClaudeCodeSessions: vi.fn(),
+    stopClaudeCodeSession: vi.fn(),
   };
 });
 
 const mockedFetchActiveTurns = vi.mocked(api.fetchActiveTurns);
+const mockedFetchLiveClaudeCodeSessions = vi.mocked(api.fetchLiveClaudeCodeSessions);
+const mockedStopClaudeCodeSession = vi.mocked(api.stopClaudeCodeSession);
+
+const liveSession: api.LiveClaudeCodeSession = {
+  session_id: "session-a",
+  prompt_preview: "Fix the failing test in test_disk_tools.py",
+  elapsed_seconds: 45,
+};
 
 const runningTurn: api.ActiveTurnInfo = {
   thread_id: "t1",
@@ -66,6 +77,7 @@ const completedTurn: api.RecentlyEndedTurn = {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mockedFetchLiveClaudeCodeSessions.mockResolvedValue([]);
 });
 
 describe("ActiveTurnBanner", () => {
@@ -148,5 +160,32 @@ describe("ActiveTurnBanner", () => {
 
     expect(await screen.findByTestId("active-turn-running")).toBeInTheDocument();
     expect(screen.getByTestId("recently-ended-error")).toBeInTheDocument();
+  });
+
+  // STEPS.md 149: a run_claude_code session can run up to 30 min fully
+  // unattended — this is the same standing "never let a background
+  // process run silently" rule as the turn-visibility tests above, for a
+  // real OS subprocess rather than a graph turn.
+  it("shows a live Claude Code session with its prompt preview and elapsed time", async () => {
+    mockedFetchActiveTurns.mockResolvedValue({ active: [], recentlyEnded: [] });
+    mockedFetchLiveClaudeCodeSessions.mockResolvedValue([liveSession]);
+
+    render(<ActiveTurnBanner />);
+
+    expect(await screen.findByTestId("active-claude-code-session")).toBeInTheDocument();
+    expect(screen.getByText(/Fix the failing test in test_disk_tools\.py/)).toBeInTheDocument();
+    expect(screen.getByText("45s")).toBeInTheDocument();
+  });
+
+  it("calls stopClaudeCodeSession when its Stop button is clicked", async () => {
+    const user = userEvent.setup();
+    mockedFetchActiveTurns.mockResolvedValue({ active: [], recentlyEnded: [] });
+    mockedFetchLiveClaudeCodeSessions.mockResolvedValue([liveSession]);
+    mockedStopClaudeCodeSession.mockResolvedValue(undefined);
+
+    render(<ActiveTurnBanner />);
+    await user.click(await screen.findByRole("button", { name: /stop/i }));
+
+    expect(mockedStopClaudeCodeSession).toHaveBeenCalledWith("session-a");
   });
 });

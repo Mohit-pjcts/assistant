@@ -5,10 +5,18 @@ import { Badge } from "@/components/ui/badge";
 import {
   fetchClaudeCodeSessions,
   fetchClaudeCodeSession,
+  stopClaudeCodeSession,
   type ClaudeCodeSessionSummary,
   type ClaudeCodeSessionDetail,
   type ClaudeCodeSessionBlock,
 } from "@/lib/api";
+
+// Same 4s cadence as the session-list poll below — while a session is
+// still live, its detail view (once expanded) needs to keep refreshing
+// too, not fetch once and freeze; the .jsonl transcript is confirmed to
+// grow incrementally while the real process is still running (STEPS.md
+// 149), so a frozen view would silently stop showing real progress.
+const DETAIL_POLL_MS = 4000;
 
 // run_claude_code (assistant/claude_code_tool.py, 2026-08-06) delegates
 // coding_agent's real work to a separate, nested Claude Code session —
@@ -77,40 +85,88 @@ function SessionRow({ session }: { session: ClaudeCodeSessionSummary }) {
   const [detail, setDetail] = useState<ClaudeCodeSessionDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   const toggle = useCallback(() => {
     setExpanded((prev) => !prev);
   }, []);
 
+  function handleStop(e: React.MouseEvent) {
+    e.stopPropagation();
+    setStopping(true);
+    stopClaudeCodeSession(session.session_id).catch(() => {
+      // Best-effort — the next list poll will just keep showing it as
+      // live if this failed, and the button re-enables via `stopping`
+      // resetting on the next render once is_live flips.
+    });
+  }
+
   useEffect(() => {
-    if (!expanded || detail) return;
-    setLoading(true);
+    if (!expanded) return;
+    setLoading(!detail);
     setError(null);
-    fetchClaudeCodeSession(session.session_id)
-      .then(setDetail)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setLoading(false));
-  }, [expanded, detail, session.session_id]);
+
+    function poll() {
+      fetchClaudeCodeSession(session.session_id)
+        .then(setDetail)
+        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+        .finally(() => setLoading(false));
+    }
+
+    poll();
+    // Only keep re-polling the DETAIL view while the session is still
+    // live — once it's finished, the transcript can't change anymore, so
+    // there's nothing to gain from refetching it repeatedly.
+    if (!session.is_live) return;
+    const interval = setInterval(poll, DETAIL_POLL_MS);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, session.session_id, session.is_live]);
 
   return (
     <Card size="sm" data-testid="claude-code-session-row">
       <CardContent>
-        <button
-          type="button"
-          onClick={toggle}
-          className="flex w-full items-center justify-between gap-2 text-left"
-        >
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">{session.title}</p>
-            <p className="truncate text-xs text-muted-foreground">{session.prompt_preview}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Badge variant="secondary">{session.event_count} events</Badge>
-            <span className="text-xs text-muted-foreground">
-              {formatTimestamp(session.started_at)}
-            </span>
-          </div>
-        </button>
+        {/* A real nested <button> inside this row's own toggle <button>
+            would be invalid HTML (browsers/jsdom handle nested buttons
+            unpredictably) — the Stop button is a SIBLING positioned over
+            the same row via flex layout, not a descendant of the toggle. */}
+        <div className="flex w-full items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={toggle}
+            className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+          >
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{session.title}</p>
+              <p className="truncate text-xs text-muted-foreground">{session.prompt_preview}</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {session.is_live && (
+                <Badge variant="default" data-testid="claude-code-session-live-badge">
+                  <span
+                    aria-hidden
+                    className="mr-1 inline-block size-1.5 animate-pulse rounded-full bg-current"
+                  />
+                  Live
+                </Badge>
+              )}
+              <Badge variant="secondary">{session.event_count} events</Badge>
+              <span className="text-xs text-muted-foreground">
+                {formatTimestamp(session.started_at)}
+              </span>
+            </div>
+          </button>
+          {session.is_live && (
+            <button
+              type="button"
+              onClick={handleStop}
+              disabled={stopping}
+              className="shrink-0 rounded border border-destructive/40 px-2 py-0.5 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+            >
+              {stopping ? "Stopping…" : "Stop"}
+            </button>
+          )}
+        </div>
         {expanded && (
           <>
             {loading && <p className="mt-2 text-xs text-muted-foreground">Loading…</p>}

@@ -587,6 +587,16 @@ export async function triggerMemoryReview(): Promise<number> {
 // swapped from LangSmith to Langfuse (2026-07-25) after LangSmith's own
 // monthly trace-ingestion quota silently stopped accepting new traces —
 // see server.py's `/cost` docstring for the full story.
+//
+// `stale`/`no_data`/`read_at` and the top-level `rate_limited` were added
+// 2026-08-09 after a real, live Langfuse rate limit (100 requests/window)
+// made this endpoint throw — the user's own direct ask, TWICE, after a
+// first fix still left the UI showing a bare error: never do that, always
+// show the last real numbers read, say how stale they are, and say how
+// long until the limit clears. The backend now NEVER throws for this —
+// see `/cost`'s own docstring — so there is no rate-limit error class
+// here anymore; a thrown Error from `fetchCost` means something else
+// entirely broke (this backend unreachable, a genuine 500).
 export interface CostWindow {
   run_count: number;
   total_tokens: number;
@@ -595,6 +605,15 @@ export interface CostWindow {
   total_cost: number;
   prompt_cost: number;
   completion_cost: number;
+  stale: boolean;
+  no_data: boolean;
+  read_at: string | null;
+}
+
+export interface CostRateLimit {
+  message: string;
+  retry_after_seconds: number | null;
+  reset_at: string | null;
 }
 
 export interface CostStats {
@@ -604,12 +623,15 @@ export interface CostStats {
     week: CostWindow;
     all_time: CostWindow;
   };
+  rate_limited: CostRateLimit | null;
 }
 
 // Thrown specifically on the backend's 503 ("LANGFUSE_PUBLIC_KEY/
 // LANGFUSE_SECRET_KEY missing or invalid") so the panel can show a
 // distinct, actionable message instead of a generic error banner — this
-// isn't a broken request, it's a feature that isn't set up.
+// isn't a broken request, it's a feature that isn't set up. Still the
+// one case with no fallback: never configured means no history exists
+// to fall back to either.
 export class CostSourceNotConfiguredError extends Error {}
 
 export async function fetchCost(): Promise<CostStats> {
@@ -886,6 +908,41 @@ export interface ClaudeCodeSessionSummary {
   started_at: string | null;
   ended_at: string | null;
   event_count: number;
+  is_live: boolean;
+}
+
+// STEPS.md 149: live visibility + a kill switch for run_claude_code
+// sessions, at the user's own direct request — the same standing "never
+// let a background process run silently" rule as ActiveTurnBanner/
+// useActiveTurns above. A lightweight, separate poll target (not the full
+// ClaudeCodeSessionSummary list, which re-reads and re-parses every
+// .jsonl on disk) for ActiveTurnBanner specifically.
+export interface LiveClaudeCodeSession {
+  session_id: string;
+  prompt_preview: string;
+  elapsed_seconds: number;
+}
+
+export async function fetchLiveClaudeCodeSessions(): Promise<LiveClaudeCodeSession[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/claude-code-sessions/live`);
+  if (!response.ok) {
+    throw new Error(
+      `/claude-code-sessions/live failed (${response.status}): ${await response.text()}`,
+    );
+  }
+  const body = (await response.json()) as { sessions: LiveClaudeCodeSession[] };
+  return body.sessions;
+}
+
+export async function stopClaudeCodeSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/claude-code-sessions/${sessionId}/stop`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `/claude-code-sessions/${sessionId}/stop failed (${response.status}): ${await response.text()}`,
+    );
+  }
 }
 
 export type ClaudeCodeSessionBlock =

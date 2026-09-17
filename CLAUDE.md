@@ -1419,7 +1419,17 @@ filtering content.
   options (dropping `--dangerously-skip-permissions` for
   `--permission-mode`/`--allowedTools`, a disposable worktree instead of
   real `$HOME`, routing through `interrupt()`, a spend cap, narrower
-  `--add-dir` scoping).
+  `--add-dir` scoping). **Access hardening remains explicitly declined, at
+  my own direct request** — a separate gap was closed instead (STEPS.md
+  149): live visibility + a kill switch, since a session can run up to 30
+  minutes fully unattended with nothing showing it's happening. A
+  `--session-id` is pre-assigned so the session can be registered with
+  `assistant/claude_code_live.py`'s in-memory registry the moment it
+  starts and the dashboard can poll its real, incrementally-written
+  transcript while it's still running (confirmed live, not assumed);
+  `subprocess.run` was replaced with `asyncio.create_subprocess_exec` so
+  the process handle stays reachable from a separate request
+  (`POST /claude-code-sessions/{id}/stop`).
 
 ## Tech stack
 

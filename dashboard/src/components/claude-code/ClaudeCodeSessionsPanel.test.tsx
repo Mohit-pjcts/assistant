@@ -10,11 +10,13 @@ vi.mock("@/lib/api", async () => {
     ...actual,
     fetchClaudeCodeSessions: vi.fn(),
     fetchClaudeCodeSession: vi.fn(),
+    stopClaudeCodeSession: vi.fn(),
   };
 });
 
 const mockedFetchSessions = vi.mocked(api.fetchClaudeCodeSessions);
 const mockedFetchSession = vi.mocked(api.fetchClaudeCodeSession);
+const mockedStopSession = vi.mocked(api.stopClaudeCodeSession);
 
 const sampleSession: api.ClaudeCodeSessionSummary = {
   session_id: "session-a",
@@ -23,6 +25,14 @@ const sampleSession: api.ClaudeCodeSessionSummary = {
   started_at: "2026-08-06T11:50:36.000Z",
   ended_at: "2026-08-06T11:50:47.000Z",
   event_count: 12,
+  is_live: false,
+};
+
+const sampleLiveSession: api.ClaudeCodeSessionSummary = {
+  ...sampleSession,
+  session_id: "session-live",
+  ended_at: null,
+  is_live: true,
 };
 
 const sampleDetail: api.ClaudeCodeSessionDetail = {
@@ -98,5 +108,53 @@ describe("ClaudeCodeSessionsPanel", () => {
 
     expect(await screen.findByText("Execute shell command and report output")).toBeInTheDocument();
     expect(mockedFetchSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a live badge and Stop button for a session that is still running", async () => {
+    mockedFetchSessions.mockResolvedValue([sampleLiveSession]);
+
+    render(<ClaudeCodeSessionsPanel />);
+
+    expect(await screen.findByTestId("claude-code-session-live-badge")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /stop/i })).toBeInTheDocument();
+  });
+
+  it("does not show a live badge or Stop button for a finished session", async () => {
+    mockedFetchSessions.mockResolvedValue([sampleSession]);
+
+    render(<ClaudeCodeSessionsPanel />);
+
+    await screen.findByText("Execute shell command and report output");
+    expect(screen.queryByTestId("claude-code-session-live-badge")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
+  });
+
+  it("calls stopClaudeCodeSession when Stop is clicked, without expanding the row", async () => {
+    const user = userEvent.setup({ delay: null });
+    mockedFetchSessions.mockResolvedValue([sampleLiveSession]);
+    mockedStopSession.mockResolvedValue(undefined);
+
+    render(<ClaudeCodeSessionsPanel />);
+    await user.click(await screen.findByRole("button", { name: /stop/i }));
+
+    expect(mockedStopSession).toHaveBeenCalledWith("session-live");
+    // Clicking Stop must not also toggle the row open (it's nested inside
+    // the same clickable row) — the detail fetch must never fire.
+    expect(mockedFetchSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps re-polling the detail view for a live session while expanded", async () => {
+    const user = userEvent.setup({ delay: null });
+    mockedFetchSessions.mockResolvedValue([sampleLiveSession]);
+    mockedFetchSession.mockResolvedValue(sampleDetail);
+
+    render(<ClaudeCodeSessionsPanel />);
+    await user.click(await screen.findByText("Execute shell command and report output"));
+
+    await screen.findByTestId("claude-code-session-detail");
+    expect(mockedFetchSession).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(mockedFetchSession.mock.calls.length).toBeGreaterThan(1);
   });
 });

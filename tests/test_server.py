@@ -1428,6 +1428,60 @@ async def test_delete_unknown_project_returns_404() -> None:
         assert response.status_code == 404
 
 
+# ---- Claude Code sessions: live visibility + kill switch (STEPS.md 149) ---
+# No real `claude` CLI subprocess here — a fake process object stands in,
+# same "fast offline unit coverage for pure logic" convention as
+# test_claude_code_live.py itself.
+
+
+class _FakeLiveProcess:
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    async def wait(self) -> int:
+        return 0
+
+
+async def test_live_claude_code_sessions_endpoint_reflects_the_registry() -> None:
+    from assistant import claude_code_live
+
+    with TestClient(server.app) as client:
+        empty = client.get("/claude-code-sessions/live")
+        assert empty.status_code == 200, empty.text
+        assert empty.json() == {"sessions": []}
+
+        claude_code_live.register("live-test-session", _FakeLiveProcess(), "a live prompt")
+        try:
+            response = client.get("/claude-code-sessions/live")
+            assert response.status_code == 200, response.text
+            sessions = response.json()["sessions"]
+            assert len(sessions) == 1
+            assert sessions[0]["session_id"] == "live-test-session"
+            assert sessions[0]["prompt_preview"] == "a live prompt"
+        finally:
+            claude_code_live.unregister("live-test-session")
+
+
+async def test_stop_claude_code_session_terminates_a_live_one() -> None:
+    from assistant import claude_code_live
+
+    with TestClient(server.app) as client:
+        claude_code_live.register("live-test-session-2", _FakeLiveProcess(), "prompt")
+        response = client.post("/claude-code-sessions/live-test-session-2/stop")
+        assert response.status_code == 200, response.text
+        assert response.json() == {"stopped": True}
+        assert claude_code_live.is_live("live-test-session-2") is False
+
+
+async def test_stop_unknown_claude_code_session_returns_404() -> None:
+    with TestClient(server.app) as client:
+        response = client.post("/claude-code-sessions/does-not-exist/stop")
+        assert response.status_code == 404
+
+
 if __name__ == "__main__":
     asyncio.run(test_chat_round_trips_through_the_real_graph())
     print("OK: /chat round-trips through the real graph")
@@ -1553,3 +1607,9 @@ if __name__ == "__main__":
     print("OK: deleting a project unassigns rather than deletes its threads, via the API")
     asyncio.run(test_delete_unknown_project_returns_404())
     print("OK: deleting an unknown project returns 404")
+    asyncio.run(test_live_claude_code_sessions_endpoint_reflects_the_registry())
+    print("OK: GET /claude-code-sessions/live reflects the live registry")
+    asyncio.run(test_stop_claude_code_session_terminates_a_live_one())
+    print("OK: POST /claude-code-sessions/{id}/stop terminates a live session")
+    asyncio.run(test_stop_unknown_claude_code_session_returns_404())
+    print("OK: stopping an unknown Claude Code session returns 404")

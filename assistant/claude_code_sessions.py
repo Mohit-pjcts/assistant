@@ -26,6 +26,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from assistant import claude_code_live
+
 
 def _project_dir() -> Path:
     home = Path.home()
@@ -50,7 +52,11 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
-    """Return recent run_claude_code sessions, newest first."""
+    """Return recent run_claude_code sessions, newest first. `is_live`
+    cross-references `claude_code_live`'s in-memory registry — a session
+    whose process is still running looks otherwise identical to a
+    finished one from this file-based view alone (its own `.jsonl`
+    carries no "still in progress" marker of its own)."""
     project_dir = _project_dir()
     if not project_dir.is_dir():
         return []
@@ -81,6 +87,7 @@ def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
                 "started_at": min(timestamps) if timestamps else None,
                 "ended_at": max(timestamps) if timestamps else None,
                 "event_count": len(events),
+                "is_live": claude_code_live.is_live(path.stem),
             }
         )
 
