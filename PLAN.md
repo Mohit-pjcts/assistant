@@ -2183,7 +2183,7 @@ endpoint(s).
 
 ---
 
-## Phase 22 — Messaging cluster: iMessage + WhatsApp, Mac + iPhone — CODE COMPLETE (send-only), READ DEFERRED (opened + built 2026-07-25, STEPS.md 105)
+## Phase 22 — Messaging cluster: iMessage + WhatsApp, Mac + iPhone — CODE COMPLETE (send-only); READ RESOLVED AND LIVE-VERIFIED (STEPS.md 148) (opened + built 2026-07-25, STEPS.md 105)
 
 **Objective:** iMessage read+send and WhatsApp send-only, reachable from
 both the Mac and the phone. Depends on Phase 21's phone-initiated-turn
@@ -2202,7 +2202,22 @@ does not reliably expose message history content in modern macOS (only
 sending is well-supported); the actual working alternative is direct
 SQLite access to `~/Library/Messages/chat.db` (Full Disk Access, not
 Automation; an undocumented, version-fragile schema). Left as an open
-decision for the user rather than guessed at. A real second gap surfaced
+decision for the user rather than guessed at.
+**Resolved (STEPS.md 148):** the user granted Full Disk Access and chose
+to accept both named costs. `mac_tools.py`'s `read_imessages` implements
+direct `chat.db` access — read-only, ungated. The `attributedBody`
+NSAttributedString-archive parser was reverse-engineered from the real
+binary layout (found live: most real messages store text there, not in
+the plain `text` column — `text` is only ~28% populated in a real 30-day
+sample) and validated at 99.5%+ success across a random 2,000-message
+sample of real history, not shipped on a guess. Live-verified end to end
+through the real running supervisor with a natural conversational
+request, not just a direct tool call — the routing-blindness class this
+project has repeatedly hit (Phases 18/20/27) recurred here too (both
+`supervisor.py`'s and `mac_control_agent`'s prompts still said "no read"),
+fixed and re-synced to Langfuse, then re-verified live correctly routing
+to `mac_control_agent` and returning real message content.
+A real second gap surfaced
 while wiring this in, also fixed (STEPS.md 105): the supervisor had no
 signal distinguishing a phone-initiated turn from a Mac one, so an
 ambiguous "open Spotify"/"message on WhatsApp" could have routed to

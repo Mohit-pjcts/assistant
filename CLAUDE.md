@@ -61,14 +61,28 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   **Phase 22 (messaging cluster) is CODE COMPLETE for send-only**
   (`send_imessage`/`compose_whatsapp` in `mac_tools.py`, STEPS.md 105) —
   unverified against the real apps (a live Automation-permission click is
-  needed, blocked while working autonomously), and iMessage READ
-  deliberately not built (Messages.app's AppleScript dictionary doesn't
-  reliably expose it; the real alternative, direct `chat.db` SQLite
-  access, is left as an open decision rather than guessed at). A real
-  routing gap found while wiring Phase 22 in — the supervisor had no way
-  to know a request came from the phone, risking "open Spotify" acting on
-  the Mac instead — is fixed (`_PHONE_CHANNEL_MARKER`, server.py) and
-  live-verified with a natural, non-explicit phrasing.
+  needed, blocked while working autonomously). A real routing gap found
+  while wiring Phase 22 in — the supervisor had no way to know a request
+  came from the phone, risking "open Spotify" acting on the Mac instead —
+  is fixed (`_PHONE_CHANNEL_MARKER`, server.py) and live-verified with a
+  natural, non-explicit phrasing.
+  **iMessage READ's open decision is resolved (STEPS.md 148):** `mac_tools.py`'s
+  `read_imessages` implements the direct `chat.db` SQLite approach, at the
+  user's own explicit choice to accept the two named costs (a Full Disk
+  Access grant; an undocumented, version-fragile `attributedBody`
+  NSAttributedString-archive encoding for message text). Read-only,
+  ungated. Unlike `send_imessage`, this WAS live-verified end to end
+  against this Mac's own real `chat.db` (Full Disk Access granted
+  specifically for this): the `attributedBody` parser was reverse-
+  engineered from the real binary layout (not guessed from a schema dump)
+  and validated at a 99.5%+ success rate across a random 2,000-message
+  sample of real history, and a real conversational request through the
+  actual running supervisor ("What did I last text +15559990000 on
+  iMessage?") correctly routed to `mac_control_agent` and returned the
+  real message content and date. Both `supervisor.py`'s and
+  `mac_control_agent`'s own routing prompts were updated (they previously
+  said "no read" — the same routing-blindness class this project has hit
+  repeatedly) and re-synced to Langfuse.
   **Phase 23 (full-disk Mac file access) is FILE OPS COMPLETE and
   LIVE-VERIFIED** (`assistant/disk_tools.py` — search/read/write/delete,
   a real `/chat`→gate→`/resume`→real-file-write round trip proved live,
@@ -224,6 +238,16 @@ the README matter. Treat it as a portfolio piece. The package is named `assistan
   `67dc534` as unstaged modifications plus one untracked file
   (`assistant/media_tools.py`). See PLAN.md's Phase 26 entry and
   STEPS.md 119 for full detail and the remaining done-when list.
+  **Update (STEPS.md 147/148):** `tests/test_media_tools.py`'s "zero
+  coverage" gap named above is now partially closed — MODERATE depth,
+  a deliberate choice, not full exhaustive coverage: the SSRF guard
+  (including the DNS-rebinding TOCTOU it was later found to have and
+  fixed), the credential-path check, both size caps, content-type
+  spoofing, redirect handling, and connection-error handling all have
+  real tests now (11 total). Still open: no live browser verification
+  of either tool, and several lower-risk mechanical paths (generic
+  path-resolve OSError, video MIME-type guessing) remain untested by
+  design.
 - **Dashboard-wide UI scale control (Cmd/Ctrl +/-), built 2026-08-04,
   STEPS.md 120 — not a numbered phase, small and unrelated to Phase 26,
   logged separately.** New `dashboard/src/lib/uiScale.tsx`

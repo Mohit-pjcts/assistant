@@ -287,12 +287,15 @@ _SAMPLE_EVENT_ROW = (
 
 
 @contextmanager
-def _capture_subprocess_calls_with_calendar_get(get_stdout=_SAMPLE_EVENT_ROW, update_stdout="updated"):
+def _capture_subprocess_calls_with_calendar_get(
+    get_stdout=_SAMPLE_EVENT_ROW, update_stdout="updated", delete_stdout="deleted"
+):
     """Like _capture_subprocess_calls, but returns canned real-looking
-    responses for the GET/UPDATE calendar scripts specifically — needed
-    because calendar_update_event's read-back-before-gating step (mirroring
-    write_tools.py's _read_back_event) requires real parseable content to
-    reach the gate at all."""
+    responses for the GET/UPDATE/DELETE calendar scripts specifically —
+    needed because calendar_update_event's/calendar_delete_event's
+    read-back-before-gating step (mirroring write_tools.py's
+    _read_back_event) requires real parseable content to reach the gate at
+    all."""
     calls = []
     original = mac_tools.subprocess.run
 
@@ -303,6 +306,8 @@ def _capture_subprocess_calls_with_calendar_get(get_stdout=_SAMPLE_EVENT_ROW, up
             return SimpleNamespace(returncode=0, stdout=get_stdout, stderr="")
         if script == mac_tools._CALENDAR_UPDATE_EVENT:
             return SimpleNamespace(returncode=0, stdout=update_stdout, stderr="")
+        if script == mac_tools._CALENDAR_DELETE_EVENT:
+            return SimpleNamespace(returncode=0, stdout=delete_stdout, stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     mac_tools.subprocess.run = fake_run
@@ -408,6 +413,36 @@ def test_calendar_update_event_no_fields_reports_nothing_to_update() -> None:
     assert all(argv[2] != mac_tools._CALENDAR_UPDATE_EVENT for argv in calls)
 
 
+# --- calendar_delete_event (deliberately ungated, 2026-08-25 — see its own
+# --- docstring) --------------------------------------------------------------
+
+
+def test_calendar_delete_event_is_ungated_no_interrupt_needed() -> None:
+    """Deletes immediately — no confirmation, no state/InjectedState
+    argument at all, unlike calendar_create_event/calendar_update_event."""
+    with _capture_subprocess_calls_with_calendar_get() as calls:
+        result = mac_tools.calendar_delete_event.invoke({"event_id": "E1"})
+    assert any(argv[2] == mac_tools._CALENDAR_GET_EVENT for argv in calls)
+    assert any(argv[2] == mac_tools._CALENDAR_DELETE_EVENT for argv in calls)
+    assert "Deleted event 'Team Sync'" in result
+
+
+def test_calendar_delete_event_missing_id_reports_error_not_found() -> None:
+    with _capture_subprocess_calls_with_calendar_get(get_stdout="NOTFOUND") as calls:
+        result = mac_tools.calendar_delete_event.invoke({"event_id": "NOPE"})
+    assert "could not find event" in result
+    assert all(argv[2] != mac_tools._CALENDAR_DELETE_EVENT for argv in calls)
+
+
+def test_calendar_delete_event_reports_not_found_on_race() -> None:
+    """The event vanished between read-back and the actual delete call —
+    must surface as an error, not a silent success."""
+    with _capture_subprocess_calls_with_calendar_get(delete_stdout="NOTFOUND") as calls:
+        result = mac_tools.calendar_delete_event.invoke({"event_id": "E1"})
+    assert any(argv[2] == mac_tools._CALENDAR_DELETE_EVENT for argv in calls)
+    assert "no longer exists" in result
+
+
 # --- open_url_in_brave (Phase 13, deliberately ungated) ---------------------
 
 
@@ -500,6 +535,151 @@ def test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim()
     assert payload["recipient"] == "+15551234567"
     assert payload["message"] == "the secret code is 4471"
     assert payload["voice_approvable"] is False
+
+
+# --- iMessage READ, direct chat.db access — Phase 22 (resolved) ------------
+#
+# Synthetic temp chat.db, never the real one (same "real file ops against
+# tempdir, never real Mac state" convention as test_disk_tools.py/
+# test_obsidian_tools.py) — schema pared down to exactly the columns
+# read_imessages actually queries.
+
+
+def _fake_attributed_body(text: str) -> bytes:
+    """Builds a minimal synthetic attributedBody blob in the real
+    typedstream shape _extract_message_text parses — enough preamble bytes
+    to exercise `.rfind(b"NSString")` realistically, then the real
+    length-prefix encoding (short-string form, byte < 0x80)."""
+    payload = text.encode("utf-8")
+    assert len(payload) < 0x80, "use _fake_attributed_body_long for >=128 byte payloads"
+    return b"\x04\x0bstreamtyped\x00NSAttributedString\x00NSString\x01\x94\x84\x01+" + bytes(
+        [len(payload)]
+    ) + payload
+
+
+def _fake_attributed_body_long(text: str) -> bytes:
+    """Long-string form (0x81 length-prefix byte) — for payloads >=128
+    bytes, e.g. non-ASCII text whose UTF-8 encoding exceeds 127 bytes.
+    Real chat.db blobs have one extra pad byte (\\x00) between the length
+    byte and the actual payload in this form — confirmed by inspecting a
+    real long-message blob live, not guessed at; reproduced here so this
+    fixture matches the real layout _extract_message_text parses."""
+    payload = text.encode("utf-8")
+    assert len(payload) < 256, "test helper only supports the 0x81 (1-byte length) form"
+    return (
+        b"\x04\x0bstreamtyped\x00NSAttributedString\x00NSString\x01\x95\x84\x01+\x81"
+        + bytes([len(payload)])
+        + b"\x00"
+        + payload
+    )
+
+
+def test_extract_message_text_prefers_plain_text_column() -> None:
+    assert mac_tools._extract_message_text("hello", b"irrelevant garbage") == "hello"
+
+
+def test_extract_message_text_parses_short_attributed_body() -> None:
+    blob = _fake_attributed_body("automation fired ok")
+    assert mac_tools._extract_message_text(None, blob) == "automation fired ok"
+
+
+def test_extract_message_text_parses_long_non_ascii_attributed_body() -> None:
+    text = "滙豐：您的驗證碼是 123456，請勿分享給任何人。"
+    blob = _fake_attributed_body_long(text)
+    assert mac_tools._extract_message_text(None, blob) == text
+
+
+def test_extract_message_text_returns_none_for_unparseable_blob() -> None:
+    assert mac_tools._extract_message_text(None, b"totally unrelated binary junk") is None
+    assert mac_tools._extract_message_text(None, None) is None
+
+
+def _make_fake_chat_db(path: Path, *, chat_identifier: str, messages: list[tuple[int, bool, bytes | None, bytes | None]]) -> None:
+    """messages: list of (date_ns_since_2001, is_from_me, text, attributed_body)."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT)")
+        conn.execute("CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER, is_from_me INTEGER, text TEXT, attributedBody BLOB)")
+        conn.execute("CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER)")
+        conn.execute("INSERT INTO chat (ROWID, chat_identifier) VALUES (1, ?)", (chat_identifier,))
+        for i, (date, is_from_me, text, blob) in enumerate(messages, start=1):
+            conn.execute(
+                "INSERT INTO message (ROWID, date, is_from_me, text, attributedBody) VALUES (?, ?, ?, ?, ?)",
+                (i, date, int(is_from_me), text, blob),
+            )
+            conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (i,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_read_imessages_finds_messages_by_phone_number(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "chat.db"
+        _make_fake_chat_db(
+            db_path,
+            chat_identifier="+15551234567",
+            messages=[
+                (100_000_000_000, False, "hey are we still on for lunch", None),
+                (200_000_000_000, True, None, _fake_attributed_body("yep see you at noon")),
+            ],
+        )
+        monkeypatch.setattr(mac_tools, "_CHAT_DB_PATH", db_path)
+        result = mac_tools.read_imessages.invoke({"contact": "+15551234567", "limit": 20})
+
+    assert "hey are we still on for lunch" in result
+    assert "yep see you at noon" in result
+    assert "You:" in result
+    # Chronological order (oldest first), not raw DB descending order.
+    assert result.index("hey are we still") < result.index("yep see you")
+
+
+def test_read_imessages_reports_no_messages_found() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "chat.db"
+        _make_fake_chat_db(db_path, chat_identifier="+15551234567", messages=[])
+
+        import assistant.mac_tools as mt
+
+        original = mt._CHAT_DB_PATH
+        mt._CHAT_DB_PATH = db_path
+        try:
+            result = mac_tools.read_imessages.invoke({"contact": "+19998887777", "limit": 20})
+        finally:
+            mt._CHAT_DB_PATH = original
+
+    assert "No messages found" in result
+
+
+def test_read_imessages_resolves_a_contact_name_via_contacts_search(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "chat.db"
+        _make_fake_chat_db(
+            db_path,
+            chat_identifier="+15559876543",
+            messages=[(100_000_000_000, False, "hi from Rishabh", None)],
+        )
+        monkeypatch.setattr(mac_tools, "_CHAT_DB_PATH", db_path)
+
+        def fake_run(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout="Rishabh|mobile:+15559876543\n", stderr="")
+
+        monkeypatch.setattr(mac_tools.subprocess, "run", fake_run)
+
+        result = mac_tools.read_imessages.invoke({"contact": "Rishabh", "limit": 20})
+
+    assert "hi from Rishabh" in result
+
+
+def test_read_imessages_reports_unresolvable_contact_name(monkeypatch) -> None:
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mac_tools.subprocess, "run", fake_run)
+    result = mac_tools.read_imessages.invoke({"contact": "Nobody Real Xyzzy", "limit": 20})
+    assert "could not find a phone number or email" in result.lower()
 
 
 # --- WhatsApp: ungated compose-draft only — Phase 22 ------------------------
@@ -676,6 +856,12 @@ if __name__ == "__main__":
     print("OK: test_calendar_update_event_requires_timezone_when_changing_start")
     test_calendar_update_event_no_fields_reports_nothing_to_update()
     print("OK: test_calendar_update_event_no_fields_reports_nothing_to_update")
+    test_calendar_delete_event_is_ungated_no_interrupt_needed()
+    print("OK: test_calendar_delete_event_is_ungated_no_interrupt_needed")
+    test_calendar_delete_event_missing_id_reports_error_not_found()
+    print("OK: test_calendar_delete_event_missing_id_reports_error_not_found")
+    test_calendar_delete_event_reports_not_found_on_race()
+    print("OK: test_calendar_delete_event_reports_not_found_on_race")
     test_open_url_in_brave_passes_url_as_argv_never_shell()
     print("OK: test_open_url_in_brave_passes_url_as_argv_never_shell")
     test_open_url_in_brave_is_ungated_no_interrupt_needed()
@@ -686,6 +872,18 @@ if __name__ == "__main__":
     print("OK: test_send_imessage_approved_passes_recipient_and_message_as_argv")
     test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim()
     print("OK: test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim")
+    test_extract_message_text_prefers_plain_text_column()
+    print("OK: test_extract_message_text_prefers_plain_text_column")
+    test_extract_message_text_parses_short_attributed_body()
+    print("OK: test_extract_message_text_parses_short_attributed_body")
+    test_extract_message_text_parses_long_non_ascii_attributed_body()
+    print("OK: test_extract_message_text_parses_long_non_ascii_attributed_body")
+    test_extract_message_text_returns_none_for_unparseable_blob()
+    print("OK: test_extract_message_text_returns_none_for_unparseable_blob")
+    test_read_imessages_reports_no_messages_found()
+    print("OK: test_read_imessages_reports_no_messages_found")
+    test_read_imessages_reports_unresolvable_contact_name()
+    print("OK: test_read_imessages_reports_unresolvable_contact_name")
     test_compose_whatsapp_passes_open_url_argv_never_shell()
     print("OK: test_compose_whatsapp_passes_open_url_argv_never_shell")
     test_compose_whatsapp_url_encodes_special_characters_in_the_message()
@@ -696,4 +894,4 @@ if __name__ == "__main__":
     print("OK: test_photos_search_passes_query_as_argv")
     test_photos_export_writes_into_the_workspace_containment_boundary()
     print("OK: test_photos_export_writes_into_the_workspace_containment_boundary")
-    print("\n28 tests passed")
+    print("\n31 tests passed")

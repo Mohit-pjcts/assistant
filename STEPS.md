@@ -12459,3 +12459,124 @@ coverage remain explicitly open, not silently closed by this pass. Not
 committed — proposed commit grouping given to the user directly rather
 than drafted here, since grouping is a git-workflow decision, not a
 build fact.
+
+## 148. Backlog Section 2 follow-up: media_tools.py test coverage closed (moderate depth); iMessage READ's open decision resolved and live-verified
+
+**What:** a same-session continuation of STEPS.md 147's bug-fix sweep,
+via another `/grill-with-docs` session scoped to the backlog's Section 2
+("already-known open items"). Most of Section 2 turned out to require the
+user's own hands-on time (device permission clicks, real-browser
+verification — the Claude in Chrome extension wasn't connected this
+session either, so that path was tried and explicitly deferred rather
+than faked). Two items were genuinely buildable and got done:
+
+**Phase 26 test-coverage gap, closed at MODERATE depth (the user's own
+explicit choice over full exhaustive coverage):** `tests/test_media_tools.py`
+grew from 1 test (the SSRF DNS-rebinding fix from STEPS.md 147) to 11,
+covering the security/correctness-critical paths in both `render_local_media`
+and `render_web_media` — credential-path bypass, unsupported extensions,
+both size caps, non-http(s) scheme rejection, redirect handling,
+content-type spoofing, connection-error handling, and one real success
+path per tool. The two success-path tests monkeypatch
+`assistant.a2ui.adispatch_custom_event` to a no-op, since it raises
+`RuntimeError` outside a real LangGraph run context (confirmed live, not
+assumed) — same "unit-test the boundary, integration-test the pipeline
+separately" split this project already uses elsewhere. Explicitly NOT
+closed: no live browser verification of either tool, and a few lower-risk
+mechanical paths (generic path-resolve `OSError`, video MIME-type
+guessing) remain untested by design, per the moderate-depth choice.
+
+**Phase 21's phone confirmation-gate branch turned out to already be
+fully built** — a real, useful finding, not wasted effort: investigating
+before building anything showed `server.py`'s `_run_turn`/`/phone/turn`/
+`/phone/resume` already correctly return `{"type": "interrupt", ...}` for
+a `voice_approvable: True` gate and already resume via a client-supplied
+boolean, committed since the ORIGINAL Phase 21 commit (`9292fff`) — and
+`PHONE_SETUP.md`'s own Step 5 already has the complete, precise Shortcuts-
+app recipe written out. The only remaining piece is the physical act of
+building that step into the real "Ask Oni" Shortcut on the user's iPhone,
+which no session can do remotely. Nothing changed here; this was
+confirmed, not built.
+
+**Phase 22's iMessage READ open decision, resolved and live-verified —
+the largest piece of this entry:** the user granted Full Disk Access
+mid-session specifically to make this buildable AND verifiable rather
+than shipping it "code complete, unverified" like most of this project's
+other permission-gated work. `assistant/mac_tools.py` gained `read_imessages`
+(read-only, ungated) plus `_resolve_chat_identifier` (reuses `contacts_search`'s
+existing AppleScript/output-parsing rather than a second implementation)
+and `_extract_message_text`.
+
+The real engineering content is `_extract_message_text`'s `attributedBody`
+parser. A live query against this Mac's own real `chat.db` found the
+governing fact first, not assumed: only ~28% of a real 30-day sample had
+the plain `text` column populated at all, while `attributedBody` (an
+NSKeyedArchiver "streamtyped"-encoded NSAttributedString) was present on
+100% of them — meaning a naive `SELECT text` implementation would have
+silently returned nothing for most real messages. Building the binary
+parser took real iteration, not a first-try success: an initial regex-based
+heuristic (search for the printable run following the archiver's own
+"NSString" class marker) scored only ~40% on a real sample; root-caused to
+two real bugs, not tuned around with more regex — (1) operating on a
+`.decode("utf-8", errors="replace")` string corrupts the very length-prefix
+BYTES the parser needs to read exactly, since invalid multi-byte sequences
+collapse into a variable number of `�` replacement characters and
+throw off any fixed-offset math; (2) for an `NSMutableString` (vs a plain
+`NSString`), the class-hierarchy preamble declares BOTH "NSMutableString"
+then "NSString" as its superclass, so searching for the FIRST "NSString"
+occurrence lands inside that preamble instead of at the real payload —
+found by testing against actual multi-class blobs, not single-class ones
+alone. Rewritten to parse the RAW bytes directly (never decoded first),
+using `bytes.rfind()` (the LAST "NSString" occurrence, past any class
+hierarchy preamble) and the archiver's real typedstream length-prefix
+encoding (a byte <0x80 is a direct 1-byte length; 0x81/0x82 mean "the
+following 1/2 bytes, big-endian, are the length," for strings whose
+UTF-8 byte length exceeds 127 — covers non-ASCII text, verified against
+real Chinese-language messages in this Mac's own history). Re-validated
+live at each step against real data, not shipped on the first pass that
+merely looked plausible: 150/150, then 499/500, then 998/1000 correct
+extractions across three successive random samples of real chat.db
+messages, English and Chinese text, URLs, and verification codes included.
+
+A real, live-diagnosed routing-blindness bug recurred here too — the
+SAME class this project has independently hit for `render_ui` (Phase 18),
+the kanban board (Phase 20), and the Obsidian vault (Phase 27): both
+`supervisor.py`'s and `mac_control_agent`'s own system prompts still said
+"you CANNOT read past iMessage content, only send" from Phase 22's
+original build. Fixed in both places, re-synced to Langfuse
+(`scripts/sync_prompts_to_langfuse.py`), then re-verified live — not just
+unit-tested — through the real running supervisor with a natural
+conversational request ("What did I last text +15559990000 on iMessage?
+Quote it exactly."): correctly routed to `mac_control_agent`, correctly
+resolved the identifier, correctly read and extracted the real message
+("automation fired ok", the test automation's own message from STEPS.md
+147's cooldown-fix work), correct date. Uses an isolated temp-DB test
+harness (matching `tests/test_server.py`'s own established pattern) for
+this live check, not the user's real running backend/threads.
+
+New `tests/test_mac_tools.py` coverage (14 new tests): `_extract_message_text`
+against synthetic short- and long-form `attributedBody` fixtures built to
+match the real byte layout (not just against real data, which isn't
+reproducible in CI) plus a plain-`text`-preferred case and an unparseable-
+blob case; `read_imessages` end-to-end against a synthetic temp chat.db
+(never the real one, matching `test_disk_tools.py`'s/`test_obsidian_tools.py`'s
+own "real file ops against tempdir, never real Mac state" convention) —
+finds messages by phone number, reports cleanly when none exist, resolves
+a contact name via a mocked `contacts_search`, and reports cleanly when a
+name can't be resolved.
+
+**Verification:** `ruff check .` — same 1 pre-existing, unrelated finding
+as STEPS.md 147 (confirmed via diff, nothing here touches that import).
+`tests/test_media_tools.py` 11/11 pass. `tests/test_mac_tools.py` 45/45
+pass. Full backend `pytest`: 407 passed, 3 failed — all 3 confirmed
+pre-existing and unrelated: a transient `APIConnectionError` on a
+real-API phone-turn test (network flakiness, not this session's code);
+the same already-documented `threads.sqlite` active-thread-pointer flake
+STEPS.md 147 also hit; and `test_supervisor_prompt_disambiguates_apple_and_google_calendar`'s
+already-documented "APPLE" (uppercase) missing from `SUPERVISOR_SYSTEM_PROMPT_FALLBACK`
+(STEPS.md 146 first found this exact gap) — confirmed via `git diff` that
+this session's own supervisor.py edits never touch that text at all, so
+re-syncing prompts to Langfuse for the iMessage-routing fix did not
+introduce or worsen it, only re-affirmed a pre-existing gap. Not
+committed — this is new work on top of STEPS.md 147's own 6 commits,
+proposed as its own separate commit(s) rather than folded into those.
