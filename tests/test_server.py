@@ -1304,6 +1304,23 @@ async def test_fire_disabled_automation_is_skipped_and_logged() -> None:
         )
 
 
+async def test_fire_automation_within_cooldown_is_skipped_and_not_regated() -> None:
+    """A real, live-diagnosed gap: a flaky geofence can refire the same
+    automation repeatedly in a short window, each one a real unattended
+    send. Seeds a prior "fired" run directly (no need to actually fire
+    through the real graph a second time) and confirms an immediate
+    refire is skipped rather than running again."""
+    with TestClient(server.app) as client:
+        created = _create_test_automation(client)
+        await server.automation_store.log_run(created["id"], outcome="fired", detail="test seed")
+
+        fired = client.post(f"/automations/{created['id']}/fire")
+        assert fired.status_code == 200, fired.text
+        body = fired.json()
+        assert body["outcome"] == "skipped"
+        assert "cooldown" in body["detail"].lower()
+
+
 async def test_fire_unknown_automation_returns_404() -> None:
     with TestClient(server.app) as client:
         response = client.post("/automations/does-not-exist/fire")

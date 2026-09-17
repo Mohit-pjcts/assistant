@@ -74,6 +74,7 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from langchain_core.messages import BaseMessage, HumanMessage  # noqa: E402
 from langfuse import Langfuse  # noqa: E402
+from langfuse.api.core.api_error import ApiError  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 from PIL import Image  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -83,6 +84,7 @@ from assistant import (  # noqa: E402
     automation_store,
     board_store,
     claude_code_sessions,
+    cost_cache,
     memory_review_agent,
     memory_store,
     observability,
@@ -160,6 +162,16 @@ if "ASSISTANT_WORKFLOWS_DB_PATH" in os.environ:
 # only with the user, same standing as every other security-model
 # decision in this project.
 AUTOMATION_ELIGIBLE_ACTIONS = {"send_imessage", "send_email"}
+
+# A real gap found in review, not part of the phase's original scope: a
+# flaky geofence (GPS jitter bouncing across the boundary) is a known
+# Shortcuts failure mode and could refire the same automation many times
+# in a few minutes, each one a real unattended message send + API spend.
+# Only counts a previous run whose outcome was actually "fired" — a stale
+# "skipped" (e.g. from being disabled) or "error" run must never block the
+# next real attempt, so re-enabling a disabled automation isn't stuck
+# behind an old skip.
+AUTOMATION_FIRE_COOLDOWN = timedelta(minutes=5)
 
 _COST_WINDOWS: dict[str, timedelta | None] = {
     "today": timedelta(hours=24),
@@ -1805,6 +1817,18 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
         await automation_store.log_run(automation_id, outcome="skipped", detail="automation is disabled")
         return {"outcome": "skipped", "detail": "automation is disabled"}
 
+    recent_runs = await automation_store.list_runs(automation_id)
+    last_fired = next((r for r in recent_runs if r.outcome == "fired"), None)
+    if last_fired is not None:
+        elapsed = datetime.now(UTC) - datetime.fromisoformat(last_fired.fired_at)
+        if elapsed < AUTOMATION_FIRE_COOLDOWN:
+            detail = (
+                f"cooldown active — last fired {last_fired.fired_at}, "
+                f"retry after {AUTOMATION_FIRE_COOLDOWN} has elapsed"
+            )
+            await automation_store.log_run(automation_id, outcome="skipped", detail=detail)
+            return {"outcome": "skipped", "detail": detail}
+
     specialist_name = GATED_ACTIONS.get(automation.action)
     specialist_graph = (
         app.state.automation_specialist_graphs.get(specialist_name) if specialist_name else None
@@ -1949,7 +1973,24 @@ async def cost() -> dict[str, Any]:
     Three windows, queried concurrently. `run_count` comes from
     `uniq(traceId)` over the "observations" view rather than a dedicated
     trace-count endpoint — see `_query_langfuse_cost_sync`'s docstring for
-    why that's equivalent, verified live against the real project."""
+    why that's equivalent, verified live against the real project.
+
+    NEVER throws for a degraded-but-recoverable Langfuse failure — the
+    user's own direct ask, after an earlier version of this endpoint still
+    just returned a bare 429/502 for a real, live-observed rate limit
+    (Langfuse's own metrics API caps at 100 requests/window; this endpoint
+    burns 3 per call, and normal dashboard traffic exhausted that well
+    under a day). Every window ALWAYS gets a value: on a live failure, it
+    falls back to `cost_cache.py`'s durable last-known-good snapshot
+    (marked `stale: true`, with its own `read_at`), or to zeroed
+    placeholders with `no_data: true` if nothing has ever been read yet.
+    A 429 specifically is additionally surfaced as a top-level
+    `rate_limited` object (message/retry_after_seconds/reset_at) so the
+    frontend can show a real countdown — and once `cost_cache.py` knows
+    we're inside that window, this skips calling Langfuse again entirely
+    rather than spending another request just to get the same 429 back.
+    The only real error left is the pre-flight 503 above: Langfuse never
+    configured at all has no history to fall back to either."""
     client = observability.get_client()
     if client is None:
         raise HTTPException(
@@ -1958,21 +1999,59 @@ async def cost() -> dict[str, Any]:
         )
 
     now = datetime.now(UTC)
+    standing_rate_limit = cost_cache.get_rate_limit()
+    skip_live_call = cost_cache.rate_limit_active(standing_rate_limit)
 
-    async def _window(delta: timedelta | None) -> dict[str, Any]:
+    def _stale_window(window_key: str) -> dict[str, Any]:
+        cached = cost_cache.get_window(window_key)
+        if cached is None:
+            summary = _summarize_langfuse_row({})
+            summary.update(stale=True, no_data=True, read_at=None)
+        else:
+            summary = _summarize_langfuse_row(cached["row"])
+            summary.update(stale=True, no_data=False, read_at=cached["read_at"])
+        return summary
+
+    async def _window(
+        window_key: str, delta: timedelta | None
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if skip_live_call:
+            return _stale_window(window_key), standing_rate_limit
+
         start = now - delta if delta else _ALL_TIME_START
         try:
             row = await asyncio.to_thread(_query_langfuse_cost_sync, client, start, now)
         except Exception as exc:
-            raise HTTPException(
-                status_code=502, detail=f"{type(exc).__name__}: {exc}"
-            ) from exc
-        return _summarize_langfuse_row(row)
+            rate_limit_info: dict[str, Any] | None = None
+            if isinstance(exc, ApiError) and exc.status_code == 429 and isinstance(exc.body, dict):
+                details = exc.body.get("details") or {}
+                rate_limit_info = {
+                    "message": exc.body.get("message", "Rate limit exceeded"),
+                    "retry_after_seconds": details.get("retryAfterSeconds"),
+                    "reset_at": details.get("resetAt"),
+                }
+                cost_cache.save_rate_limit(**rate_limit_info)
+            return _stale_window(window_key), rate_limit_info
 
-    results = await asyncio.gather(*(_window(delta) for delta in _COST_WINDOWS.values()))
+        read_at = cost_cache.save_window(window_key, row)
+        summary = _summarize_langfuse_row(row)
+        summary.update(stale=False, no_data=False, read_at=read_at)
+        return summary, None
+
+    results = await asyncio.gather(
+        *(_window(key, delta) for key, delta in _COST_WINDOWS.items())
+    )
+    windows: dict[str, Any] = {}
+    rate_limited: dict[str, Any] | None = None
+    for key, (summary, rl) in zip(_COST_WINDOWS.keys(), results):
+        windows[key] = summary
+        if rl and rate_limited is None:
+            rate_limited = rl
+
     return {
         "project": "langfuse",
-        "windows": dict(zip(_COST_WINDOWS.keys(), results)),
+        "windows": windows,
+        "rate_limited": rate_limited,
     }
 
 
