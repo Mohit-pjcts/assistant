@@ -10,8 +10,6 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from langchain_core.messages import AIMessage
-
 import assistant.obsidian_tools as obsidian_tools
 
 
@@ -28,17 +26,8 @@ def _temp_vault():
             obsidian_tools.VAULT_DIR = original
 
 
-def _writes_call_history(n: int) -> list:
-    """A fake message history containing `n` prior write/update tool calls,
-    for exercising the per-turn cap without actually making n real calls."""
-    return [
-        AIMessage(content="", tool_calls=[{"name": "write_vault_note", "id": f"c{i}", "args": {}}])
-        for i in range(n)
-    ]
-
-
-def _invoke(tool, args: dict, messages: list | None = None):
-    return tool.invoke({**args, "state": {"messages": messages or []}})
+def _invoke(tool, args: dict):
+    return tool.invoke(args)
 
 
 # --- search_vault ---------------------------------------------------------
@@ -123,6 +112,23 @@ def test_write_vault_note_refuses_title_collision() -> None:
         assert vault.joinpath("Existing.md").read_text() == "---\noni: true\n---\n\nAlready here.\n"
 
 
+def test_write_vault_note_refuses_title_collision_with_nested_note() -> None:
+    """Real bug this reproduces: the existence check used to only look at
+    the vault ROOT (_note_path_for_new(title).exists()), so a title
+    colliding with one of the 138 pre-existing nested course notes would
+    wrongly succeed and create a duplicate. Now uses _find_existing_note's
+    whole-tree search instead."""
+    with _temp_vault() as vault:
+        nested = vault / "Semester 1" / "MATH1013"
+        nested.mkdir(parents=True)
+        (nested / "Ch 1 — Functions.md").write_text("---\noni: false\n---\n\nDomain and range.\n")
+        result = _invoke(
+            obsidian_tools.write_vault_note, {"title": "Ch 1 — Functions", "content": "New stuff"}
+        )
+        assert "already exists" in result.lower()
+        assert not (vault / "Ch 1 — Functions.md").exists()
+
+
 def test_write_vault_note_auto_links_related_notes_by_title_overlap() -> None:
     with _temp_vault() as vault:
         (vault / "COMP2113 — Recursion.md").write_text("---\noni: false\n---\n\nBase case, recursive case.\n")
@@ -156,25 +162,16 @@ def test_write_vault_note_creates_vault_dir_if_missing() -> None:
             obsidian_tools.VAULT_DIR = original
 
 
-def test_write_vault_note_respects_per_turn_cap() -> None:
+def test_write_vault_note_has_no_per_turn_cap() -> None:
+    """ADR 0003: the per-turn write cap was removed outright, not just
+    re-scoped — 4+ writes in a row must all succeed."""
     with _temp_vault() as vault:
-        result = _invoke(
-            obsidian_tools.write_vault_note,
-            {"title": "Once Too Many", "content": "x"},
-            messages=_writes_call_history(3),
-        )
-        assert "per-turn cap" in result.lower()
-        assert not (vault / "Once Too Many.md").exists()
-
-
-def test_write_vault_note_under_cap_still_succeeds() -> None:
-    with _temp_vault() as vault:
-        _invoke(
-            obsidian_tools.write_vault_note,
-            {"title": "Fits Under Cap", "content": "x"},
-            messages=_writes_call_history(2),
-        )
-        assert (vault / "Fits Under Cap.md").exists()
+        for i in range(4):
+            result = _invoke(
+                obsidian_tools.write_vault_note, {"title": f"Note {i}", "content": "x"}
+            )
+            assert "cap" not in result.lower()
+            assert (vault / f"Note {i}.md").exists()
 
 
 # --- update_vault_note --------------------------------------------------------
@@ -217,18 +214,6 @@ def test_update_vault_note_missing_note_reports_error() -> None:
     with _temp_vault():
         result = _invoke(obsidian_tools.update_vault_note, {"title": "Nope", "content": "x"})
     assert result.startswith("Error:")
-
-
-def test_update_vault_note_respects_per_turn_cap() -> None:
-    with _temp_vault() as vault:
-        (vault / "Draft.md").write_text("---\noni: true\n---\n\nOld.\n")
-        result = _invoke(
-            obsidian_tools.update_vault_note,
-            {"title": "Draft", "content": "New."},
-            messages=_writes_call_history(3),
-        )
-        assert "per-turn cap" in result.lower()
-        assert "Old." in (vault / "Draft.md").read_text()
 
 
 # --- delete_vault_note --------------------------------------------------------
@@ -293,16 +278,15 @@ if __name__ == "__main__":
         test_read_vault_note_finds_notes_in_subfolders,
         test_write_vault_note_creates_note_with_oni_marker,
         test_write_vault_note_refuses_title_collision,
+        test_write_vault_note_refuses_title_collision_with_nested_note,
         test_write_vault_note_auto_links_related_notes_by_title_overlap,
         test_write_vault_note_no_related_notes_found_still_succeeds,
         test_write_vault_note_creates_vault_dir_if_missing,
-        test_write_vault_note_respects_per_turn_cap,
-        test_write_vault_note_under_cap_still_succeeds,
+        test_write_vault_note_has_no_per_turn_cap,
         test_update_vault_note_replaces_body_and_preserves_oni_marker,
         test_update_vault_note_refuses_note_not_authored_by_oni,
         test_update_vault_note_refuses_note_with_no_frontmatter_at_all,
         test_update_vault_note_missing_note_reports_error,
-        test_update_vault_note_respects_per_turn_cap,
         test_delete_vault_note_deletes_oni_authored_note,
         test_delete_vault_note_refuses_note_not_authored_by_oni,
         test_delete_vault_note_refuses_note_with_no_frontmatter,

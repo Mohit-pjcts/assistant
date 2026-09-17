@@ -21,8 +21,15 @@ a separate weaker one.
 **Oni decides autonomously when to write** (ADR 0002) — `research_agent`/
 `life_admin_agent`'s own system prompts, not this module, carry that
 behavior; nothing here restricts *when* these tools get called, only what
-happens once they are. The one code-level backstop against that autonomy
-turning into a runaway loop is `_MAX_WRITES_PER_TURN` below.
+happens once they are. This module used to cap `write_vault_note`/
+`update_vault_note` at 3 combined calls per specialist invocation as a
+backstop against that autonomy turning into a runaway loop — that cap has
+since been removed outright (ADR 0003), not merely re-scoped; there is no
+per-turn write ceiling of any kind anymore. See ADR 0003 for the full
+reasoning, including the real scoping bug (the cap reset per specialist
+delegation, not per true user turn, so it never actually enforced what it
+claimed to) that prompted revisiting ADR 0002's own "should not be relaxed
+without revisiting this decision" condition on it.
 
 **Vault location:** `~/Documents/OniVault`, a vault dedicated to Oni's own
 notes — never the user's personal vaults (`Courses`, `NovaWorks`) or this
@@ -49,16 +56,11 @@ real filename matches), not left to the model to remember to do via a
 separate `search_vault` call and hand-typed links, which would risk
 hallucinated targets.
 
-**Per-turn write cap** (Decision 10): `write_vault_note`/`update_vault_note`
-combined are capped at `_MAX_WRITES_PER_TURN` calls per specialist
-invocation, checked by counting prior tool-call attempts for either name in
-the conversation's own message history via `InjectedState` — the same
-mechanism `disk_tools.py`'s gated tools use to read `pre_approved_actions`,
-just counting instead of set-membership. No `NoParallel*Writes`-style
-middleware is needed the way `disk_tools.py`/`mac_tools.py` need one, since
-nothing here calls `interrupt()` — the failure mode those middlewares guard
-against (a second same-turn interrupt getting silently stranded) doesn't
-apply to an ungated tool.
+**No per-turn write cap** (superseded Decision 10, see ADR 0003):
+`write_vault_note`/`update_vault_note` used to be capped at 3 combined
+calls per specialist invocation, but the cap was removed outright rather
+than fixed — it was scoped per specialist `ainvoke()`, not per true user
+turn, so Phase 25 workflow chaining could already exceed it in practice.
 """
 
 from __future__ import annotations
@@ -66,33 +68,15 @@ from __future__ import annotations
 import re
 from datetime import date
 from pathlib import Path
-from typing import Annotated, NotRequired, TypedDict
 
-from langchain_core.messages import AIMessage, AnyMessage
 from langchain_core.tools import tool
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import InjectedState
-
-
-class _AgentState(TypedDict):
-    """Mirrors sub_agents.GatedAgentState's relevant shape — duplicated
-    rather than imported to avoid a circular import, same rationale as
-    disk_tools.py's/mac_tools.py's/write_tools.py's own local
-    `_AgentState`."""
-
-    messages: Annotated[list[AnyMessage], add_messages]
-    pre_approved_actions: NotRequired[set[str]]
-
 
 VAULT_DIR = Path.home() / "Documents" / "OniVault"
 
-_MAX_WRITES_PER_TURN = 3
 _MAX_SEARCH_RESULTS = 20
 _MAX_READ_BYTES = 200_000
 _MAX_RELATED_NOTES = 5
 _SNIPPET_RADIUS = 80
-
-_WRITE_TOOL_NAMES = {"write_vault_note", "update_vault_note"}
 
 # Words too generic to drive relatedness matching between Note titles —
 # kept short and hand-picked (not a general stopword list) since titles are
@@ -195,23 +179,6 @@ def _related_notes(title: str, existing_titles: list[str]) -> list[str]:
     return [t for _, t in scored[:_MAX_RELATED_NOTES]]
 
 
-def _count_prior_writes_this_turn(messages: list[AnyMessage]) -> int:
-    """Counts every prior AIMessage tool_call naming write_vault_note or
-    update_vault_note in this conversation, regardless of whether that call
-    succeeded — see module docstring's "Per-turn write cap" section for why
-    attempts (not just successes) count toward the cap. Mirrors
-    circuit_breaker.py's own choice to read tool_calls off the AIMessage
-    rather than trust ToolMessage.name, for the same robustness reason."""
-    count = 0
-    for msg in messages:
-        if not isinstance(msg, AIMessage):
-            continue
-        for call in msg.tool_calls or []:
-            if call.get("name") in _WRITE_TOOL_NAMES:
-                count += 1
-    return count
-
-
 def _frontmatter_block(*, created: str, updated: str | None = None) -> str:
     lines = ["---", "oni: true", f"created: {created}"]
     if updated:
@@ -285,12 +252,7 @@ def read_vault_note(title: str) -> str:
 
 
 @tool
-def write_vault_note(
-    title: str,
-    content: str,
-    *,
-    state: Annotated[_AgentState, InjectedState],
-) -> str:
+def write_vault_note(title: str, content: str) -> str:
     """Create a NEW note in Oni's own note vault — a persistent store for
     information that doesn't need to be loaded every run but might be
     useful later. Redundancy across notes is fine; don't hold back for fear
@@ -305,18 +267,14 @@ def write_vault_note(
         title: The new note's title (becomes its filename).
         content: The note's body (markdown, no frontmatter).
     """
-    prior = _count_prior_writes_this_turn(state["messages"])
-    if prior >= _MAX_WRITES_PER_TURN:
-        return (
-            f"Error: reached the per-turn cap of {_MAX_WRITES_PER_TURN} vault "
-            "writes/updates. Stop here rather than continuing to write more this turn."
-        )
-
     if not VAULT_DIR.exists():
         VAULT_DIR.mkdir(parents=True, exist_ok=True)
 
     path = _note_path_for_new(title)
-    if path.exists():
+    # Whole-tree check, not just the root — a title colliding with one of
+    # the 138 pre-existing nested course notes must also be refused, not
+    # just a collision with something Oni itself wrote at the root.
+    if _find_existing_note(title) is not None:
         return f"Error: a note titled '{title}' already exists — use update_vault_note instead."
 
     existing_titles = [p.stem for p in _iter_notes()]
@@ -336,12 +294,7 @@ def write_vault_note(
 
 
 @tool
-def update_vault_note(
-    title: str,
-    content: str,
-    *,
-    state: Annotated[_AgentState, InjectedState],
-) -> str:
+def update_vault_note(title: str, content: str) -> str:
     """Fully replace an existing note's body in Oni's own note vault — pass
     the COMPLETE new body, not a diff (it replaces everything, same as
     write_disk_file's own overwrite convention). Reads the note's current
@@ -356,13 +309,6 @@ def update_vault_note(
         title: The existing note's exact title.
         content: The complete new body (markdown, no frontmatter).
     """
-    prior = _count_prior_writes_this_turn(state["messages"])
-    if prior >= _MAX_WRITES_PER_TURN:
-        return (
-            f"Error: reached the per-turn cap of {_MAX_WRITES_PER_TURN} vault "
-            "writes/updates. Stop here rather than continuing to write more this turn."
-        )
-
     path = _find_existing_note(title)
     if path is None:
         return f"Error: no note titled '{title}' found in the vault — use write_vault_note to create it."

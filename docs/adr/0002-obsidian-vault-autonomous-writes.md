@@ -24,3 +24,7 @@ cap of 3 combined `write_vault_note`/`update_vault_note` calls (PLAN.md
 Phase 27) is the only backstop against this becoming a runaway-cost or
 runaway-noise loop, and should not be relaxed without revisiting this
 decision.
+
+**Update:** the per-turn write-cap backstop named above was removed
+outright — see ADR 0003. This paragraph's autonomy framing still stands;
+only the cap sentence is superseded.
