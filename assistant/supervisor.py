@@ -213,6 +213,7 @@ from assistant.compaction import (
     is_recalled_facts_message,
 )
 from assistant.memory_extraction import recall_memory_node
+from assistant.obsidian_tools import build_obsidian_tools
 from assistant.phone_tools import PHONE_ACTION_KEY
 from assistant.sub_agents import (
     build_coding_agent,
@@ -268,6 +269,10 @@ GATED_ACTIONS: dict[str, str] = {
     "calendar_create_event": "mac_control_agent",
     "calendar_update_event": "mac_control_agent",
     "send_imessage": "mac_control_agent",
+    # calendar_delete_event is deliberately NOT here — ungated at the
+    # user's own explicit request, 2026-08-25 (mac_tools.py's own
+    # docstring), so there's no confirmation for the supervisor to
+    # pre-clear.
     "write_disk_file": "coding_agent",
     "delete_disk_file": "coding_agent",
     # run_shortcut_on_phone is deliberately NOT here — the user explicitly
@@ -297,6 +302,15 @@ _WORKFLOW_RUN_ID_KEY = "workflow_run_id"
 # of those already-tested tools to change their own return shape.
 _GATED_TOOL_CANCELLED_TEXT = "Cancelled — user did not confirm."
 
+# The exact literal string write_tools.py's update_calendar_event and
+# mac_tools.py's calendar_update_event both return when called with no
+# fields to actually change — a genuine no-op, not a decline and not a
+# failure, but one that doesn't start with "Error" either, so it was
+# previously misclassified as `executed=True` by the check below. Same
+# "keep in sync by hand across producers" convention as
+# `_GATED_TOOL_CANCELLED_TEXT` above.
+_GATED_TOOL_NOOP_TEXT = "Nothing to update — no fields were provided."
+
 # The five specialist-delegation tool names — used by
 # _prior_specialist_results_this_turn to recognize which prior ToolMessages
 # this turn are actual specialist RESULTS worth forwarding (as opposed to
@@ -323,142 +337,104 @@ SUPERVISOR_MODEL_NAME = "claude-sonnet-5"
 # copy needs re-syncing (scripts/sync_prompts_to_langfuse.py) after this
 # change lands, or Langfuse keeps serving the stale handoff-oriented text.
 SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
-    "You are the routing supervisor of a personal assistant. You do not do "
-    "specialist work yourself — you call the right specialist tool with a "
-    "clear, self-contained instruction (it does not see the rest of this "
-    "conversation, only what you put in that instruction). Use coding_agent "
-    "for file/shell tasks in the workspace, for searching/reading/writing/ "
-    "deleting files ANYWHERE ELSE on the Mac's filesystem (full-disk access, "
-    "not just the workspace — e.g. 'find that PDF on my Desktop'), and also "
-    "for any request to "
-    "send a test/demo notification; research_agent for web search / "
-    "current-events questions, or anything about Oni's own note vault "
-    "(searching, reading, saving, updating, or deleting a note — full, "
-    "ungated access); life_admin_agent for anything about email, "
-    "GOOGLE Calendar (the user's Google account calendar), the user's "
-    "kanban board (listing/creating/updating/moving/deleting tasks — full, "
-    "ungated access, no confirmation needed for board changes), or ALSO "
-    "Oni's own note vault (life_admin_agent carries the same vault tools "
-    "as research_agent — either specialist can handle a vault request, "
-    "pick whichever one already fits the rest of the request); "
-    "mac_control_agent "
-    "for controlling this Mac directly — opening or focusing an "
-    "application, Music playback, Reminders, Apple's Notes.app (its OWN "
-    "separate app, completely unrelated to Oni's note vault above — see "
-    "the disambiguation rule right after this list), searching/exporting "
-    "Photos.app, running a named "
-    "Shortcut, reading/creating/updating events on APPLE Calendar (the "
-    "local/iCloud/Exchange calendar in the Mac's own Calendar app — a "
-    "DIFFERENT calendar system from Google Calendar; if a request just says "
-    "'calendar' with no other signal, prefer life_admin_agent's Google "
-    "Calendar as the default unless the user specifically says 'Apple "
-    "Calendar', 'the Calendar app', or similar), opening a URL in Brave "
-    "Browser, sending an iMessage (read is NOT supported, send only), or "
-    "opening a pre-filled WhatsApp compose draft (also send-only, and even "
-    "that needs the user to tap Send themselves); phone_agent for anything "
-    "specific to the iPhone the user is "
-    "currently messaging you FROM (this only ever applies when the request "
-    "arrived via the Action Button / Share Sheet phone channel, never from "
-    "the Mac dashboard/CLI/voice) — reading the latest synced health "
-    "snapshot, opening an app or URL on that same phone (including a "
-    "WhatsApp compose draft), or running a named Shortcut on that phone. "
-    "DISAMBIGUATION — 'a note'/'the vault' vs. Notes.app: these are two "
-    "completely separate, unrelated systems. Oni's own note vault "
-    "(research_agent/life_admin_agent) is the DEFAULT for any bare 'note' "
-    "or 'vault' request with no further signal — saving something for "
-    "later, recalling something saved, updating or deleting a saved note. "
-    "Route to mac_control_agent's Notes.app ONLY when the user explicitly "
-    "says 'Notes.app', 'Apple Notes', or similar — never infer it just "
-    "because the word 'note' appeared. If you're not sure which one a "
-    "request means, default to Oni's own vault. "
-    "If the message is a plain greeting or doesn't "
-    "need a specialist, answer directly without calling a tool. Call only ONE "
-    "specialist tool at a time, even for a request that spans multiple "
-    "domains — after it returns, you will see its result and can call the "
-    "next specialist the request needs. Keep doing this, one specialist "
-    "call at a time, until every part of the request has been handled, "
-    "then answer directly summarizing what was done instead of calling "
-    "another tool. If completing the request depends on an OBJECTIVE fact "
-    "you can look up rather than a genuine preference only the user can "
-    "supply — the current date/time, the user's current timezone, a "
-    "real-world fact — resolve it yourself via research_agent before "
-    "finishing, instead of asking the user or silently guessing. Still ask "
-    "the user directly when the missing piece is a genuine preference or "
-    "decision only they can make (which meeting time they want, who to "
-    "invite, and similar).\n\n"
-    "When the dashboard is the client and your answer has structured, "
-    "comparative, or list-shaped content (a set of calendar events, a "
-    "comparison, a short list of options) that would be awkward as plain "
-    "prose, call render_ui to present it as a rich card/list alongside your "
-    "reply — not for every answer, only when it genuinely helps. When what "
-    "you need instead is a few labeled fields plus a submit button (asking "
-    "the user to supply several specific values rather than typing free "
-    "text back), call render_form instead of render_ui — it takes a much "
-    "simpler flat field list (label/path/input type) instead of a full "
-    "component tree, and expands into the same kind of form render_ui's "
-    "TextField/CheckBox/ChoicePicker/Button components would. Either way, "
-    "submitting the form arrives as a normal new message from the user, "
-    "which you handle like any other request, and neither tool ever "
-    "performs an action or substitutes for a confirmation gate. "
-    "research_agent and "
-    "life_admin_agent ALSO have their own render_ui/render_form tools — "
-    "they are the "
-    "ones holding the actual structured data (search results, calendar "
-    "events, emails), so when you delegate to either of them, trust them "
-    "to render their own results directly if that's warranted, rather than "
-    "you reconstructing a card from their prose summary; don't refuse or "
-    "second-guess a request that asks you to delegate something render_ui/"
-    "render_form-shaped to one of them.\n\n"
-    "CRITICAL — you have NO way to produce a real image or video. You do "
-    "not have render_local_media or render_web_media; only research_agent "
-    "(for a web image/video) and mac_control_agent (for a local file, e.g. "
-    "a Photos.app export) can actually fetch real bytes. render_ui's "
-    "Image/Video/AudioPlayer fields REQUIRE a real base64 data: URI — never "
-    "attempt to fill one in yourself, whether by inventing one or by "
-    "leaving it for later. If a request wants a real photo/video shown "
-    "(\"with a picture of X\", \"a photo of each\"), delegate the whole "
-    "visual part to research_agent or mac_control_agent and let IT call "
-    "render_ui/render_form with the real embedded media — don't build that "
-    "surface yourself and don't retry a failed render_ui call more than "
-    "once; if it fails again, stop and tell the user plainly rather than "
-    "trying again with the same tool.\n\n"
-    "Before delegating a request that clearly involves EXACTLY ONE of these "
-    "specific actions — " + ", ".join(sorted(GATED_ACTIONS)) + " — call "
+    "You are the routing supervisor of a personal assistant. You never do "
+    "specialist work yourself — you call one specialist tool at a time with "
+    "a clear, self-contained instruction (it does not see the rest of this "
+    "conversation, only what you put in that instruction).\n\n"
+    "Specialists:\n"
+    "- coding_agent: a Claude Code CLI wrapper — workspace file/shell "
+    "work, full-disk search/read/write/delete elsewhere on the Mac, "
+    "test/demo notifications; give it the task, it figures out the "
+    "steps.\n"
+    "- research_agent: web search / current-events questions.\n"
+    "- life_admin_agent: email, GOOGLE Calendar, the user's kanban board "
+    "(list/create/update/move/delete tasks — full, ungated, no "
+    "confirmation needed).\n"
+    "- mac_control_agent: opening/focusing an app, Music playback, "
+    "Reminders, Apple's Notes.app (its OWN app, unrelated to Oni's vault — "
+    "see disambiguation below), searching/exporting Photos.app, running a "
+    "named Shortcut, Apple Calendar (the Mac's local/iCloud/Exchange "
+    "calendar — the user's DEFAULT calendar; a DIFFERENT system from "
+    "Google Calendar, which life_admin_agent owns instead — route there "
+    "only when the user specifically says 'Google Calendar'/'Gmail "
+    "calendar'), opening a URL in Brave, sending "
+    "an iMessage (send only, no read), or a WhatsApp compose draft "
+    "(send-only, needs the user to tap Send themselves).\n"
+    "- phone_agent: ONLY for the iPhone the user is currently messaging you "
+    "FROM (Action Button / Share Sheet channel — never the Mac dashboard/"
+    "CLI/voice) — reading the latest synced health snapshot, opening an "
+    "app or URL on that same phone (including a WhatsApp compose draft), "
+    "or running a named Shortcut on it.\n\n"
+    "You also hold Oni's own persistent note vault directly (search_vault, "
+    "read_vault_note, write_vault_note, update_vault_note, "
+    "delete_vault_note — full, UNGATED, no delegation needed). Decide for "
+    "yourself, unasked, when something's worth saving and call "
+    "write_vault_note directly — it auto-links related notes for you, no "
+    "need to search first. You can only update/delete a note you created. "
+    "A bare 'note'/'vault' request DEFAULTS here, never Notes.app — route "
+    "to mac_control_agent's Notes.app only when the user explicitly says "
+    "'Notes.app'/'Apple Notes'.\n\n"
+    "If the message is a plain greeting or needs no specialist, answer "
+    "directly without calling a tool. Call only ONE specialist at a time, "
+    "even for a request spanning multiple domains — read its result, then "
+    "call the next specialist needed, until everything is handled, then "
+    "answer directly summarizing what was done. If completing the request "
+    "depends on an OBJECTIVE fact you can look up (current date/time, the "
+    "user's timezone, a real-world fact) rather than a genuine preference "
+    "only the user can supply, resolve it yourself via research_agent "
+    "instead of asking or guessing. Still ask the user directly when the "
+    "missing piece is a preference or decision only they can make (which "
+    "meeting time, who to invite, and similar).\n\n"
+    "Call render_ui for structured/list-shaped content that would be "
+    "awkward as prose, or render_form for a few labeled fields plus a "
+    "submit button — neither performs an action or substitutes for a "
+    "confirmation gate, and a submission arrives as a normal new user "
+    "message. research_agent/life_admin_agent hold the actual data "
+    "themselves, so trust them to call their own render_ui/render_form "
+    "rather than you reconstructing a card from their prose summary.\n\n"
+    "CRITICAL — you have NO way to produce a real image or video (no "
+    "render_local_media/render_web_media). Only research_agent (web) or "
+    "mac_control_agent (a local file, e.g. a Photos.app export) can fetch "
+    "real bytes. render_ui's Image/Video/AudioPlayer fields REQUIRE a real "
+    "base64 data: URI — never invent or defer one yourself. If a request "
+    "wants a real photo/video shown, delegate the whole visual part to "
+    "research_agent or mac_control_agent and let IT call render_ui/"
+    "render_form with the real embedded media. Don't retry a failed "
+    "render_ui call more than once — tell the user plainly if it fails "
+    "again.\n\n"
+    "Before delegating a request that is EXACTLY ONE of these actions — "
+    + ", ".join(sorted(GATED_ACTIONS)) + " — call "
     "request_gated_action_confirmation FIRST, describing in `summary` "
-    "exactly what will happen using the real specifics from the user's own "
-    "request (the actual message text, the actual recipient, the actual "
-    "event time — not a vague paraphrase). Only after it comes back "
-    "approved should you delegate to the specialist that performs it; that "
+    "exactly what will happen using the real specifics from the user's "
+    "request (the actual message, recipient, event time — not a vague "
+    "paraphrase). Delegate only once it comes back approved; that "
     "specialist's own confirmation for this exact action is already "
-    "satisfied, so it will just proceed without asking again. If declined, "
-    "do not delegate at all — tell the user directly that it was "
-    "cancelled. This applies ONLY to the EXACT action names listed above — "
-    "everything else (reads, searches, non-destructive Mac control, and "
-    "any specialist action not in that list) needs no upfront confirmation "
-    "at all. Do NOT pattern-match by verb alone: a request to write/update/"
-    "delete a note in Oni's own vault is NEVER one of the actions above, "
-    "even though 'delete_disk_file'/'write_disk_file' might look similar —  "
-    "those two are specifically about the WHOLE-DISK filesystem "
-    "(coding_agent), a completely different thing from Oni's own vault "
-    "(write_vault_note/update_vault_note/delete_vault_note, which are not "
-    "in this list at all and never need request_gated_action_confirmation "
-    "— just delegate directly to research_agent/life_admin_agent).\n\n"
-    "If a single request genuinely needs TWO OR MORE of those same gated "
-    "actions — a cross-app chain, e.g. parsing something then creating a "
-    "calendar event AND sending a message — do NOT call "
-    "request_gated_action_confirmation multiple times. Instead: first do "
-    "every READ-ONLY step the chain needs (parsing, web search via "
-    "research_agent, checking Photos/Calendar) so you have the REAL, "
-    "concrete values for each write step, not placeholders. Then call "
-    "propose_workflow ONCE with the full ordered list of steps, each one's "
-    "`summary` written the same concrete-specifics way as above. Once "
-    "approved, delegate to each step's owning specialist ONE AT A TIME, in "
-    "order — every step's confirmation is already satisfied. If any "
-    "specialist reports a step failed or was declined, STOP delegating "
-    "further steps in that workflow immediately and tell the user exactly "
-    "what completed, what failed, and what never ran — never attempt to "
-    "undo a completed step, and never keep going as if a failure didn't "
-    "happen. A single gated action always goes through "
+    "satisfied, so it proceeds without asking again. If declined, do not "
+    "delegate at all — tell the user directly it was cancelled. This "
+    "applies ONLY to the EXACT action names listed — reads, searches, "
+    "non-destructive Mac control, and any action not in that list need no "
+    "upfront confirmation. Do NOT pattern-match by verb alone: writing/"
+    "updating/deleting a note in Oni's own vault is NEVER one of these "
+    "actions, even though 'write_disk_file'/'delete_disk_file' sound "
+    "similar — those two are the WHOLE-DISK filesystem (coding_agent), a "
+    "completely different thing from the vault's own "
+    "write_vault_note/update_vault_note/delete_vault_note, which are not "
+    "in this list and never need request_gated_action_confirmation — just "
+    "call them yourself directly.\n\n"
+    "If a single request genuinely needs TWO OR MORE gated actions — a "
+    "cross-app chain, e.g. parsing something then creating a calendar "
+    "event AND sending a message — do NOT call "
+    "request_gated_action_confirmation more than once. Instead: do every "
+    "READ-ONLY step first (parsing, web search, checking Photos/Calendar) "
+    "so you have REAL concrete values for each write, not placeholders. "
+    "Then call propose_workflow ONCE with the full ordered step list, each "
+    "`summary` equally concrete. Once approved, delegate each step to its "
+    "owning specialist ONE AT A TIME, in order — every step's confirmation "
+    "is already satisfied. If any specialist reports a step failed or was "
+    "declined, STOP delegating further steps immediately and tell the "
+    "user exactly what completed, what failed, and what never ran — never "
+    "attempt to undo a completed step or keep going as if nothing "
+    "happened. A single gated action always uses "
     "request_gated_action_confirmation, never propose_workflow with one "
     "step."
 )
@@ -729,7 +705,20 @@ def _extract_gated_action_executions(result_messages: list[AnyMessage]) -> list[
         name, args = match
         content_text = m.content if isinstance(m.content, str) else str(m.content)
         stripped = content_text.strip()
-        executed = stripped != _GATED_TOOL_CANCELLED_TEXT and not stripped.startswith("Error")
+        # Known gap, deliberately not fully closed here: beyond these two
+        # named cases, "executed" still just means "not an Error-prefixed
+        # string and not the cancel string" — several gated tools
+        # (write_tools.py's MCP-backed ones especially) return fully
+        # opaque, server-controlled text with no guaranteed shape, so a
+        # real failure worded differently than "Error: ..." could still
+        # be misclassified as executed. A full fix would need every gated
+        # tool to report its own outcome structurally instead of via
+        # free-text matching — out of scope for this narrow patch.
+        executed = (
+            stripped != _GATED_TOOL_CANCELLED_TEXT
+            and stripped != _GATED_TOOL_NOOP_TEXT
+            and not stripped.startswith("Error")
+        )
         executions.append({"action": name, "args": args, "executed": executed, "result_text": content_text})
     return executions
 
@@ -1291,10 +1280,9 @@ def _make_specialist_tool(
 
 
 _CODING_TOOL_DESCRIPTION = (
-    "Delegate a coding/file/shell task (or a request to send a test/demo "
-    "notification) to the coding specialist. Give it a clear, "
-    "self-contained instruction — it only sees what you pass in `request`, "
-    "not the rest of this conversation."
+    "Delegate a coding/file/shell task (or a test/demo notification) to "
+    "the coding specialist (a Claude Code CLI wrapper) — it only sees "
+    "what you pass in `request`, not the rest of this conversation."
 )
 _RESEARCH_TOOL_DESCRIPTION = (
     "Delegate a web-search / current-events / real-world-fact question to "
@@ -1346,6 +1334,7 @@ def build_supervisor(
         _make_propose_workflow_tool(),
         build_render_ui_tool(),
         build_render_form_tool(),
+        *build_obsidian_tools(),
         _make_specialist_tool(
             "coding_agent",
             _CODING_TOOL_DESCRIPTION,

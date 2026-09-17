@@ -11911,3 +11911,551 @@ including both of STEPS.md 140's own new landing-view tests, pass
 unmodified against the restructured return); `npm run build` succeeds.
 **Not live-verified** — same standing gap, no connected browser this
 session.
+
+## 142. Landing view: real live-wallpaper still frame as the hero background, dark mode only (2026-08-08)
+
+**What:** the user's own direct request, pointing at
+`/Volumes/LiveWallpaper/LiveWallpaper.app/Contents` — their actual
+running desktop wallpaper (driven by a separate third-party app,
+Wallspace, not the mounted LiveWallpaper.app bundle itself, which ships
+no media of its own) is a torn-paper anime illustration with genuinely
+empty near-black bands at the top and bottom of frame and the art
+centered in the middle third; asked for "hi mohit" at the top and the
+chatbox at the bottom to live in those bands. The still frame was
+captured directly from the real running wallpaper via
+`osascript -e 'tell application "System Events" to get picture of
+desktop 1'` (not from the app bundle, which has no bundled assets
+beyond its own icon) — the terminal session's own `screencapture` only
+sees whatever window is frontmost, which in this session was the
+full-screen terminal itself, not the desktop.
+
+**A real approach decision made before writing any code:** true
+OS-level window transparency (letting the actual live desktop show
+through gaps in the app chrome) was considered and rejected — this is a
+normal resizable/movable Tauri window, not guaranteed to sit flush over
+the desktop, so real compositing would show whatever's actually behind
+the window (Finder, other apps) instead of the artwork most of the
+time. A self-contained background image, downscaled and bundled as a
+real asset (`dashboard/src/assets/landing-hero.jpg`, 1920px wide,
+~245KB, `sips`-resized from the original 3840x2160/761KB capture), is
+the robust choice instead — independent of whatever's really on the
+user's desktop at any given moment.
+
+**Built in `ChatPanel.tsx`'s `isNewChat` branch only** (STEPS.md
+140/141's own landing view; the normal chat-mode return is untouched):
+a `hidden dark:block` absolutely-positioned layer holds the image
+(`bg-cover bg-center`) plus a hand-tuned (not evenly-spaced) 4-stop
+linear-gradient scrim — opaque `var(--void)` at the very top/bottom
+edges fading to fully transparent across the middle ~65% of frame, so
+the artwork's own eyes are never dimmed by the safety scrim meant for
+the greeting/composer's legibility. Scoped to dark mode only,
+deliberately — the artwork's black/red palette has no sensible
+light-mode counterpart, and this app already defaults fresh installs to
+dark (PLAN.md Phase 28). The greeting ("Hi, {name}" / "Where should we
+start?") moved from vertically centered to pinned near the top; a
+`flex-1` spacer keeps the true middle empty on purpose, matching the
+image's own negative space rather than filling it just because room
+existed. The old composer's centered block — composer, category
+filter, suggestion cards — is now one bottom-anchored "dock", composer
+last (bottom-most edge, literally what was asked for), with a
+dark-mode-only floating-glass treatment (`bg-card/70`,
+`backdrop-blur-md`, rounded, bordered) since only dark mode has an
+image behind it to blur; light mode keeps the exact plain treatment it
+already had. The old 2-col suggestion-card grid (which used to occupy
+real vertical space in the middle) was converted to a horizontal-
+scrolling single row of compact cards — the same content, but no longer
+competing with the artwork for the vertical center.
+
+**Verification:** `tsc --noEmit` clean; `npx prettier --check` clean;
+full `vitest run` 159/159 pass (all 24 `ChatPanel.test.tsx` tests pass
+unmodified — the text/role/label contract the tests query against
+`Hi, Mohit` / `Where should we start?` / category buttons / suggestion
+card text / composer placeholder — was preserved exactly, only the
+visual layout around it changed); `npm run build` succeeds, image
+bundled as a real hashed asset. **Live-verified for real, not just
+reasoned through** — no Chrome extension connected this session (same
+standing gap as recent phases), but the user's own already-running dev
+environment was discovered live (`vite` on :1420, the real backend on
+:8000) and driven with a separate headless Playwright/Chromium instance
+(same fallback STEPS.md 134 used): a real screenshot confirms the eyes
+fully unobstructed with the greeting/dock legible over the black bands
+in dark mode, and a second screenshot with the theme toggled confirms
+light mode renders exactly as before (no hero image, no dock chrome,
+same plain layout it always had — only the top/bottom repositioning,
+which is theme-independent, carries over). One pre-existing,
+unrelated artifact surfaced by driving the dev server directly over
+plain HTTP instead of through the real Tauri window: `/threads` came
+back as `index.html` instead of JSON (no Tauri asset-protocol proxy in
+this access path), producing a visible "Unexpected token '<' ... is not
+valid JSON" error banner in both screenshots — an artifact of this
+verification method, not of this change; not touched. Not committed.
+
+## 143. Live-wallpaper hero, take two: real video, full app width, self-contained (2026-08-08)
+
+**What:** direct follow-up to STEPS.md 142, superseding its panel-local
+static-image approach rather than layering on top of it. Three real
+complaints from the user about the first version: (1) "the actual
+wallpaper is wider than that, you shrinked to fit" — STEPS.md 142's
+`bg-cover` background, confined to `ChatPanel.tsx`'s own ~800px center
+column, cropped a meaningful amount off both sides of the wide 16:9
+source; (2) "I want it to be a live picture, like the live wallpaper" —
+142 used a single still frame, not motion; (3) "no daemons outside the
+app, it should run as one single entity" — ruled out relying on the OS
+wallpaper mechanism itself (Wallspace, or any transparent-window
+compositing trick) at runtime.
+
+**Sourcing the real video, not a guess:** `~/Library/Preferences/
+wallspace.app.plist` (`plutil -p`) has `savedWallpaperKey:
+869900687149436` and `savedWallpaperMasterUrl: file:///.../Wallspace/
+Wallpapers/869900687149436.mp4` — the exact ID matching STEPS.md 142's
+own still-frame capture, and NOT the same file as the low-res
+`videos/previewhd/*.mp4` gallery-browsing cache found and set aside
+earlier (STEPS.md 142's own investigation) — this is Wallspace's own
+full-quality master (3840x2160, h264, 60fps, ~15Mbps, 9.4MB, a 4.97s
+loop). `ffmpeg`-transcoded down to `dashboard/src/assets/
+landing-hero.mp4` (1920x1080, 30fps, ~2Mbps, ~1.27MB) — small enough to
+bundle directly into the app as a real asset, closing the "single
+entity" gap outright: nothing at runtime depends on Wallspace being
+installed or running. `landing-hero.jpg` (142's own still) is kept and
+reused as the `<video>`'s `poster` and its `prefers-reduced-motion`
+fallback (a plain `<img>`, gated the same
+`typeof window.matchMedia === "function"`-guarded, computed-once-not-
+live-updated way `AgentActivityGraph.tsx`/`RadialChatSelector.tsx`
+already check this exact media query).
+
+**Full width, moved from ChatPanel to App.tsx:** the hero can only be
+genuinely full-WINDOW-width from the app's own root shell, not from any
+one column inside it — `ChatPanel.tsx`'s local hero layer (image +
+gradient) is removed outright, replaced by a single `onLandingViewChange`
+callback prop that reports its own `isNewChat` up to `App.tsx` (mirrors
+`onActiveThreadChange`'s existing write-only pattern in this codebase),
+with unmount-time cleanup reporting `false` too (Base UI unmounts
+inactive tab panels). `App.tsx` renders a `position: fixed; inset: 0`
+`<video>` (autoplay/loop/muted/playsInline, `object-contain` rather than
+`object-cover` — `contain` is what actually guarantees ZERO horizontal
+cropping at any window width, the literal fix for complaint (1); the
+letterbox bars this trades for blend into both the video's own near-
+black bands and this app's own near-black `--void`) as the very FIRST
+child of the app's root flex container, gated on a new `showHero =
+activeTab === "chat" && landingActive` (dark mode only, unchanged
+reasoning from 142). **A real stacking-order question resolved before
+relying on it, not assumed:** a `position: fixed` descendant normally
+paints ABOVE static in-flow content regardless of DOM order (CSS2.1
+Appendix E) — which would have put the video on top of the sidebar/
+rail instead of behind it. What actually saves this: every one of
+NavRail/the sidebar wrapper/`main`/`<aside>` is a **direct child of the
+same `display:flex` root**, and per the Flexbox spec ALL flex items
+(regardless of their own `position` value) are stacked as if
+`position:relative` — DOM order becomes the tiebreaker among equal
+z-index flex-item siblings again, so the hero (first in DOM, `z-0`)
+correctly paints behind its later siblings. Confirmed live via a real
+screenshot rather than left as reasoned-through theory (see
+Verification below).
+
+**"Single entity" chrome:** `NavRail`/`ThreadSidebar` each gained a
+`transparent?: boolean` prop (App.tsx passes `showHero`) swapping their
+solid `bg-void`/`bg-sidebar` for the same `bg-card/60 backdrop-blur-md`
+glass recipe the dock (142) already used; the right `<aside>` gets the
+same treatment inline (it's local JSX in App.tsx, not a component). All
+three revert to fully opaque the instant `showHero` goes false — either
+a message is sent (`isNewChat` flips) or the user switches tabs away
+from Chat entirely.
+
+**Verification:** `tsc --noEmit`/`npx prettier --check` clean (one
+real prettier finding on `App.tsx` itself, fixed); full `vitest run`
+159/159 pass unmodified — `onLandingViewChange` is optional with a
+no-op default, so `ChatPanel.test.tsx` (which never passes it) is
+unaffected; `npm run build` succeeds, `landing-hero.mp4` bundled as a
+real ~1.27MB hashed asset. **Live-verified for real against the actual
+running dev app** (same discovered `vite`/`:1420` + backend/`:8000`
+pair as 142, driven by the same separate headless Playwright fallback):
+a real screenshot confirms full-window-width coverage with the sidebar/
+rail now visibly translucent (a blurred continuation of the wallpaper
+bleeding through them, confirming the glass treatment is actually
+applying, not just class names that happen to compile); a direct
+`video.currentTime` check across a 1.5s real-time gap (1.96s -> 3.47s,
+`paused: false`, `readyState: 4`, no `video.error`) proves genuine
+playback rather than a frozen frame — the two screenshots alone
+happened to land on a visually similar moment in the loop and would
+have been misleading on their own, so this wasn't just eyeballed;
+clicking over to the History tab and re-checking confirms `<video>` is
+removed from the DOM entirely (not just hidden) and the chrome reverts
+to fully opaque. Not committed.
+
+## 144. Live-wallpaper hero: letterbox seam fix (2026-08-08)
+
+**What:** the user's own direct, screenshot-annotated follow-up to
+STEPS.md 143 — "everything except the seeming borders at the top and
+bottom... looks very out of place. match the color that the top and
+bottom of the livewallpaper end with." Root cause: 143's hero wrapper
+filled `object-contain`'s letterbox bars with this app's own `bg-void`
+(#161619), a deliberately slightly-lit charcoal — visibly lighter than
+the wallpaper's own much darker edge, producing exactly the hard
+border line the screenshot showed. Fixed by sampling the real color
+directly from the asset rather than guessing or rounding to a clean
+value: `PIL`, averaged over the outer ~10px band on both the top and
+bottom edges of `landing-hero.jpg` → `#050105` (near-black with a
+faint magenta cast, matching the source art's own tint) — set as the
+hero wrapper's own `backgroundColor` (a new `LANDING_HERO_LETTERBOX_COLOR`
+constant, `App.tsx`) in place of `bg-void`. Since this recolors the
+wrapper `<div>` itself rather than anything tied to a specific axis,
+it transparently also covers the left/right letterbox case (a wider-
+than-16:9 window) that never actually occurred in testing but is the
+same code path.
+
+**Verification:** `tsc --noEmit`/`npx prettier --check` clean; full
+`vitest run` 159/159 pass unmodified; `npm run build` succeeds.
+Live-verified against the same running dev app (`vite`/`:1420`) via a
+fresh Playwright screenshot: the hard line previously visible just
+above the hairline (and its mirror at the bottom, above the composer
+dock) is gone — the letterbox bars now read as a continuation of the
+footage rather than a border around it. Not committed.
+
+## 145. Landing greeting replaced with an interactive "dialogue cloud" (anime.js) (2026-08-08)
+
+**What:** the user's own direct follow-up — remove the plain "Hi,
+{name}" / "Where should we start?" text block entirely and replace it
+with "a dynamic, cool, interactive element that says 'hey, mohit' as
+something like a dialogue cloud and oni's logo coming from the girl in
+the landing page." New `dashboard/src/components/chat/
+OniGreetingCloud.tsx`: a pill-shaped thought-bubble ("Hey, {name}" next
+to Oni's own hand-drawn `BrandMark` logo, already built for the header
+in Phase 29 Stage 4) with three shrinking, sideways-drifting trailing
+dots underneath — the classic thought-bubble motif, reading as "coming
+from" the hero artwork below it. `BrandMark` draws itself fresh on
+every mount (its own pre-existing `.draw` CSS animation), which is what
+stands in for "the logo coming from her" rather than a bespoke
+particle/emission effect. Renders identically in light mode (no video
+there to visually emerge from — Oni's own greeting doesn't need the
+artwork to make sense on its own; confirmed live). `ChatPanel.tsx`'s
+old greeting markup (`SparklesIcon` + two lines of text) is gone
+outright, not layered under the new element.
+
+**Real anime.js, at the user's own explicit suggestion (animejs.com),
+not hand-rolled CSS keyframes** — installed `animejs@4.5.0` (checked
+via its actual `.d.ts` files before writing any code against it, per
+this project's own verification discipline: v4's real API differs from
+v3 in several ways search summaries alone didn't fully confirm —
+`ease` not `easing`, `Spring`-as-`EasingParam` confirmed directly in
+`types/index.d.ts`, `createScope({root}).add(self => ...)` confirmed
+against `scope/index.d.ts`, array-of-more-than-two-values per-property
+tweens confirmed via `ArraySyntaxValue`'s real type rather than assumed
+from v3 memory). Three real, distinct motions, not one: a spring-eased
+pop-in for the cloud (`spring({stiffness, damping})`, genuine
+overshoot-then-settle, not an eased linear tween) with the three dots
+staggered in right behind it (`stagger(90, {start: 140})`); an idle
+float that only starts once the entrance spring's `onComplete` actually
+fires (chained, not a guessed delay — avoids two `translateY` tweens
+fighting over the same property from the same instant); and a
+hover-triggered elastic "greet" wiggle registered as a named scope
+method (anime.js's own documented React pattern for calling into a
+scoped animation from an event handler) — genuinely reactive to the
+user's own cursor, the actual "interactive" half of the ask, not just
+ambient decoration. `createScope`/`.revert()` scopes every animation to
+the component's own root and tears them all down together on unmount.
+**`prefers-reduced-motion` skips the whole effect outright** rather
+than substituting a reduced version — every element's CSS rest state
+(`index.css`'s new `.oni-cloud*` shape rules, no `@keyframes` at all)
+IS already the fully-settled, fully-visible appearance, so skipping the
+JS entirely still leaves a normal, static, legible greeting; confirmed
+live with a real `reducedMotion: "reduce"` Playwright context, not just
+reasoned through.
+
+**A real, if minor, engineering finding along the way:** tried
+`animejs/animation`/`animejs/scope`/etc. subpath imports first, on the
+assumption that skipping the full barrel (which also bundles SVG path-
+morphing, text-scramble, draggable, and a Three.js adapter this
+component never touches) would shrink the production bundle — checked
+with a real `npm run build` byte-for-byte size diff rather than
+assumed, and it made no difference at all (Rollup already tree-shakes
+the bare `"animejs"` import down to the same size). Reverted to the
+plain barrel import since it's simpler with no real cost; documented
+directly in the component's own import comment so this isn't
+re-investigated from scratch later. Total JS bundle grew ~565KB ->
+~606KB (animejs itself, tree-shaken).
+
+**Verification:** `tsc --noEmit`/`npx prettier --check` clean; full
+`vitest run` 159/159 pass — `ChatPanel.test.tsx`'s two landing-view
+tests updated for the new copy (`/hi, mohit/i` -> `/hey, mohit/i`, and
+the `"Where should we start?"` readiness/absence checks removed
+outright along with the heading itself); `npm run audit` shows 11
+pre-existing vulnerabilities, confirmed via `git stash`/`npm audit` on
+unmodified `main` to be identical with or without `animejs` added, not
+a regression it introduced; `npm run build` succeeds. **Live-verified
+for real against the running dev app**, not just unit-tested: a real
+screenshot sequence (entrance frame, settled idle frame, and a
+hover frame that visibly shows the cloud mid-rotation from the elastic
+wiggle — confirming the interaction genuinely fires, not just that the
+code compiles) plus separate reduced-motion and light-mode context
+screenshots, both rendering a normal static/light-themed cloud with no
+console or page errors in any of the four passes. Not committed.
+
+## 146. Apple Calendar delete gap closed: new `calendar_delete_event` tool (2026-08-25)
+
+**What:** a real gap found live — the user asked Oni to delete an Apple
+Calendar event (COMP1117 STA and others) and `mac_control_agent` reported
+it had no delete capability for Apple Calendar at all, only
+`calendar_list_events`/`calendar_create_event`/`calendar_update_event`
+(`assistant/mac_tools.py`). Confirmed against the code before touching
+anything (this project's own verification discipline) rather than
+assumed from CLAUDE.md's Phase 13 status text, which itself only ever
+claimed create/update — a prior chat turn had incorrectly told the user
+delete was already gated and supported, extrapolating from
+`write_tools.py`'s Phase 12 pattern instead of checking; corrected here.
+
+**Built, mirroring `calendar_update_event`'s existing shape exactly:**
+a new `_CALENDAR_DELETE_EVENT` AppleScript template (finds the event by
+id across all calendars, deletes it, returns `"deleted"`/`"NOTFOUND"`)
+and `calendar_delete_event` (`mac_tools.py`) — reads the event back via
+the existing `_calendar_get_event` first and refuses to proceed blind if
+it can't be found (same read-back-before-gating rule as update), then
+gates via `interrupt()` unless pre-approved via
+`state["pre_approved_actions"]`. **Deliberately given `voice_approvable:
+True`** — the one Apple Calendar gated action that gets this, mirroring
+`write_tools.py`'s own Google Calendar `delete_calendar_event` exception
+(STEPS.md 63): deleting carries no free-text payload to hide an
+injection in, unlike create/update's title/location/notes fields. Wired
+into `mac_tools.GATED_TOOLS`, `supervisor.GATED_ACTIONS` (mapped to
+`mac_control_agent`), and `MAC_CONTROL_SYSTEM_PROMPT_FALLBACK`
+(`sub_agents.py`, re-synced to Langfuse per this project's own Phase
+18/20 lesson that the remote "production" prompt wins over an edited
+local fallback whenever reachable).
+
+**Frontend:** `InterruptGate.tsx` gained
+`AppleCalendarDeleteEventGateBody` (reuses the existing `AppleEventFields`
+read-back renderer, same as update's "Current:" half, with no "changes"
+block since there's nothing to change) plus the matching
+`ACTION_DESCRIPTIONS`/`ACTION_SOURCE`/`ACTION_BODIES` entries — the
+generic `voice_approvable !== false` eyebrow badge logic needed no
+changes to correctly show "Voice OK" for this one action.
+
+**Tests:** 5 new `tests/test_mac_tools.py` cases (read-back-before-gate,
+read-back failure refuses to proceed, declined never invokes the delete
+script, approved invokes it with just the id, and a NOTFOUND-on-resume
+race reported as an error not a silent success) plus a new
+`ChatPanel.test.tsx` case rendering the gate and asserting the Voice OK
+badge. 39/39 `test_mac_tools.py` cases pass; 166/166 frontend `vitest`
+tests pass (some of that count is other, unrelated uncommitted work
+already present in the working tree, not from this fix); `tsc --noEmit`/
+`npx prettier --check` clean on every edited frontend file; `npm run
+build` succeeds. `ruff check .` has exactly the same 1 pre-existing,
+unrelated finding (`supervisor.py`'s `Awaitable`/`Callable` import,
+confirmed via `git stash`) as before this change — nothing new
+introduced. Full backend `pytest` suite: 384 passed, 2 failed — both
+confirmed pre-existing and unrelated via `git stash` (the already-
+documented `threads.sqlite` active-thread-pointer flake, and a
+`SUPERVISOR_SYSTEM_PROMPT` missing "APPLE" — a Langfuse remote-prompt-vs-
+local-fallback mismatch this session has no Langfuse reachability to
+diagnose further, reproducing identically with none of this session's
+own edits applied).
+
+**Not live-verified against the real Calendar.app** — no way to click
+through a real AppleScript confirmation from this session; the user's
+own next step is to try the original delete request again (or run it
+against a disposable test event first) and confirm the gate shows the
+real event content and the delete actually removes it. Not committed.
+
+**Superseded same session, same day: `calendar_delete_event` UNGATED at
+the user's own direct, explicit request** — "make it ungated. dont
+perform any tests." No `interrupt()`, no `state`/`InjectedState`
+parameter, no gate payload at all; still reads the event back first, but
+only to name what was deleted / report a clean "could not find" error,
+not as a confirmation step. Same category of deliberate weakening as
+`open_url_in_brave`'s Phase 13 decision and `run_shortcut_on_phone`'s
+Phase 21 one — moved from `mac_tools.GATED_TOOLS` to `UNGATED_TOOLS`,
+removed from `supervisor.GATED_ACTIONS`, `MAC_CONTROL_SYSTEM_PROMPT_
+FALLBACK` updated to say it deletes immediately, and `InterruptGate.tsx`'s
+now-dead `AppleCalendarDeleteEventGateBody`/registrations removed rather
+than left as unreachable code (same pattern this file already documents
+for `run_shortcut_on_phone`'s deliberate absence). The 5 gated-behavior
+tests this same entry described above no longer describe real behavior
+and were replaced with 3 ungated-behavior tests (invokes immediately with
+no interrupt; missing-id reports a clean error; a delete-time NOTFOUND
+race still surfaces as an error, not a silent success) — the equivalent
+frontend gate-rendering test was removed outright, since this action can
+no longer produce an interrupt payload. **Per the user's own explicit
+instruction, no tests were run this round** — the 3 replacement tests
+are believed correct by inspection (mirror the removed ones' fixture
+setup, updated only for the removed gate) but that belief is unverified,
+unlike every other change in this file. Not committed.
+
+## 147. Bug-fix sweep: 16 items from a backlog audit (grilled + built same session)
+
+**What:** a separate session first produced a prioritized improvement
+backlog for Oni by reading CLAUDE.md/PLAN.md/STEPS.md and reviewing the
+then-uncommitted diff plus two files that diff never touched
+(`claude_code_tool.py`, `claude_code_sessions.py`) — 16 bugs, 8 already-
+known open items (mostly blocked on the user's own macOS permission
+clicks), 7 feature ideas. A `/grill-with-docs` session then scoped "fix
+all 16 bugs, nothing else" — confirmed as its own scope boundary, not the
+open items or feature ideas — and built them in one pass, per the user's
+own explicit instruction to keep test additions minimal and run the full
+verification suite once at the end rather than after each item (to hold
+down token/API cost).
+
+**Two items became real decisions during grilling, not just mechanical
+fixes:**
+- The Obsidian per-turn write cap (3 combined `write_vault_note`/
+  `update_vault_note` calls) was found to be scoped incorrectly — it
+  resets on every fresh specialist `ainvoke()`, not per true user turn, so
+  Phase 25 workflow chaining could already exceed it. `docs/adr/0002-*`'s
+  own Consequences paragraph said this cap "should not be relaxed without
+  revisiting this decision"; offered the choice between fixing the scope
+  or removing the cap outright, the user chose **removal**. Recorded as
+  `docs/adr/0003-vault-write-cap-removed.md` (new), with a pointer
+  addendum on ADR 0002 and on PLAN.md's own Phase 27 Decision 10 — per
+  this project's "superseded decisions stay in the log with a pointer"
+  convention, not a silent rewrite. The now-fully-unused `state`/
+  `InjectedState` parameter and `_AgentState` TypedDict were removed from
+  `obsidian_tools.py` too, at the user's confirmation.
+- The workflow-audit misclassification bug (`_extract_gated_action_
+  executions`, supervisor.py) turned out to need converting all 14 gated
+  tools across 4 files to `Command` returns to fix comprehensively. Told
+  the user the true size before building; the answer ("whatever's
+  faster") was read as: take the **narrow patch** instead — special-case
+  the one concretely-diagnosed no-op string
+  (`"Nothing to update — no fields were provided."`, both
+  `write_tools.py:496`'s and `mac_tools.py:947`'s exact text) via a new
+  `_GATED_TOOL_NOOP_TEXT` constant, leaving the deeper "12 gated tools'
+  success detection is still just string-matching on opaque text" gap
+  documented in a code comment rather than closed.
+
+**All 16 fixes, by file:**
+- `assistant/media_tools.py`: `render_web_media`'s SSRF guard rewritten
+  from `_is_safe_public_host(host) -> bool` to `_resolve_safe_ip(host) ->
+  str | None`, and the fetch now pins the actual TCP connection to that
+  one validated IP (`client.build_request` + `request.url.copy_with(host=
+  safe_ip)` + `extensions={"sni_hostname": original_host}`) instead of
+  letting httpx re-resolve the hostname a second time at connect — closes
+  a real DNS-rebinding TOCTOU window. Verified against BOTH a real live
+  HTTPS fetch (Wikimedia, confirmed the fetch pipeline runs end-to-end
+  through the pinned connection) and a real private-IP rejection
+  (`127.0.0.1` still refused) before writing the test, not just reasoned
+  through. New `tests/test_media_tools.py` (one test, scoped to this fix
+  only — full `media_tools.py` coverage is a separate, still-open task).
+- `assistant/disk_tools.py`: `_is_credential_path` case-folded on both
+  sides (APFS is case-insensitive-but-preserving; `~/.SSH/ID_RSA` used to
+  bypass the denylist entirely). `search_disk` now resolves each `mdfind`
+  result before the credential check, matching read/write/delete's
+  existing pattern (a symlink into a denylisted directory used to show its
+  innocuous-looking name in results). Two new tests.
+- `assistant/claude_code_sessions.py`: `read_session` gained resolve-then-
+  `relative_to` containment against `_project_dir()` — a `session_id`
+  containing `..`/`/` used to be able to read a `.jsonl` file anywhere on
+  disk via `GET /claude-code-sessions/{session_id}`. No UUID-shape
+  requirement (existing fixtures use plain strings like `"session-a"`).
+  One new test proving a real file outside the project dir stays
+  unreachable even when it exists.
+- `assistant/server.py`: new `AUTOMATION_FIRE_COOLDOWN` (5 minutes) on
+  `/automations/{id}/fire` — only counts a prior run whose outcome was
+  actually `"fired"` (a stale `"skipped"`/`"error"` run never blocks the
+  next real attempt). Closes a real gap: a flaky geofence (GPS jitter) is
+  a known Shortcuts failure mode and could have refired the same
+  unattended automation repeatedly. One new test (seeds a prior "fired"
+  run directly rather than firing the real graph twice, to avoid a second
+  real API call).
+- `assistant/obsidian_tools.py`: per-turn write cap removed outright (see
+  above); `write_vault_note`'s duplicate-title check switched from a
+  root-only `.exists()` check to `_find_existing_note`'s whole-tree
+  search — a title colliding with one of the 138 pre-existing nested
+  course notes used to silently create a duplicate at the vault root.
+  Module docstring and both tools' docstrings rewritten to stop
+  describing the removed cap. Tests: the two cap-behavior tests replaced
+  with one no-cap regression test; one new nested-collision test.
+- `assistant/a2ui.py`: `validate_surface` gained a DFS-from-`"root"`
+  acyclic check (two sets — `visiting`/`visited` — so a legitimate DAG,
+  the same child id referenced from two different parents, isn't wrongly
+  rejected; only a true back-edge to an ancestor still on the recursion
+  stack is a real cycle) — a cyclic component tree used to pass
+  validation and would have caused unbounded recursion client-side.
+  `dashboard/src/components/chat/A2UIRenderer.tsx`'s `RenderNode` gained
+  a matching `visited` guard as defense-in-depth (every intermediate
+  renderer already forwards `{...rest}`, so this needed zero changes to
+  any of them — only the one recursive chokepoint). Two new backend
+  tests (one cycle case, one DAG-false-positive regression case); no
+  dedicated frontend test (the backend guard is the real one).
+- `assistant/supervisor.py`: the narrow audit-misclassification patch
+  (see above). One new test reproducing the originally-diagnosed bug
+  directly.
+- `assistant/cost_cache.py`: `_save` rewritten to write-to-temp-then-
+  `os.replace()` instead of a direct write — fixes real crash-mid-write
+  corruption risk (a truncated, unparseable file that then failed every
+  future `_load()`, silently losing all cached history). Does NOT fix
+  the separate lost-update race between two concurrent saves — left as
+  documented, accepted, best-effort, consistent with this module's own
+  framing. This file itself was previously undocumented anywhere in
+  CLAUDE.md despite being a real, working addition — now has a Tech
+  stack bullet. One new test (corrupted-file-fails-soft).
+- `CLAUDE.md`: four edits, each flagged for the user's own review rather
+  than treated as routine — a new Security model bullet naming
+  `run_claude_code` (`assistant/claude_code_tool.py`) as a named, bounded
+  exception to the whole section (it was fully undocumented there
+  despite being, by a wide margin, the largest live ungated-access
+  surface in the project); the Confirmation rule paragraph extended to
+  name the separate, newer, fully-ungated Apple Calendar
+  `calendar_delete_event` alongside the existing (still-gated,
+  voice-approvable) Google Calendar delete exception it used to
+  conflate; the Phase 27 status block corrected for real doc drift found
+  in review (Obsidian vault tools moved off `research_agent`/
+  `life_admin_agent` onto the supervisor itself in the diff this session
+  started from — confirmed intentional, not accidental, before
+  correcting the text); a new Tech stack bullet for `cost_cache.py`.
+- `PLAN.md`: Phase 27's Decision 3 and Decision 10 each got a pointer
+  note (ownership move; cap removal via ADR 0003) rather than a rewrite.
+- `dashboard/src/components/cost/RateLimitCountdown.tsx`: new optional
+  `onExpire` prop, fired exactly once per distinct `resetAt` value the
+  moment the countdown crosses to zero (a ref keyed on `resetAt`, not a
+  plain boolean, so a genuinely new rate-limit window can still fire its
+  own expiry) — wired to `CostPanel.tsx`'s `load()`. Previously the
+  countdown just silently rendered nothing past expiry with no signal to
+  refetch. New `RateLimitCountdown.test.tsx` (2 cases) doubles as this
+  component's first-ever test coverage.
+- `dashboard/src/components/chat/OniGreetingCloud.tsx`: the idle-float
+  animation (started inside the pop-in spring's `onComplete`, i.e. after
+  `createScope(...).add(...)`'s own synchronous callback already
+  returned — outside anime.js's documented auto-tracking window) now has
+  its own captured `JSAnimation` handle, explicitly `.revert()`-ed in
+  cleanup before the scope's own revert. `animate()`'s real return type
+  and `.revert()` method confirmed against the installed `animejs@4.5.0`
+  `.d.ts` files first, not assumed. New `OniGreetingCloud.test.tsx` (one
+  test, mocking `animejs`) — this component's first-ever test coverage;
+  a wrong initial `matchMedia` mock polarity (this component queries
+  `"(prefers-reduced-motion: reduce)"` directly, opposite polarity from
+  `RateLimitCountdown`'s `"no-preference"` query) caused a real false
+  failure before the test was fixed.
+- `dashboard/src/components/cost/CostTrace.tsx`: new
+  `CostTrace.test.tsx` (one minimal render test — purely decorative,
+  `aria-hidden`, no data binding) — this component's first-ever test
+  coverage.
+
+**Verification (run once at the end, per the user's own explicit
+instruction, not after each item):** `ruff check .` — 1 finding, the same
+pre-existing `supervisor.py` `Awaitable`/`Callable` import this project's
+own status log has flagged before, confirmed unrelated by reading the
+diff (nothing in this session's edits touches that import). `tsc
+--noEmit` clean. `npx prettier --check` — one new file
+(`OniGreetingCloud.test.tsx`) needed formatting, fixed. Full frontend
+`vitest run`: 169/169 pass (10 new, 0 regressions). `npm run build`
+succeeds (the "chunk larger than 500kB" warning is pre-existing, about
+the app bundle in general, not introduced here). Full backend `pytest`:
+389/392 pass, 3 failures — each confirmed pre-existing and unrelated by
+inspection (this session's own `git stash` was blocked by Claude Code's
+auto-mode classifier as a destructive local action, so this was checked
+via `git diff` reasoning instead of the usual stash-based confirmation):
+a transient `APIConnectionError` on the real-API streaming test; the
+project's own long-documented `threads.sqlite` active-thread-pointer
+flake; and a `SUPERVISOR_SYSTEM_PROMPT_FALLBACK` missing "APPLE" —
+traced via `git diff` to a rewrite that was ALREADY present in the
+working tree's uncommitted diff before this session started (this
+session's own supervisor.py edits never touch that constant), the exact
+same failure this project's own STEPS.md 146 already flagged as
+reproducing identically with no edits applied.
+
+**Not live-verified in a real browser or against real device state** —
+same standing gap as every recent frontend-touching session; no browser
+access this session either. `run_claude_code` real hardening (the 5
+sub-items its own module docstring lists) and full `media_tools.py`
+coverage remain explicitly open, not silently closed by this pass. Not
+committed — proposed commit grouping given to the user directly rather
+than drafted here, since grouping is a git-workflow decision, not a
+build fact.

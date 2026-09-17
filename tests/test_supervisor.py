@@ -337,6 +337,22 @@ def test_extract_gated_action_executions_treats_error_result_as_not_executed() -
     ]
 
 
+def test_extract_gated_action_executions_treats_noop_update_as_not_executed() -> None:
+    """A real bug this reproduces directly: update_calendar_event/
+    calendar_update_event's "nothing to change" no-op result doesn't start
+    with "Error" and isn't the cancel string, so it used to be
+    misclassified executed=True even though nothing actually happened."""
+    messages: list[Any] = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "update_calendar_event", "args": {"event_id": "e1"}, "id": "call-1"}],
+        ),
+        ToolMessage(content="Nothing to update — no fields were provided.", tool_call_id="call-1"),
+    ]
+    executions = _extract_gated_action_executions(messages)
+    assert executions[0]["executed"] is False
+
+
 async def _record_progress_for_test(tmp_path: Path, executions_sequence: list[list[dict[str, Any]]]) -> str:
     db_path = tmp_path / "workflows.sqlite"
     run = await workflow_store.create_run(

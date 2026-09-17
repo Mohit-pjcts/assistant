@@ -2837,6 +2837,10 @@ here that carry real, standing consequences.
 3. **Ownership:** `research_agent` + `life_admin_agent` only, to start —
    mirrors the `render_ui`/`render_form` precedent (Phase 18) rather than
    wiring into all four specialists immediately.
+   **Superseded:** vault tool ownership later moved onto the supervisor
+   itself (`supervisor.py`'s own `build_obsidian_tools()` call) — neither
+   specialist carries these tools anymore. See the "Delivered" section
+   below for what's actually current.
 4. **Vault:** a brand-new, dedicated vault at `~/Documents/OniVault` —
    sibling to the user's other vaults, not nested in either, not reusing
    this repo's own vault or the user's personal ones.
@@ -2875,6 +2879,10 @@ here that carry real, standing consequences.
     `mac_tools.py` need one, since nothing here calls `interrupt()` — that
     failure mode (a second same-turn interrupt getting stranded) doesn't
     apply to an ungated tool.
+    **Superseded — this cap was removed outright, not fixed, during a
+    later bug-fix pass: it was scoped per specialist delegation rather
+    than per true user turn, so it never enforced what it claimed to. See
+    `docs/adr/0003-vault-write-cap-removed.md` for the full reasoning.**
 11. **Search/read scope:** confined to the Vault directory only, not
     whole-disk like `disk_tools.py`. Implemented as a directory walk +
     text search, not Spotlight/`mdfind` — a Note written moments earlier
@@ -2912,7 +2920,12 @@ Workspace) and first two ADRs (`docs/adr/0001-*`, `0002-*`).
   and removes any risk of a hallucinated link target.
 - Wired into `research_agent`/`life_admin_agent` (`sub_agents.py`), both
   system prompts extended with "decide for yourself, don't ask permission
-  first" language per Decision 7/`docs/adr/0002-*`. `supervisor.py`'s
+  first" language per Decision 7/`docs/adr/0002-*`. **Superseded — a later
+  bug-fix pass moved vault tool ownership onto the supervisor itself
+  (`supervisor.py:216,1315`'s own `build_obsidian_tools()` call);
+  `sub_agents.py` no longer references obsidian tools at all. Confirmed
+  intentional, not drift, when caught; docs corrected to match the real
+  current ownership.** `supervisor.py`'s
   routing clause updated to name the vault explicitly for both
   specialists — the routing-blindness risk this entry already flagged
   (Phases 18/20's own precedent) was treated as assumed-to-recur, not

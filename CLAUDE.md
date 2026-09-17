@@ -773,11 +773,17 @@ See PLAN.md.
   fixed during live verification, corrected the same day, STEPS.md
   127).** A
   "second brain"-style persistent note-store, distinct from
-  `memory_store.py`'s small curated Facts, that `research_agent`/
-  `life_admin_agent` can search/read/write/update/delete via new
-  `assistant/obsidian_tools.py` — fully ungated (`docs/adr/0001-*`), with
-  Oni deciding for itself when something's worth saving rather than
-  waiting to be asked (`docs/adr/0002-*`). The scoping session was the
+  `memory_store.py`'s small curated Facts, searchable/writable/updatable/
+  deletable via new `assistant/obsidian_tools.py` — fully ungated
+  (`docs/adr/0001-*`), with Oni deciding for itself when something's worth
+  saving rather than waiting to be asked (`docs/adr/0002-*`). **Ownership
+  note (corrected during a later bug-fix pass, found as real doc drift,
+  confirmed intentional):** originally wired into `research_agent`/
+  `life_admin_agent` only (PLAN.md's own Phase 27 Decision 3); a later,
+  uncommitted change moved these tools onto the supervisor itself instead
+  (`supervisor.py:216,1315`'s own `build_obsidian_tools()` call) —
+  `sub_agents.py` no longer references obsidian tools at all. The scoping
+  session was the
   first time `/grill-with-docs`'s own named `/domain-modeling` dependency
   was actually installed rather than missing (Phase 25's own scoping
   session, STEPS.md 117, had to fall back to logging decisions directly in
@@ -1334,7 +1340,14 @@ filtering content.
   in, unlike every other gated action here (STEPS.md 63); Gmail filter
   delete does NOT get the same exception, since identifying which filter is
   being removed requires reading its forward-target/criteria content aloud
-  (STEPS.md 64).
+  (STEPS.md 64). **A separate, further exception:** `mac_tools.py`'s Apple
+  Calendar `calendar_delete_event` (STEPS.md 146, 2026-08-25) is not just
+  voice-approvable but fully **ungated** — no `interrupt()` at all, not in
+  `GATED_ACTIONS` — a deliberate weakening made at my own direct request,
+  same category of decision as `open_url_in_brave` (Phase 13) and
+  `run_shortcut_on_phone` (Phase 21). This is a different tool from the
+  Google Calendar delete described above, which stays gated (voice-
+  approvable, not ungated).
   **Memory writes are a deliberate exception to the interrupt() mechanism
   (re-architected 2026-07-28, at my direct request):** durable long-term
   memory facts no longer go through a live, blocking interrupt() during the
@@ -1366,6 +1379,23 @@ filtering content.
   (Anthropic/Claude-Code-team) skills are the default preference over
   community ones. Same standing as the rest of this security model — do not
   weaken without discussion.
+- **`run_claude_code` is a named, bounded exception to this whole section
+  (2026-08-06):** `assistant/claude_code_tool.py`'s `run_claude_code`
+  (`coding_agent`'s own delegate for actual coding/file/shell work) runs a
+  real, separate Claude Code CLI session (`claude --print
+  --dangerously-skip-permissions`) rooted at `$HOME`, with none of this
+  project's own denylists, workspace confinement, or `interrupt()` gates in
+  the path — it can read, write, or delete anything reachable from `$HOME`
+  and run any shell command, fully ungated. Chosen deliberately, not an
+  oversight, because a `subprocess.run()` call has no way to answer one of
+  Claude Code's own permission prompts anyway (it would just hang on
+  stdin). See the module's own docstring for the full reasoning (including
+  why it bills the Claude.ai subscription, not this project's Console API
+  key) and its own explicitly-listed, not-yet-implemented hardening
+  options (dropping `--dangerously-skip-permissions` for
+  `--permission-mode`/`--allowedTools`, a disposable worktree instead of
+  real `$HOME`, routing through `interrupt()`, a spend cap, narrower
+  `--add-dir` scoping).
 
 ## Tech stack
 
@@ -1427,6 +1457,18 @@ filtering content.
   section below.
 - Packaging: pyproject.toml is the source of truth (provides the `assistant`
   console script); requirements.txt is a flat mirror. Keep both in sync.
+- **`assistant/cost_cache.py`** (added 2026-08-08/09, previously undocumented
+  here): a small flat-JSON durable fallback for `/cost` (server.py) —
+  Langfuse's own metrics API rate-limits at 100 requests/window, and this
+  persists the last real per-window figures (today/week/all_time) plus one
+  rate-limit record to `cost_cache.json` (gitignored) so a request seconds
+  after a backend restart (which `--reload` triggers constantly in dev)
+  still has real history to fall back on instead of showing a bare error.
+  Deliberately a flat file, not a new SQLite store — holds exactly one
+  small object, queried by nothing else, never grows. Writes go through a
+  temp-file-then-`os.replace()` atomic swap (fixes crash-mid-write
+  corruption); the separate lost-update race between two concurrent writes
+  is a known, accepted, best-effort gap, not fixed.
 
 ## Verification discipline
 

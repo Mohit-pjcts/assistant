@@ -95,17 +95,26 @@ _CREDENTIAL_FILENAMES = {
     ".git-credentials",
 }
 
+# Lowercased once at import time — macOS's default APFS filesystem is
+# case-insensitive-but-preserving, so `~/.SSH/ID_RSA` resolves to the same
+# real file as `~/.ssh/id_rsa` but wouldn't match either check above
+# without folding case on both sides.
+_CREDENTIAL_DIR_PREFIXES_LOWER = tuple(p.lower() for p in _CREDENTIAL_DIR_PREFIXES)
+_CREDENTIAL_FILENAMES_LOWER = {n.lower() for n in _CREDENTIAL_FILENAMES}
+
 
 def _is_credential_path(path: Path) -> bool:
     """True if `path` (already resolved by the caller) is credential/
     secret-shaped and must never be searched, read, written, or deleted
-    by this module's tools."""
-    resolved = str(path)
-    if any(resolved.startswith(prefix) for prefix in _CREDENTIAL_DIR_PREFIXES):
+    by this module's tools. Case-insensitive, matching APFS's own
+    case-insensitive-but-preserving default behavior."""
+    resolved = str(path).lower()
+    if any(resolved.startswith(prefix) for prefix in _CREDENTIAL_DIR_PREFIXES_LOWER):
         return True
-    if path.name in _CREDENTIAL_FILENAMES:
+    name_lower = path.name.lower()
+    if name_lower in _CREDENTIAL_FILENAMES_LOWER:
         return True
-    if path.name.startswith(".env"):
+    if name_lower.startswith(".env"):
         return True
     return False
 
@@ -141,7 +150,10 @@ def search_disk(query: str, directory: str = "") -> str:
         return f"Error: {result.stderr.strip() or 'mdfind failed'}"
 
     all_paths = [line for line in result.stdout.splitlines() if line.strip()]
-    visible = [p for p in all_paths if not _is_credential_path(Path(p))]
+    # Resolve each result before the credential check — matches read/write/
+    # delete's own pattern, so a symlink into a denylisted directory can't
+    # show its (otherwise-innocuous-looking) name in search results.
+    visible = [p for p in all_paths if not _is_credential_path(Path(p).resolve())]
     hidden_count = len(all_paths) - len(visible)
     if not visible:
         base = "No matching files found."

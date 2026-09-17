@@ -124,6 +124,18 @@ def test_read_session_returns_none_for_missing_session(monkeypatch, tmp_path) ->
     assert ccs.read_session("does-not-exist") is None
 
 
+def test_read_session_blocks_path_traversal(monkeypatch, tmp_path) -> None:
+    """A session_id containing '..' must not escape _project_dir(), even
+    when a real file exists at the path traversal would resolve to."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    project_dir = tmp_path / ".claude" / "projects" / str(tmp_path).replace("/", "-")
+    project_dir.mkdir(parents=True)
+    outside_target = tmp_path / "secrets.jsonl"
+    outside_target.write_text('{"type": "user", "message": {"content": "leaked"}}\n')
+
+    assert ccs.read_session("../../../secrets") is None
+
+
 def test_list_sessions_skips_malformed_lines(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     project_dir = tmp_path / ".claude" / "projects" / str(tmp_path).replace("/", "-")

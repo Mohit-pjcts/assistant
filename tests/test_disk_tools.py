@@ -111,6 +111,14 @@ def test_is_credential_path_allows_ordinary_user_files() -> None:
     assert not disk_tools._is_credential_path(Path.home() / "Downloads" / "invoice.csv")
 
 
+def test_is_credential_path_blocks_mixed_case_paths() -> None:
+    """APFS (macOS's default filesystem) is case-insensitive-but-preserving
+    — a differently-cased path resolves to the same real file and must be
+    blocked the same as its canonical-case form."""
+    assert disk_tools._is_credential_path(Path.home() / ".SSH" / "ID_RSA")
+    assert disk_tools._is_credential_path(Path("/tmp/x/.ENV.production"))
+
+
 # --- search_disk (mocked subprocess) -----------------------------------------
 
 
@@ -149,6 +157,33 @@ def test_search_disk_hides_credential_paths_from_results() -> None:
     assert "invoice.pdf" in result
     assert "invoice2.pdf" in result
     assert "id_rsa" not in result
+    assert "hidden" in result.lower()
+
+
+def test_search_disk_hides_symlinks_resolving_into_credential_paths() -> None:
+    """A symlink whose own name looks innocuous but resolves into a
+    denylisted directory must still be hidden — mirrors read/write/delete's
+    resolve-before-check behavior, which search_disk didn't previously
+    share (it checked the raw mdfind path string)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        real_secret_dir = Path(tmp) / "real_ssh"
+        real_secret_dir.mkdir()
+        (real_secret_dir / "id_rsa").write_text("PRIVATE KEY")
+        innocuous_link = Path(tmp) / "totally_normal_file"
+        innocuous_link.symlink_to(real_secret_dir / "id_rsa")
+
+        original = disk_tools.subprocess.run
+
+        def fake_run(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=str(innocuous_link), stderr="")
+
+        disk_tools.subprocess.run = fake_run
+        try:
+            result = disk_tools.search_disk.invoke({"query": "id_rsa"})
+        finally:
+            disk_tools.subprocess.run = original
+
+    assert "totally_normal_file" not in result
     assert "hidden" in result.lower()
 
 
@@ -289,10 +324,14 @@ if __name__ == "__main__":
     print("OK: test_is_credential_path_blocks_env_files_anywhere")
     test_is_credential_path_allows_ordinary_user_files()
     print("OK: test_is_credential_path_allows_ordinary_user_files")
+    test_is_credential_path_blocks_mixed_case_paths()
+    print("OK: test_is_credential_path_blocks_mixed_case_paths")
     test_search_disk_passes_query_and_scope_as_argv()
     print("OK: test_search_disk_passes_query_and_scope_as_argv")
     test_search_disk_hides_credential_paths_from_results()
     print("OK: test_search_disk_hides_credential_paths_from_results")
+    test_search_disk_hides_symlinks_resolving_into_credential_paths()
+    print("OK: test_search_disk_hides_symlinks_resolving_into_credential_paths")
     test_read_disk_file_reads_a_real_ordinary_file()
     print("OK: test_read_disk_file_reads_a_real_ordinary_file")
     test_read_disk_file_refuses_credential_shaped_filename()

@@ -89,8 +89,22 @@ def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
 
 
 def read_session(session_id: str) -> dict[str, Any] | None:
-    """Return the parsed transcript for one session, or None if not found."""
-    path = _project_dir() / f"{session_id}.jsonl"
+    """Return the parsed transcript for one session, or None if not found.
+
+    `session_id` arrives straight from the dashboard's `GET
+    /claude-code-sessions/{session_id}` path param — resolve-then-
+    relative_to containment (same pattern used elsewhere in this project
+    for untrusted path-shaped input) blocks a `session_id` containing `..`
+    or `/` from escaping `_project_dir()`, while leaving arbitrary
+    non-UUID single-component ids (this module's own test fixtures use
+    ones like "session-a") working exactly as before."""
+    project_dir = _project_dir()
+    candidate = (project_dir / f"{session_id}.jsonl").resolve()
+    try:
+        candidate.relative_to(project_dir.resolve())
+    except ValueError:
+        return None
+    path = candidate
     if not path.is_file():
         return None
     events = _read_jsonl(path)
