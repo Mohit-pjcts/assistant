@@ -471,6 +471,57 @@ def validate_surface(surface: Any) -> None:
             raise ValueError(f"component {comp_id!r} ({comp_type}) is missing required field(s): {sorted(missing)}")
         _validate_component_fields(comp_id, comp_type, comp, by_id)
 
+    _check_acyclic(by_id)
+
+
+def _child_ids(comp_type: str, comp: dict) -> list[str]:
+    """The child-component-id references a given component type can carry
+    — every field already validated as "must reference a known component
+    id" by `_validate_component_fields` above. Used only by the cycle
+    check below."""
+    if comp_type in ("Row", "Column", "List"):
+        return [c for c in comp.get("children") or [] if isinstance(c, str)]
+    if comp_type in ("Card", "Button"):
+        child = comp.get("child")
+        return [child] if isinstance(child, str) else []
+    if comp_type == "Tabs":
+        return [
+            t["child"]
+            for t in comp.get("tabs") or []
+            if isinstance(t, dict) and isinstance(t.get("child"), str)
+        ]
+    if comp_type == "Modal":
+        return [comp[f] for f in ("trigger", "content") if isinstance(comp.get(f), str)]
+    return []
+
+
+def _check_acyclic(by_id: dict[str, dict]) -> None:
+    """A component tree is a DAG in general — the SAME leaf id may
+    legitimately be referenced as a child from two different parents (e.g.
+    one Text reused inside two different Rows) — so a plain "already seen"
+    set would wrongly reject that. Only a true back-edge to an ancestor
+    still on the current recursion stack (`visiting`) is a real cycle;
+    `visited` marks nodes already fully processed so they're never
+    re-walked. Recursion depth is bounded by MAX_COMPONENTS, well under
+    Python's default recursion limit."""
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _dfs(comp_id: str) -> None:
+        if comp_id in visited:
+            return
+        if comp_id in visiting:
+            raise ValueError(f"surface.components contains a cycle reachable from {comp_id!r}")
+        visiting.add(comp_id)
+        comp = by_id[comp_id]
+        for child_id in _child_ids(comp["component"], comp):
+            if child_id in by_id:
+                _dfs(child_id)
+        visiting.discard(comp_id)
+        visited.add(comp_id)
+
+    _dfs("root")
+
 
 def _summarize_surface(surface: dict[str, Any]) -> str:
     """The text the MODEL sees on its next turn (a ToolMessage's `.content`

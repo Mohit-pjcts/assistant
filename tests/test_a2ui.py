@@ -70,11 +70,36 @@ def test_summary_pulls_text_and_badge_values() -> None:
         {"surfaceId": "", "components": [{"id": "root", "component": "Text", "text": "hi"}]},  # empty surfaceId
         {"surfaceId": "s1", "components": []},  # empty components
         {"surfaceId": "s1", "components": [{"id": "root", "component": "Text"}]},  # missing required field
+        {
+            "surfaceId": "s1",
+            "components": [
+                {"id": "root", "component": "Column", "children": ["a"]},
+                {"id": "a", "component": "Column", "children": ["root"]},
+            ],
+        },  # cycle: root -> a -> root
     ],
 )
 def test_invalid_surfaces_are_rejected(surface: Any) -> None:
     with pytest.raises(ValueError):
         validate_surface(surface)
+
+
+def test_dag_with_shared_child_is_not_a_false_positive_cycle() -> None:
+    """The same leaf id legitimately referenced as a child from two
+    different parents (a DAG, not a tree) must NOT be rejected — only a
+    true back-edge to an ancestor still on the recursion stack is a real
+    cycle. This is the actual reason the cycle check needs two sets
+    (visiting/visited), not just one "already seen" set."""
+    surface = {
+        "surfaceId": "s1",
+        "components": [
+            {"id": "root", "component": "Row", "children": ["a", "b"]},
+            {"id": "a", "component": "Column", "children": ["shared"]},
+            {"id": "b", "component": "Column", "children": ["shared"]},
+            {"id": "shared", "component": "Text", "text": "reused"},
+        ],
+    }
+    validate_surface(surface)  # must not raise
 
 
 def test_only_button_may_carry_an_action_field_and_never_a_function_call() -> None:

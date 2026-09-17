@@ -144,14 +144,25 @@ interface NodeProps {
   setField: (path: string, value: FieldValue) => void;
   onAction?: (name: string, context: DataModel) => void;
   disabled?: boolean;
+  // Defense-in-depth against a cyclic component tree causing unbounded
+  // recursion — the real guard is assistant/a2ui.py's own validate_surface
+  // (a cyclic surface should never reach this component in normal
+  // operation), but this stops a stale/buggy surface from freezing the tab
+  // instead of just rendering nothing past the cycle. Every intermediate
+  // renderer already forwards `{...rest}` verbatim, so only this one
+  // recursive chokepoint needs to thread it.
+  visited?: Set<string>;
 }
 
-function RenderNode({ id, ...rest }: { id: string } & Omit<NodeProps, "node">) {
+function RenderNode({ id, visited, ...rest }: { id: string } & Omit<NodeProps, "node">) {
+  if (visited?.has(id)) return null;
   const node = rest.nodes.get(id);
   if (!node) return null;
   const Renderer = COMPONENT_RENDERERS[str(node.component)];
   if (!Renderer) return null;
-  return <Renderer node={node} {...rest} />;
+  const nextVisited = new Set(visited);
+  nextVisited.add(id);
+  return <Renderer node={node} {...rest} visited={nextVisited} />;
 }
 
 // --- Text / Badge / Divider / Image / Icon / Video / AudioPlayer --------
