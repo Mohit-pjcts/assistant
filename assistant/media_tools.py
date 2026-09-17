@@ -178,24 +178,34 @@ async def render_local_media(path: str, tool_call_id: Annotated[str, InjectedToo
     return await dispatch_surface(surface, tool_call_id, "render_local_media rejected the surface")
 
 
-def _is_safe_public_host(host: str) -> bool:
-    """SSRF guard: every IP the hostname resolves to must be public/
-    routable — rejects loopback/private/link-local/reserved ranges (blocks
-    the classic 127.0.0.1 / 169.254.169.254 cloud-metadata / internal-LAN
-    targets an injected instruction could otherwise point this tool at)."""
+def _resolve_safe_ip(host: str) -> str | None:
+    """SSRF guard, resolving ONCE: every IP `host` resolves to must be
+    public/routable (rejects loopback/private/link-local/reserved ranges —
+    blocks the classic 127.0.0.1 / 169.254.169.254 cloud-metadata /
+    internal-LAN targets an injected instruction could otherwise point this
+    tool at), and the caller must connect to the SAME resolved IP this
+    function returns rather than re-resolving `host` by name a second time.
+    A real DNS-rebinding TOCTOU otherwise exists here: a short-TTL DNS
+    record can validate safe on this call and then resolve to a private/
+    loopback address moments later when the actual connection is made —
+    returning the validated IP (not just True/False) is what lets the
+    caller pin the connection and close that window."""
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError:
-        return False
+        return None
+    safe_ip: str | None = None
     for info in infos:
         addr = info[4][0]
         try:
             ip = ipaddress.ip_address(addr)
         except ValueError:
-            return False
+            return None
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False
-    return True
+            return None
+        if safe_ip is None:
+            safe_ip = addr
+    return safe_ip
 
 
 @tool
@@ -224,7 +234,8 @@ async def render_web_media(url: str, tool_call_id: Annotated[str, InjectedToolCa
     parsed = httpx.URL(url)
     if parsed.scheme not in ("http", "https"):
         return _reject(f"render_web_media: only http/https URLs are supported, got scheme {parsed.scheme!r}")
-    if not _is_safe_public_host(parsed.host):
+    safe_ip = _resolve_safe_ip(parsed.host)
+    if safe_ip is None:
         return _reject(f"render_web_media: '{parsed.host}' does not resolve to a public address — refused")
 
     try:
@@ -232,7 +243,20 @@ async def render_web_media(url: str, tool_call_id: Annotated[str, InjectedToolCa
         # confirmed live) 403 the default httpx UA string outright.
         headers = {"User-Agent": "Mozilla/5.0 (compatible; OniAssistant/1.0)"}
         async with httpx.AsyncClient(follow_redirects=False, timeout=_FETCH_TIMEOUT_SECONDS) as client:
-            async with client.stream("GET", url, headers=headers) as response:
+            # Pin the actual TCP connection to the IP just validated above,
+            # rather than letting httpx re-resolve `parsed.host` by name a
+            # second time — closes the DNS-rebinding TOCTOU window
+            # _resolve_safe_ip's own docstring explains. `sni_hostname`
+            # keeps TLS SNI (and certificate hostname verification) correct
+            # for the ORIGINAL hostname despite connecting to a raw IP; the
+            # Host header is computed from `request.url` before the swap,
+            # so it's also still the original hostname, not the IP.
+            request = client.build_request(
+                "GET", url, headers=headers, extensions={"sni_hostname": parsed.host}
+            )
+            request.url = request.url.copy_with(host=safe_ip)
+            response = await client.send(request, stream=True)
+            try:
                 if response.is_redirect:
                     return _reject("render_web_media: the URL redirected — redirects are not followed, refused")
                 if response.status_code != 200:
@@ -252,6 +276,8 @@ async def render_web_media(url: str, tool_call_id: Annotated[str, InjectedToolCa
                         )
                     chunks.append(chunk)
                 raw = b"".join(chunks)
+            finally:
+                await response.aclose()
     except httpx.HTTPError as exc:
         return _reject(f"render_web_media: fetch failed — {exc}")
 
