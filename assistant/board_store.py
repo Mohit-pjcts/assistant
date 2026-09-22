@@ -94,6 +94,7 @@ def _row_to_item(row: aiosqlite.Row) -> BoardItem:
 @asynccontextmanager
 async def _connect(db_path: Path | str) -> AsyncIterator[aiosqlite.Connection]:
     async with aiosqlite.connect(str(db_path)) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(_CREATE_ITEMS_SQL)
         await db.execute(_CREATE_COUNTER_SQL)
         await db.commit()

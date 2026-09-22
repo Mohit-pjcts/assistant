@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import tempfile
 import uuid
@@ -81,10 +82,12 @@ from pydantic import BaseModel  # noqa: E402
 
 from assistant import (  # noqa: E402
     active_turns,
+    activity_log,
     automation_store,
     board_store,
     claude_code_live,
     claude_code_sessions,
+    conversation_search,
     cost_cache,
     memory_review_agent,
     memory_store,
@@ -97,10 +100,16 @@ from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
+from assistant.logging_config import configure_logging  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.phone_tools import PHONE_ACTION_KEY  # noqa: E402
-from assistant.sub_agents import build_life_admin_agent, build_mac_control_agent  # noqa: E402
+from assistant.sub_agents import (  # noqa: E402
+    _CALENDAR_TOOL_NAMES,
+    _GMAIL_TOOL_NAMES,
+    build_life_admin_agent,
+    build_mac_control_agent,
+)
 from assistant.supervisor import GATED_ACTIONS, _invoke_agent_graph, build_graph  # noqa: E402
 from assistant.tools import _resolve_in_workspace  # noqa: E402
 
@@ -109,6 +118,9 @@ from assistant.tools import _resolve_in_workspace  # noqa: E402
 # a hard ordering requirement as of the v3 migration (STEPS.md 86) — tags
 # are read fresh per-call now. See observability.py's configure_client().
 observability.configure_client("dashboard")
+configure_logging("dashboard")
+
+logger = logging.getLogger(__name__)
 
 # Overridable so tests/throwaway runs can redirect to a temp copy instead of
 # the real conversation_memory.sqlite (CLAUDE.md's verification-discipline
@@ -151,6 +163,10 @@ if "ASSISTANT_AUTOMATIONS_DB_PATH" in os.environ:
 # Same redirect story again, for Phase 25's workflow-run DB.
 if "ASSISTANT_WORKFLOWS_DB_PATH" in os.environ:
     workflow_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_WORKFLOWS_DB_PATH"]
+
+# Same redirect story again, for STEPS.md 151's durable activity log.
+if "ASSISTANT_ACTIVITY_LOG_DB_PATH" in os.environ:
+    activity_log.DEFAULT_DB_PATH = os.environ["ASSISTANT_ACTIVITY_LOG_DB_PATH"]
 
 # PLAN.md Phase 24: which GATED_ACTIONS an automation may be pre-approved
 # for — a deliberate NARROWING of the full GATED_ACTIONS set, not full
@@ -899,9 +915,9 @@ async def _memory_review_loop() -> None:
         await asyncio.sleep((next_midnight - now).total_seconds())
         try:
             queued = await memory_review_agent.run_nightly_review(conversation_db_path=CONVERSATION_DB_PATH)
-            print(f"[memory-review] queued {queued} pending fact proposal(s)")
-        except Exception as exc:  # noqa: BLE001 - see docstring
-            print(f"[memory-review] nightly run failed: {exc}")
+            logger.info("[memory-review] queued %d pending fact proposal(s)", queued)
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.exception("[memory-review] nightly run failed")
 
 
 @asynccontextmanager
@@ -913,6 +929,19 @@ async def lifespan(app: FastAPI):
         mcp_tools = await load_mcp_tools()
     except Exception:  # e.g. GMAIL_MCP_SERVER_PATH unset, server not built
         mcp_tools = []
+
+    # STEPS.md 151: this try/except already degrades gracefully (no MCP
+    # tools rather than a crashed server), but nothing surfaced WHICH
+    # integration is actually up — recorded here for GET /health/
+    # integrations and for sub_agents.build_life_admin_agent's own prompt
+    # note (checked independently, same reasoning as that function's own
+    # docstring: today's load_mcp_tools() happens to be all-or-nothing,
+    # but this doesn't assume that stays true).
+    present_tool_names = {t.name for t in mcp_tools}
+    app.state.integration_status = {
+        "gmail": bool(present_tool_names & _GMAIL_TOOL_NAMES),
+        "calendar": bool(present_tool_names & _CALENDAR_TOOL_NAMES),
+    }
 
     async with get_checkpointer(CONVERSATION_DB_PATH) as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)
@@ -1285,6 +1314,21 @@ async def stop_chat(request: StopRequest) -> dict[str, Any]:
     return {"stopped": True}
 
 
+@app.get("/health/integrations")
+async def health_integrations() -> dict[str, Any]:
+    """Whether Gmail/Calendar MCP tools actually loaded (STEPS.md 151) —
+    the visibility half of a gap this session also partly closed: the
+    lifespan startup try/except already degrades a load failure to an
+    empty tool list rather than crashing the server (graceful, but
+    invisible), and `build_life_admin_agent`'s own system prompt now gets
+    a note when either integration is missing so a routed request produces
+    a clear message instead of a confusing tool-not-found reply. This
+    endpoint is the same information, for a dashboard indicator — mirrors
+    `ActiveTurnBanner`'s own "never be surprised" pattern, applied to
+    integration health instead of in-flight turns."""
+    return dict(getattr(app.state, "integration_status", {"gmail": False, "calendar": False}))
+
+
 @app.get("/activity/active")
 async def list_active_turns() -> dict[str, Any]:
     """Every currently in-flight agent turn, across ALL channels (dashboard,
@@ -1303,6 +1347,62 @@ async def list_active_turns() -> dict[str, Any]:
     out of `active`, with nothing distinguishing "finished fine" from "just
     broke." See `active_turns.list_recent()`'s own docstring."""
     return {"active": active_turns.list_active(), "recently_ended": active_turns.list_recent()}
+
+
+@app.get("/activity/log")
+async def list_activity_log(limit: int = 50) -> dict[str, Any]:
+    """Durable cross-channel activity history (STEPS.md 151, `assistant/
+    activity_log.py`) — the "what happened while I wasn't watching the
+    dashboard" complement to /activity/active's live/recent-30s view.
+    Covers every completed supervisor->specialist delegation on any
+    channel (dashboard/voice/phone/automation), including ones that
+    finished long before this request — unlike `active_turns.list_recent()`,
+    which only remembers the last 30 seconds. See activity_log.py's own
+    module docstring for why this is scoped to the outer delegation
+    boundary only, not each specialist's inner tool calls."""
+    events = await activity_log.list_recent(limit=limit)
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "thread_id": e.thread_id,
+                "agent": e.agent,
+                "outcome": e.outcome,
+                "detail": e.detail,
+                "started_at": e.started_at,
+                "finished_at": e.finished_at,
+            }
+            for e in events
+        ]
+    }
+
+
+@app.get("/search/conversations")
+async def search_conversations(q: str, limit: int = 5) -> dict[str, Any]:
+    """Semantic search over past conversation threads (STEPS.md 151,
+    `assistant/conversation_search.py`) — the real, narrower version of the
+    generic "embeddings index for past conversations" idea: local
+    embeddings, no per-query cost, reusing `vault_search.py`'s exact
+    approach for a different corpus. A dashboard-side search feature
+    (rather than an agent tool) specifically because it needs the
+    already-compiled `app.state.graph` to read each thread's persisted
+    state correctly (`graph.aget_state()`, this project's own established
+    "not by hand-parsing the checkpointer directly" rule, STEPS.md 54) —
+    see conversation_search.py's own module docstring for the full reason
+    an agent-tool version would need circularly depend on the graph it's
+    still being built into."""
+
+    async def _fetch_messages(thread_id: str) -> list[BaseMessage]:
+        snapshot = await app.state.graph.aget_state(make_thread_config(thread_id))
+        return snapshot.values.get("messages", [])
+
+    results = await conversation_search.semantic_search(q, _fetch_messages, top_k=limit)
+    return {
+        "results": [
+            {"thread_id": thread_id, "title": title, "score": round(score, 3)}
+            for thread_id, title, score in results
+        ]
+    }
 
 
 @app.get("/threads")

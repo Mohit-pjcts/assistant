@@ -418,6 +418,44 @@ class NoParallelWrites(AgentMiddleware):
         return await handler(request)
 
 
+def _life_admin_unavailable_integrations_note(mcp_tools: list[BaseTool]) -> str:
+    """Real gap found during a reliability/orchestration backlog audit
+    (STEPS.md 151): `load_mcp_tools()` degrades a total Gmail/Calendar
+    startup failure to an empty list (server.py's lifespan try/except)
+    rather than crashing the server, but this agent's own system prompt
+    never knew that happened — a routed request would just hit a missing
+    tool and produce a confusing "I don't have that tool" reply instead of
+    a clear "Gmail/Calendar isn't available right now." `LIFE_ADMIN_SYSTEM_
+    PROMPT` is a fixed module-level constant, but `build_life_admin_agent`
+    is only ever called ONCE per process with a fixed `mcp_tools` snapshot
+    (server startup), so appending a note here at agent-construction time —
+    not per-turn — is safe and doesn't fight prompt caching (the whole
+    point of caching is a stable prefix across calls WITHIN one process
+    lifetime, which this still is).
+
+    Checks Gmail/Calendar independently, not just "mcp_tools is empty" —
+    today's `load_mcp_tools()` happens to be all-or-nothing (both servers'
+    paths are resolved unconditionally in one MultiServerMCPClient
+    construction, so one missing env var currently takes both down), but
+    this check doesn't assume that stays true, and is correct either way."""
+    present_names = {t.name for t in mcp_tools}
+    gmail_missing = not (present_names & _GMAIL_TOOL_NAMES)
+    calendar_missing = not (present_names & _CALENDAR_TOOL_NAMES)
+    if not gmail_missing and not calendar_missing:
+        return ""
+    if gmail_missing and calendar_missing:
+        unavailable = "Gmail and Google Calendar are"
+    elif gmail_missing:
+        unavailable = "Gmail is"
+    else:
+        unavailable = "Google Calendar is"
+    return (
+        f"\n\nNote: {unavailable} currently unavailable in this session (the "
+        "integration failed to start) — if the user asks for something "
+        "requiring it, say so plainly instead of trying tools that don't exist."
+    )
+
+
 def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
     """Build the life-admin sub-agent.
 
@@ -436,6 +474,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
     live verification this extension rested on.
     """
     model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking={"type": "adaptive"})
+    system_prompt = LIFE_ADMIN_SYSTEM_PROMPT + _life_admin_unavailable_integrations_note(mcp_tools)
     return create_agent(
         model=model,
         tools=[
@@ -444,7 +483,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
             build_render_form_tool(),
             *build_board_tools(),
         ],
-        system_prompt=LIFE_ADMIN_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         middleware=[
             NoParallelWrites(),
             AnthropicPromptCachingMiddleware(),

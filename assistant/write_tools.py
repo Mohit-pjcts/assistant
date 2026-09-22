@@ -78,11 +78,12 @@ import logging
 from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain_core.messages import AnyMessage, ToolMessage
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
 
+from assistant import idempotency_store
 from assistant.compaction import is_genuine_human_turn
 
 logger = logging.getLogger(__name__)
@@ -272,6 +273,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             bcc: list[str] | None = None,
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Send an email. Requires the user's explicit confirmation,
             which will show the exact recipient(s), subject, and body —
@@ -303,6 +305,13 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 approved = interrupt(payload)
             if not approved:
                 return "Cancelled — user did not confirm."
+            # Idempotency guard (STEPS.md 151): a client retrying /resume
+            # after a timeout/crash mid-send would otherwise re-run this
+            # node from the top and send a second, real, duplicate email —
+            # see idempotency_store.py's module docstring for the full
+            # reasoning. tool_call_id is stable across any such replay.
+            if not idempotency_store.check_and_record(tool_call_id, "send_email"):
+                return "Already sent — this exact send was already completed (duplicate resume detected)."
             result = await send_email_raw.ainvoke(
                 {"to": to, "subject": subject, "body": body, "cc": cc or [], "bcc": bcc or []}
             )

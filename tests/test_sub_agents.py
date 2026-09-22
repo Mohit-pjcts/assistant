@@ -14,6 +14,7 @@ from assistant.sub_agents import (
     MAC_CONTROL_SYSTEM_PROMPT,
     RESEARCH_SYSTEM_PROMPT,
     NoParallelMacWrites,
+    _life_admin_unavailable_integrations_note,
     build_life_admin_agent,
     build_research_agent,
 )
@@ -120,6 +121,25 @@ def test_life_admin_system_prompt_mentions_render_ui() -> None:
     assert "render_ui" in LIFE_ADMIN_SYSTEM_PROMPT
 
 
+def test_life_admin_unavailable_integrations_note() -> None:
+    """STEPS.md 151: the note only appears when an integration is actually
+    missing, and names which one(s) — checked via SimpleNamespace fakes
+    with a `.name`, no real MCP tools/network needed."""
+    gmail_tool = SimpleNamespace(name="search_emails")
+    calendar_tool = SimpleNamespace(name="list-events")
+
+    assert _life_admin_unavailable_integrations_note([gmail_tool, calendar_tool]) == ""
+
+    both_missing = _life_admin_unavailable_integrations_note([])
+    assert "Gmail and Google Calendar are" in both_missing
+
+    gmail_missing = _life_admin_unavailable_integrations_note([calendar_tool])
+    assert "Gmail is currently unavailable" in gmail_missing
+
+    calendar_missing = _life_admin_unavailable_integrations_note([gmail_tool])
+    assert "Google Calendar is currently unavailable" in calendar_missing
+
+
 if __name__ == "__main__":
     test_no_parallel_mac_writes_forces_parallel_tool_calls_false()
     print("OK: test_no_parallel_mac_writes_forces_parallel_tool_calls_false")
@@ -139,4 +159,6 @@ if __name__ == "__main__":
     print("OK: test_research_system_prompt_mentions_render_ui")
     test_life_admin_system_prompt_mentions_render_ui()
     print("OK: test_life_admin_system_prompt_mentions_render_ui")
-    print("\n9 tests passed")
+    test_life_admin_unavailable_integrations_note()
+    print("OK: test_life_admin_unavailable_integrations_note")
+    print("\n10 tests passed")

@@ -183,7 +183,7 @@ from __future__ import annotations
 
 import json
 from functools import partial
-from typing import Annotated, Any, Awaitable, Callable, TypedDict
+from typing import Annotated, Any, Awaitable, Callable, NamedTuple, TypedDict
 
 import httpx
 from dotenv import load_dotenv
@@ -203,7 +203,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
-from assistant import observability, prompts, workflow_store
+from assistant import activity_log, observability, prompts, workflow_store
 from assistant.a2ui import A2UI_SURFACE_KEY, build_render_form_tool, build_render_ui_tool
 from assistant.circuit_breaker import RepeatedToolFailureCircuitBreaker
 from assistant.compaction import (
@@ -993,12 +993,37 @@ def _make_propose_workflow_tool() -> BaseTool:
     return propose_workflow
 
 
+class SpecialistResult(NamedTuple):
+    """What a delegated specialist call hands back to the supervisor —
+    pins down a shape that had organically accreted across five phases
+    (17's surfaces, 21's phone_actions, 25's executed_actions) as four
+    separate positional items nothing validated (STEPS.md 151's
+    reliability/orchestration backlog audit). Deliberately a NamedTuple,
+    not a dataclass: every existing call site already destructures this as
+    `content, surfaces, phone_actions, executed_actions = await invoke(...)`,
+    and a NamedTuple supports that unchanged while still giving named
+    field access and a single place that documents what each position
+    means — no call site needed to change for this to add value.
+
+    content: the specialist's final reply text.
+    surfaces: A2UI surfaces the specialist rendered via its own render_ui/
+        render_form call (a2ui.py's A2UI_SURFACE_KEY marker).
+    phone_actions: phone_agent.py open_app/open_url markers (PHONE_ACTION_KEY).
+    executed_actions: the "executed" half of Phase 25's approved-vs-executed
+        workflow audit (_extract_gated_action_executions)."""
+
+    content: str
+    surfaces: list[dict[str, Any]]
+    phone_actions: list[dict[str, Any]]
+    executed_actions: list[dict[str, Any]]
+
+
 async def _invoke_agent_graph(
     agent_graph: CompiledStateGraph,
     agent_name: str,
     messages: list[AnyMessage],
     pre_approved_actions: set[str],
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> SpecialistResult:
     """The in-process specialist path: a fresh, isolated `ainvoke()` per
     call — see this module's docstring for why the specialist graph must
     stay checkpointer-less (sub_agents.py) for interrupt()/resume to work
@@ -1053,12 +1078,12 @@ async def _invoke_agent_graph(
         phone_actions.extend(getattr(m, "additional_kwargs", {}).get(PHONE_ACTION_KEY) or [])
         surfaces.extend(getattr(m, "additional_kwargs", {}).get(A2UI_SURFACE_KEY) or [])
     executed_actions = _extract_gated_action_executions(result_messages)
-    return content, surfaces, phone_actions, executed_actions
+    return SpecialistResult(content, surfaces, phone_actions, executed_actions)
 
 
 async def _invoke_research_agent_via_http(
     messages: list[AnyMessage], pre_approved_actions: set[str]
-) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> SpecialistResult:
     """`pre_approved_actions` accepted for a uniform call signature with
     `_invoke_agent_graph` (see `_make_specialist_tool`) but unused here —
     research_agent has no gated tools, GATED_ACTIONS owns none of them.
@@ -1131,9 +1156,14 @@ async def _invoke_research_agent_via_http(
                 elif event_type == "final":
                     final_messages_raw = payload.get("messages", [])
                 elif event_type == "error":
-                    return f"Research request failed: {payload.get('detail', 'unknown error')}", [], [], []
+                    return SpecialistResult(
+                        f"Research request failed: {payload.get('detail', 'unknown error')}",
+                        [],
+                        [],
+                        [],
+                    )
     except httpx.HTTPError as exc:
-        return (
+        return SpecialistResult(
             f"Research request failed: could not reach the research "
             f"service ({type(exc).__name__}).",
             [],
@@ -1142,7 +1172,7 @@ async def _invoke_research_agent_via_http(
         )
 
     if final_messages_raw is None:
-        return (
+        return SpecialistResult(
             "Research request did not complete (the research service "
             "closed the connection without returning a result).",
             [],
@@ -1152,23 +1182,20 @@ async def _invoke_research_agent_via_http(
 
     final_messages = convert_to_messages(final_messages_raw)
     if not final_messages:
-        return "Research request returned no result.", [], [], []
+        return SpecialistResult("Research request returned no result.", [], [], [])
     final = final_messages[-1]
     content = final.content if isinstance(final.content, str) else str(final.content)
     # PLAN.md Phase 25: always empty, same reasoning as the surfaces/
     # phone_actions gaps documented above — research_agent has no gated
     # tools (GATED_ACTIONS owns none of them) and this HTTP path never sees
     # the FA's internal messages to extract anything from even if it did.
-    return content, [], [], []
+    return SpecialistResult(content, [], [], [])
 
 
 def _make_specialist_tool(
     tool_name: str,
     description: str,
-    invoke: Callable[
-        [list[AnyMessage], set[str]],
-        Awaitable[tuple[str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]],
-    ],
+    invoke: Callable[[list[AnyMessage], set[str]], Awaitable[SpecialistResult]],
 ) -> BaseTool:
     """Build a tool that delegates to one specialist — the "agents as
     tools" replacement for the old `_make_handoff_tool`'s
@@ -1238,12 +1265,30 @@ def _make_specialist_tool(
         await adispatch_custom_event(
             "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
         )
+        # Durable activity log (STEPS.md 151) — see activity_log.py's own
+        # module docstring for why this records only the OUTER supervisor
+        # ->specialist boundary, not each specialist's inner tool calls.
+        started_at = activity_log.now_iso()
+
+        async def _log_outcome(outcome: str) -> None:
+            # Best-effort by this module's own documented contract: a
+            # logging failure must never break a real turn.
+            try:
+                thread_id = get_config()["configurable"]["thread_id"]
+                await activity_log.record_event(thread_id, tool_name, outcome, started_at=started_at)
+            except Exception:
+                pass
+
         try:
             content, surfaces, phone_actions, executed_actions = await invoke(seed, pre_approved)
+        except Exception:
+            await _log_outcome(activity_log.OUTCOME_ERROR)
+            raise
         finally:
             await adispatch_custom_event(
                 "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
             )
+        await _log_outcome(activity_log.OUTCOME_SUCCESS)
         if executed_actions:
             run_id = _active_workflow_run_id_this_turn(state)
             if run_id is not None:

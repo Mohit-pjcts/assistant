@@ -142,6 +142,7 @@ def _row_to_step(row: aiosqlite.Row) -> WorkflowStep:
 @asynccontextmanager
 async def _connect(db_path: Path | str) -> AsyncIterator[aiosqlite.Connection]:
     async with aiosqlite.connect(str(db_path)) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(_CREATE_RUNS_SQL)
         await db.execute(_CREATE_STEPS_SQL)
         await db.commit()

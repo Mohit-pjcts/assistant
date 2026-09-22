@@ -3274,7 +3274,7 @@ Current Status and Architecture sections updated.
 
 ---
 
-## Phase 29 — Full "Instrument" design-system replacement (not a re-skin) — OPENED, ACTIVE, all 4 stages code-complete, NOT live-verified (2026-08-08, STEPS.md 135-138)
+## Phase 29 — Full "Instrument" design-system replacement (not a re-skin) — COMPLETE, all 4 stages code-complete; live-verification explicitly waived by the user (opened 2026-08-08, STEPS.md 135-138, closed 2026-09-22)
 
 **Objective:** the user looked at the live Phase 28 result and judged it
 "almost exactly the same" as before — Phase 28 re-skinned colors/fonts
@@ -3440,12 +3440,16 @@ stages are coarser):**
    an instant unmount. 157/157 tests pass unchanged; `tsc`/`prettier`/
    `build` clean.
 
-**Not done in this entry:** all four stages are now code-complete
-(STEPS.md 135-138). **Not live-verified in the real running app across
+**Status flip (2026-09-22):** all four stages are code-complete
+(STEPS.md 135-138). **Never live-verified in the real running app across
 the ENTIRE phase** — no connected browser existed in any session that
-built Stages 1-4, so nothing in this phase has been seen rendered by
-this agent, only reasoned through and test-verified. Per this
-project's own Phase 26 precedent, code-complete-without-live-
-verification does not meet the normal done bar — a status flip to
-COMPLETE should not be proposed until the user has looked at the real
-app themselves.
+built Stages 1-4, so nothing in this phase was ever seen rendered by an
+agent, only reasoned through and test-verified. Per this project's own
+Phase 26 precedent, that would normally hold the status flip open. The
+user explicitly waived it this time ("don't test it out, just close
+Phase 29 and move on") rather than doing the live look themselves —
+recorded here as a deliberate exception to the project's own done bar,
+not a silent lowering of it. If a real rendering bug surfaces later
+(the DESIGN.md §12 classes of bug this phase's own build notes already
+guarded against, or something new), it's a bug against already-closed
+Phase 29 work, not an open item of this phase.

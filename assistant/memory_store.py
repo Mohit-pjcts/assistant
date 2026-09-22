@@ -90,6 +90,7 @@ class PendingFact:
 @asynccontextmanager
 async def _connect(db_path: Path | str) -> AsyncIterator[aiosqlite.Connection]:
     async with aiosqlite.connect(str(db_path)) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
         await db.execute(_CREATE_TABLE_SQL)
         await db.execute(_CREATE_PENDING_TABLE_SQL)
         await db.execute(_CREATE_REVIEW_CURSOR_TABLE_SQL)

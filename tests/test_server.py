@@ -43,6 +43,7 @@ os.environ.setdefault("ASSISTANT_BOARD_DB_PATH", os.path.join(_tmpdir, "board.sq
 os.environ.setdefault("ASSISTANT_PHONE_DB_PATH", os.path.join(_tmpdir, "phone_data.sqlite"))
 os.environ.setdefault("ASSISTANT_AUTOMATIONS_DB_PATH", os.path.join(_tmpdir, "automations.sqlite"))
 os.environ.setdefault("ASSISTANT_WORKFLOWS_DB_PATH", os.path.join(_tmpdir, "workflows.sqlite"))
+os.environ.setdefault("ASSISTANT_ACTIVITY_LOG_DB_PATH", os.path.join(_tmpdir, "activity_log.sqlite"))
 # Bound here, not re-read from os.environ inside the test function itself —
 # same reasoning, belt-and-suspenders: this constant is fixed at the exact
 # instant this module resolved the (possibly-already-set) env var, so nothing
@@ -51,7 +52,7 @@ _MEMORY_DB_PATH = os.environ["ASSISTANT_MEMORY_DB_PATH"]
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from assistant import memory_store, server, thread_store  # noqa: E402
+from assistant import activity_log, memory_store, server, thread_store  # noqa: E402
 
 
 def _parse_sse(text: str) -> list[dict[str, Any]]:
@@ -167,6 +168,69 @@ async def test_activity_frames_surface_across_the_delegated_specialist_boundary(
         assert inner_ends, f"expected research_agent's own inner web_search tool_end, got {activity_events}"
 
         assert events[-1]["type"] == "message"
+
+
+async def test_activity_log_endpoint_returns_recorded_events() -> None:
+    """Thin integration test for GET /activity/log (STEPS.md 151) — does
+    NOT need a real graph turn (activity_log.record_event/list_recent
+    already have their own dedicated unit coverage in
+    test_activity_log.py); this only proves the endpoint itself correctly
+    reads from the SAME store server.py is wired to (the
+    ASSISTANT_ACTIVITY_LOG_DB_PATH redirect this file's own top-of-module
+    setup applies) and serializes it as JSON."""
+    await activity_log.record_event("thread-xyz", "life_admin_agent", activity_log.OUTCOME_SUCCESS)
+    with TestClient(server.app) as client:
+        response = client.get("/activity/log")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        matches = [e for e in body["events"] if e["thread_id"] == "thread-xyz"]
+        assert matches, f"expected the just-recorded event, got {body}"
+        assert matches[0]["agent"] == "life_admin_agent"
+        assert matches[0]["outcome"] == "success"
+
+
+async def test_search_conversations_endpoint_finds_a_seeded_thread() -> None:
+    """Thin integration test for GET /search/conversations (STEPS.md 151) —
+    does NOT load the real embedding model (slow, a cold load needs a
+    network round-trip per conversation_search.py's own docstring) or make
+    a real Anthropic API call: seeds a thread's checkpoint state directly
+    via graph.aupdate_state() rather than a real /chat turn, and fakes
+    conversation_search's model the same way test_conversation_search.py
+    does. Proves the endpoint wires app.state.graph's aget_state() through
+    to conversation_search.semantic_search() correctly — the actual
+    ranking/caching logic already has its own dedicated unit coverage."""
+    from pathlib import Path as _Path
+
+    import numpy as np
+    from langchain_core.messages import HumanMessage as HM
+
+    from assistant import conversation_search
+    from assistant.agent import make_thread_config
+
+    class _FakeModel:
+        def encode(self, text: str):
+            return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+    conversation_search._model = None
+    original_load_model = conversation_search._load_model
+    original_cache_path = conversation_search._CACHE_PATH
+    conversation_search._load_model = lambda: _FakeModel()
+    conversation_search._CACHE_PATH = _Path(_tmpdir) / "conversation_embeddings_cache.npz"
+    try:
+        thread = await thread_store.create_thread(title="Roth IRA question")
+        with TestClient(server.app) as client:
+            await server.app.state.graph.aupdate_state(
+                make_thread_config(thread.id),
+                {"messages": [HM(content="should I use a Roth or Traditional IRA")]},
+            )
+            response = client.get("/search/conversations", params={"q": "retirement accounts"})
+            assert response.status_code == 200, response.text
+            body = response.json()
+            matches = [r for r in body["results"] if r["thread_id"] == thread.id]
+            assert matches, f"expected the seeded thread to be found, got {body}"
+    finally:
+        conversation_search._load_model = original_load_model
+        conversation_search._CACHE_PATH = original_cache_path
 
 
 async def test_stop_cancels_the_registered_task_for_its_thread() -> None:

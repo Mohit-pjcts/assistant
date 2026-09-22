@@ -38,4 +38,12 @@ async def get_checkpointer(
         compiling a LangGraph graph.
     """
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
+        # WAL mode: dashboard/voice/phone/automation channels can all write
+        # concurrently to this file now (Phases 15/21/24) — WAL lets readers
+        # and writers not block each other, unlike the default rollback
+        # journal. A real concurrent-write race already bit cost_cache.py
+        # (STEPS.md 147); this closes the same class of risk here before it
+        # does. Persisted in the file itself, so this is a one-time no-op on
+        # every connection after the first.
+        await checkpointer.conn.execute("PRAGMA journal_mode=WAL")
         yield checkpointer

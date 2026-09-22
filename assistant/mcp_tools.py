@@ -10,6 +10,7 @@ knows about the other.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from collections.abc import Awaitable, Callable
@@ -21,6 +22,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallResult
 from mcp.types import CallToolResult, TextContent
 
+from assistant.tool_cache import MISSING, TTLCache
 from assistant.tools import ensure_workspace_dir
 
 load_dotenv()
@@ -83,6 +85,52 @@ async def _cap_result_size(
     return await handler(request)
 
 
+# Read-only response caching (STEPS.md 151) — saves real wall-clock and
+# real external API quota on a genuinely repeated identical read within a
+# short window (e.g. "what's on my calendar today" asked twice in one
+# conversation, or a specialist re-reading the same inbox search after a
+# handoff). Deliberately excludes anything write_tools.py uses for its own
+# read-BACK-before-showing-a-confirmation-gate (get-event/get_filter/
+# read_email) — caching those would undermine the exact TOCTOU protection
+# that read-back exists for, showing a human possibly-stale state right
+# before a security decision. Also excludes get-current-time, which is
+# meaningless to cache at all.
+_CACHEABLE_READ_TOOLS = {
+    "search_emails",
+    "list_inbox_threads",
+    "get_inbox_with_threads",
+    "list_email_labels",
+    "list-events",
+    "search-events",
+    "list-calendars",
+    "list-colors",
+    "get-freebusy",
+}
+_TOOL_CALL_CACHE_TTL_SECONDS = 60.0
+_tool_call_cache = TTLCache(ttl_seconds=_TOOL_CALL_CACHE_TTL_SECONDS)
+
+
+async def _cache_read_only_calls(
+    request: MCPToolCallRequest,
+    handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
+) -> MCPToolCallResult:
+    """Serve a cached result for a repeated identical read within the TTL
+    window instead of re-hitting the real Gmail/Calendar server. Placed
+    innermost (last in the interceptor list) — see load_mcp_tools()'s own
+    comment — so it caches the FINAL args after every other interceptor
+    (e.g. _cap_result_size's maxResults clamp) has already run, matching
+    what actually gets sent to the server."""
+    if request.name not in _CACHEABLE_READ_TOOLS:
+        return await handler(request)
+    key = (request.server_name, request.name, request.args)
+    cached = _tool_call_cache.get(key)
+    if cached is not MISSING:
+        return cached
+    result = await handler(request)
+    _tool_call_cache.set(key, result)
+    return result
+
+
 # The Calendar server (nspady/google-calendar-mcp) has no equivalent to
 # Gmail's --scopes=gmail.readonly — it hardcodes requesting the full
 # read/write `.../auth/calendar` OAuth scope regardless of configuration
@@ -140,6 +188,45 @@ async def _block_calendar_writes(
             isError=True,
         )
     return await handler(request)
+
+
+# The `load_mcp_tools()`-level try/except (server.py's lifespan) already
+# degrades gracefully when a server fails to START — but nothing protected
+# a call that hangs mid-conversation (a wedged Node subprocess never
+# returning at all), which would hang the whole graph turn indefinitely
+# with no user-visible signal. That's the exact class of thing
+# active_turns.py/RepeatedToolFailureCircuitBreaker exist to prevent for
+# other failure shapes (STEPS.md 122's own standing rule: never be
+# surprised by a silent background process) — this closes the same gap
+# for an MCP tool call specifically, which neither of those two covers
+# (one guards a model retrying an already-returned failure; this guards a
+# single call that never returns at all).
+_MCP_CALL_TIMEOUT_SECONDS = 30.0
+
+
+async def _timeout_hung_calls(
+    request: MCPToolCallRequest,
+    handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
+) -> MCPToolCallResult:
+    """Bound how long any single MCP tool call can hang. Returns a clean
+    error result on timeout — "tool errors are data, not exceptions"
+    (CLAUDE.md) applies here exactly like every other tool in this
+    project; a raised TimeoutError would instead crash the graph turn."""
+    try:
+        return await asyncio.wait_for(handler(request), timeout=_MCP_CALL_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=(
+                        f"'{request.name}' timed out after {_MCP_CALL_TIMEOUT_SECONDS:.0f}s — "
+                        "the Gmail/Calendar server may be unresponsive."
+                    ),
+                )
+            ],
+            isError=True,
+        )
 
 
 def _gmail_server_path() -> str:
@@ -229,9 +316,16 @@ async def load_mcp_tools() -> list[BaseTool]:
             },
         },
         tool_interceptors=[
+            # Outermost — wraps the whole chain below, so a hang anywhere
+            # in it (including inside another interceptor) still times out.
+            _timeout_hung_calls,
             _confine_downloads_to_workspace,
             _cap_result_size,
             _block_calendar_writes,
+            # Innermost (closest to the real handler) — caches the FINAL
+            # args every other interceptor above has already finished
+            # mutating (e.g. _cap_result_size's maxResults clamp).
+            _cache_read_only_calls,
         ],
     )
     return await client.get_tools()

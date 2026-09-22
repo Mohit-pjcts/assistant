@@ -21,9 +21,12 @@ from assistant.mcp_tools import (
     _MAX_RESULTS_CEILING,
     _NODE_FALLBACK_PATHS,
     _block_calendar_writes,
+    _cache_read_only_calls,
     _cap_result_size,
     _confine_downloads_to_workspace,
     _node_path,
+    _timeout_hung_calls,
+    _tool_call_cache,
 )
 
 
@@ -209,6 +212,85 @@ def test_node_path_prefers_which_when_path_is_correct() -> None:
     assert os.path.exists(found)
 
 
+def test_timeout_hung_calls_passes_through_a_fast_call() -> None:
+    request = MCPToolCallRequest(name="search_emails", args={"query": "x"}, server_name="gmail")
+    result = asyncio.run(_timeout_hung_calls(request, _echo_handler))
+    assert result == {"query": "x"}
+
+
+def test_cache_read_only_calls_serves_a_repeated_identical_read_from_cache() -> None:
+    _tool_call_cache.clear()
+    call_count = {"n": 0}
+
+    async def _counting_handler(request: MCPToolCallRequest):
+        call_count["n"] += 1
+        return {"n": call_count["n"]}
+
+    request = MCPToolCallRequest(
+        name="search_emails", args={"query": "in:inbox"}, server_name="gmail"
+    )
+    first = asyncio.run(_cache_read_only_calls(request, _counting_handler))
+    second = asyncio.run(_cache_read_only_calls(request, _counting_handler))
+    assert first == second == {"n": 1}, "the second identical call must be served from cache"
+    assert call_count["n"] == 1, "the real handler must only run once"
+
+
+def test_cache_read_only_calls_ignores_uncacheable_tools() -> None:
+    _tool_call_cache.clear()
+    call_count = {"n": 0}
+
+    async def _counting_handler(request: MCPToolCallRequest):
+        call_count["n"] += 1
+        return {"n": call_count["n"]}
+
+    # get-event is deliberately excluded — write_tools.py's read-back-
+    # before-gating relies on this tool never returning stale cached data.
+    request = MCPToolCallRequest(name="get-event", args={"eventId": "e1"}, server_name="calendar")
+    asyncio.run(_cache_read_only_calls(request, _counting_handler))
+    asyncio.run(_cache_read_only_calls(request, _counting_handler))
+    assert call_count["n"] == 2, "get-event must never be served from cache"
+
+
+def test_cache_read_only_calls_distinguishes_different_args() -> None:
+    _tool_call_cache.clear()
+    call_count = {"n": 0}
+
+    async def _counting_handler(request: MCPToolCallRequest):
+        call_count["n"] += 1
+        return {"n": call_count["n"]}
+
+    request_a = MCPToolCallRequest(name="search_emails", args={"query": "a"}, server_name="gmail")
+    request_b = MCPToolCallRequest(name="search_emails", args={"query": "b"}, server_name="gmail")
+    asyncio.run(_cache_read_only_calls(request_a, _counting_handler))
+    asyncio.run(_cache_read_only_calls(request_b, _counting_handler))
+    assert call_count["n"] == 2, "different args must not share a cache entry"
+
+
+def test_timeout_hung_calls_returns_clean_error_on_a_real_hang() -> None:
+    """A handler that never returns must not hang this call forever — the
+    interceptor must itself time out and return an error result (tool
+    errors are data, not exceptions), not raise into the caller."""
+
+    async def _hangs_forever(request: MCPToolCallRequest):
+        await asyncio.sleep(3600)
+
+    async def _run():
+        import assistant.mcp_tools as mcp_tools
+
+        original = mcp_tools._MCP_CALL_TIMEOUT_SECONDS
+        mcp_tools._MCP_CALL_TIMEOUT_SECONDS = 0.05
+        try:
+            request = MCPToolCallRequest(name="search_emails", args={}, server_name="gmail")
+            return await mcp_tools._timeout_hung_calls(request, _hangs_forever)
+        finally:
+            mcp_tools._MCP_CALL_TIMEOUT_SECONDS = original
+
+    result = asyncio.run(_run())
+    assert result.isError is True
+    assert "timed out" in result.content[0].text
+    assert "search_emails" in result.content[0].text
+
+
 if __name__ == "__main__":
     test_download_attachment_savepath_forced_into_workspace()
     print("OK: test_download_attachment_savepath_forced_into_workspace")
@@ -236,4 +318,14 @@ if __name__ == "__main__":
     print("OK: test_node_path_falls_back_to_known_locations_when_path_is_stripped")
     test_node_path_prefers_which_when_path_is_correct()
     print("OK: test_node_path_prefers_which_when_path_is_correct")
-    print("\n13 tests passed")
+    test_timeout_hung_calls_passes_through_a_fast_call()
+    print("OK: test_timeout_hung_calls_passes_through_a_fast_call")
+    test_timeout_hung_calls_returns_clean_error_on_a_real_hang()
+    print("OK: test_timeout_hung_calls_returns_clean_error_on_a_real_hang")
+    test_cache_read_only_calls_serves_a_repeated_identical_read_from_cache()
+    print("OK: test_cache_read_only_calls_serves_a_repeated_identical_read_from_cache")
+    test_cache_read_only_calls_ignores_uncacheable_tools()
+    print("OK: test_cache_read_only_calls_ignores_uncacheable_tools")
+    test_cache_read_only_calls_distinguishes_different_args()
+    print("OK: test_cache_read_only_calls_distinguishes_different_args")
+    print("\n18 tests passed")

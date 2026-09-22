@@ -114,10 +114,12 @@ from typing import Annotated, NotRequired, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.messages import AnyMessage
-from langchain_core.tools import tool
+from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
+
+from assistant import idempotency_store
 
 
 class _AgentState(TypedDict):
@@ -1159,6 +1161,7 @@ def send_imessage(
     message: str,
     *,
     state: Annotated[_AgentState, InjectedState],
+    tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> str:
     """Send an iMessage via Messages.app. Requires the user's explicit
     confirmation showing the exact recipient and message text before
@@ -1185,6 +1188,12 @@ def send_imessage(
         )
         if not approved:
             return "Cancelled — user did not confirm."
+    # Idempotency guard (STEPS.md 151) — same reasoning as write_tools.py's
+    # send_email: a client retrying /resume after a timeout/crash mid-send
+    # would otherwise re-run this node from the top and send a second,
+    # real, duplicate iMessage. tool_call_id is stable across such a replay.
+    if not idempotency_store.check_and_record(tool_call_id, "send_imessage"):
+        return "Already sent — this exact send was already completed (duplicate resume detected)."
     return _run_osascript(_IMESSAGE_SEND, [recipient, message])
 
 

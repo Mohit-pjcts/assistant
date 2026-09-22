@@ -18,6 +18,7 @@ from langgraph.types import Command  # noqa: E402
 from assistant import observability, thread_store  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
+from assistant.logging_config import configure_logging  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
 from assistant.supervisor import build_graph  # noqa: E402
@@ -200,6 +201,7 @@ def main() -> None:
     # reason to widen this call's blast radius now that nothing else imports
     # from this module.
     observability.configure_client("cli")
+    configure_logging("cli")
     args = _parse_args()
     try:
         asyncio.run(_run(start_new=args.new))

@@ -16,13 +16,31 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Any, TypedDict
 
+import pytest
 from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Command
 
+from assistant import idempotency_store
 from assistant.memory import get_checkpointer
 from assistant.write_tools import MAX_WRITES_PER_TURN, build_write_tools
+
+
+@pytest.fixture(autouse=True)
+def _isolated_idempotency_store(tmp_path):
+    """send_email now checks idempotency_store (STEPS.md 151) — without
+    this, every test in this file would share the real, default-path
+    idempotency.sqlite, both polluting real state (this project's own
+    verification-discipline rule) and silently making a SECOND test that
+    sends the same tool_call_id see "already sent" instead of exercising
+    the real send path."""
+    original = idempotency_store.DEFAULT_DB_PATH
+    idempotency_store.DEFAULT_DB_PATH = tmp_path / "idempotency.sqlite"
+    try:
+        yield
+    finally:
+        idempotency_store.DEFAULT_DB_PATH = original
 
 
 class _State(TypedDict):
@@ -41,6 +59,18 @@ class FakeTool:
     async def ainvoke(self, args: dict) -> Any:
         self.calls.append(args)
         return self.result
+
+
+def _make_slow(fn, delay: float):
+    """Wrap an async fn so it takes `delay` seconds — used to widen the
+    real overlap window in test_send_email_concurrent_resume_does_not_send_twice
+    so both concurrent resumes are reliably still in-flight together."""
+
+    async def _slow(*args, **kwargs):
+        await asyncio.sleep(delay)
+        return await fn(*args, **kwargs)
+
+    return _slow
 
 
 def _event_json(**overrides: Any) -> str:
@@ -70,10 +100,30 @@ async def _run_turn(
     (matching test_interrupts.py's pattern) since a resumed .ainvoke() needs
     the same checkpoint the first call wrote."""
     target = next(t for t in tools if t.name == tool_name)
+    # Generated ONCE per logical call, outside the node function — a real
+    # tool_call_id must stay stable across any resume (the node reruns
+    # from the top on Command(resume=...), same as the real graph), or
+    # the new idempotency guard (STEPS.md 151) would see a different id
+    # each time and never actually detect a duplicate.
+    call_id = str(uuid.uuid4())
 
     async def _act(state: _State) -> dict:
-        result = await target.ainvoke({**kwargs, "state": state})
-        return {"messages": [ToolMessage(content=result, name=tool_name, tool_call_id="x")]}
+        # Full ToolCall-shape invocation (not a bare args dict) — required
+        # now that send_email declares an InjectedToolCallId param
+        # (STEPS.md 151's idempotency guard); confirmed this shape still
+        # injects a manually-supplied InjectedState value the same way for
+        # every other tool here, so this is a uniform, backward-compatible
+        # change to this one shared helper, not a per-tool special case.
+        # The framework returns a real ToolMessage directly in this shape,
+        # so there's no need to re-wrap the result ourselves anymore.
+        call = {
+            "args": {**kwargs, "state": state},
+            "id": call_id,
+            "name": tool_name,
+            "type": "tool_call",
+        }
+        msg = await target.ainvoke(call)
+        return {"messages": [msg]}
 
     builder = StateGraph(_State)
     builder.add_node("act", _act)
@@ -140,6 +190,62 @@ async def test_send_email_decline_never_calls_raw_tool() -> None:
     )
     assert send_email_raw.calls == []
     assert resumed["messages"][-1].content == "Cancelled — user did not confirm."
+
+
+async def test_send_email_concurrent_resume_does_not_send_twice() -> None:
+    """The idempotency guard's actual reason for existing (STEPS.md 151).
+    Live-probed first, not assumed: a SEQUENTIAL second Command(resume=True)
+    issued after the first has already fully completed turns out to be a
+    harmless no-op (LangGraph just returns the already-final state without
+    re-running the node) — the real risk is two OVERLAPPING resumes for
+    the same interrupt, e.g. a client retrying /resume before the first
+    request's response ever came back. A direct probe (asyncio.gather of
+    two Command(resume=True) calls against a bare interrupt()-then-sleep
+    node) confirmed the node body genuinely runs twice in that case.
+    Reproduces the real shape here: two concurrent resumes of the same
+    send_email interrupt, with the raw tool made artificially slow so the
+    second resume's node execution genuinely overlaps the first's."""
+    send_email_raw = FakeTool("send_email")
+    send_email_raw.ainvoke = _make_slow(send_email_raw.ainvoke, delay=0.2)
+    tools = build_write_tools([send_email_raw])
+    target = next(t for t in tools if t.name == "send_email")
+    call_id = str(uuid.uuid4())
+    kwargs = {"to": ["a@example.com"], "subject": "Hi", "body": "Hello"}
+
+    async def _act(state: _State) -> dict:
+        call = {
+            "args": {**kwargs, "state": state},
+            "id": call_id,
+            "name": "send_email",
+            "type": "tool_call",
+        }
+        msg = await target.ainvoke(call)
+        return {"messages": [msg]}
+
+    builder = StateGraph(_State)
+    builder.add_node("act", _act)
+    builder.add_edge(START, "act")
+    builder.add_edge("act", END)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "scratch.sqlite"
+        async with get_checkpointer(db_path) as checkpointer:
+            graph = builder.compile(checkpointer=checkpointer)
+            config = {"configurable": {"thread_id": str(uuid.uuid4()), "checkpoint_ns": ""}}
+            await graph.ainvoke({"messages": []}, config=config)
+            first, second = await asyncio.gather(
+                graph.ainvoke(Command(resume=True), config=config),
+                graph.ainvoke(Command(resume=True), config=config),
+            )
+
+    assert send_email_raw.calls == [
+        {"to": ["a@example.com"], "subject": "Hi", "body": "Hello", "cc": [], "bcc": []}
+    ], "the raw tool must be called exactly once, not twice, despite the overlapping resume"
+    contents = {first["messages"][-1].content, second["messages"][-1].content}
+    assert "ok" in contents, "one of the two resumes must see the real send succeed"
+    assert any("Already sent" in c for c in contents), (
+        "the other resume must see the idempotency short-circuit, not a second real send"
+    )
 
 
 # --- modify_gmail_labels -------------------------------------------------

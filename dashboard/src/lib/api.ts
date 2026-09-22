@@ -892,6 +892,30 @@ export async function fetchActiveTurns(): Promise<{
   return { active: body.active, recentlyEnded: body.recently_ended };
 }
 
+// STEPS.md 151's durable activity log — the "what happened while I wasn't
+// watching the dashboard" complement to fetchActiveTurns' live/recent-30s
+// view above. Covers every completed supervisor->specialist delegation on
+// any channel, persisted (assistant/activity_log.sqlite), not just the last
+// 30 seconds. Polling, same reasoning as fetchActiveTurns.
+export interface ActivityLogEvent {
+  id: string;
+  thread_id: string;
+  agent: string;
+  outcome: "success" | "error";
+  detail: string;
+  started_at: string;
+  finished_at: string;
+}
+
+export async function fetchActivityLog(limit = 50): Promise<ActivityLogEvent[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/activity/log?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`/activity/log failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { events: ActivityLogEvent[] };
+  return body.events;
+}
+
 // run_claude_code's own nested Claude Code sessions (2026-08-06) — read-only
 // from this API's side, same as Workflows above: assistant/
 // claude_code_sessions.py parses the .jsonl transcripts Claude Code's own

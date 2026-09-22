@@ -1025,8 +1025,12 @@ See PLAN.md.
   reference rather than re-asserted from memory, awaiting the user's
   explicit approval per this file's own standing rule.
 - **Phase 29 (full "Instrument" design-system replacement, not a
-  re-skin) — OPENED, ACTIVE, all 4 stages code-complete, NOT
-  live-verified (2026-08-08).**
+  re-skin) — COMPLETE (opened 2026-08-08, closed 2026-09-22, all 4
+  stages code-complete). Live-verification explicitly waived by the
+  user at close ("don't test it out, just close Phase 29 and move
+  on") — the normal Phase 26-precedent done bar (no COMPLETE without a
+  real look at the running app) was not met and the user chose to close
+  anyway; see PLAN.md's own Phase 29 entry for the full note.**
   The user judged Phase 28's live result "almost exactly the same" as
   before — Phase 28 deliberately re-skinned colors/fonts onto the
   EXISTING Astryx+shadcn architecture rather than replacing it; this
@@ -1156,6 +1160,72 @@ See PLAN.md.
   a pre-existing flake via 3 clean full-suite reruns, not a regression
   from this change); `tsc`/`prettier`/`build` clean. Not live-verified —
   same standing gap, no connected browser this session.
+- **Phase 29 status flip to COMPLETE, live-verification explicitly waived
+  by the user (2026-09-22, STEPS.md 151)** — see Phase 29's own PLAN.md
+  entry and this file's own Phase 29 bullet above; recorded as a
+  deliberate exception, not a silent lowering of the done bar.
+- **A nine-item reliability/orchestration backlog, built the same session
+  (2026-09-22, STEPS.md 151-152) — not a numbered phase, scoped from an
+  outside architecture audit against a user-supplied generic engineering
+  wishlist, checked item-by-item against the real code rather than
+  answered from general knowledge.** Six of the original wishlist items
+  turned out to already be fully built (prompt caching, model routing,
+  streaming, parallel tool execution — confirmed live via the installed
+  `langgraph.prebuilt.tool_node.ToolNode` source that multi-tool-call
+  turns already fan out via `asyncio.gather`, with this project's own
+  `NoParallelWrites`/`NoParallelMacWrites`/etc. middleware correctly
+  narrowing that to serialize only write-shaped calls — nothing to build;
+  context compaction; tiered hot/warm/cold memory including `vault_
+  search.py`'s own recent cold tier). Nine real, previously-missing items
+  were built and tested (moderate depth, not exhaustive — see STEPS.md
+  152 for full detail per item):
+  1. **SQLite WAL mode** on every multi-writer store (`thread_store.py`,
+     `memory_store.py`, `workflow_store.py`, `board_store.py`, `memory.py`'s
+     checkpointer) — justified by `cost_cache.py`'s own real prior
+     concurrent-write race (STEPS.md 147).
+  2. **`assistant/logging_config.py`** — structured logging with Langfuse
+     trace-id correlation, replacing scattered `print()` calls, writing to
+     `~/Library/Logs/PersonalAssistant/oni-backend.log`.
+  3. **MCP call timeout** (`mcp_tools.py`'s `_timeout_hung_calls`, 30s) —
+     a wedged Gmail/Calendar subprocess no longer hangs a whole turn
+     silently forever.
+  4. **`assistant/idempotency_store.py`** — closes a real, live-probed
+     race (two CONCURRENT `Command(resume=...)` calls for the same
+     interrupt genuinely both re-run the node body; a sequential retry
+     after full completion is already safe) on `send_email`/`send_imessage`
+     specifically, the two tools where a duplicate send is irreversible.
+  5. **`assistant/tool_cache.py`** — a TTL cache on genuinely read-only
+     Gmail/Calendar MCP calls, deliberately excluding the tools
+     `write_tools.py` uses for its own read-back-before-gating security
+     check.
+  6. **`SpecialistResult` (`NamedTuple`, supervisor.py)** — pins down the
+     specialist-delegation return contract that had organically accreted
+     across Phases 17/21/25 as an untyped 4-tuple.
+  7. **`assistant/activity_log.py`** — a durable, WAL-mode cross-channel
+     record of every completed supervisor->specialist delegation (`GET
+     /activity/log`), the real feature the generic "event bus" wishlist
+     item was gesturing at; frontend surfacing deliberately deferred as an
+     open follow-up.
+  8. **`assistant/conversation_search.py`** — local-embedding semantic
+     search over past conversation threads (`GET /search/conversations`),
+     reusing `vault_search.py`'s exact approach for a different corpus; a
+     dashboard endpoint rather than an agent tool specifically to avoid a
+     real circular dependency on the not-yet-built supervisor graph.
+  9. **MCP integration health visibility** — `GET /health/integrations`
+     plus a `life_admin_agent` system-prompt note (added once at agent-
+     construction time, confirmed prompt-caching-safe) when Gmail/Calendar
+     failed to load, so a routed request gets a clear message instead of
+     a confusing tool-not-found reply.
+  Per the user's own direct, cost-conscious instruction mid-session ("don't
+  perform too many tests, don't waste my money"), the full real-API
+  `pytest` suite (`test_server.py`/`test_supervisor.py` make real
+  Anthropic calls per test) was deliberately NOT re-run wholesale — every
+  new/changed test was run individually and passed instead; a full-suite
+  pass is the natural next step before any commit. `ruff check .` clean
+  (1 pre-existing, unrelated finding already documented in this file's own
+  status log); `tsc --noEmit` clean. Not committed — see STEPS.md 152 for
+  the complete per-item build record and the one confirmed-pre-existing
+  test-isolation flake found (not introduced) along the way.
 
 This block is the only part of this file that changes routinely; everything
 below is durable.
@@ -1503,6 +1573,21 @@ filtering content.
   temp-file-then-`os.replace()` atomic swap (fixes crash-mid-write
   corruption); the separate lost-update race between two concurrent writes
   is a known, accepted, best-effort gap, not fixed.
+- **`assistant/vault_search.py`** (added 2026-09-17, backlog Section 3
+  feature, STEPS.md 150): semantic search over the Obsidian vault
+  (`obsidian_tools.py`'s `search_vault` now runs its existing exact
+  substring search first, then supplements with this). Local embedding
+  model (`sentence-transformers`/`all-MiniLM-L6-v2`) — no external API, no
+  per-query cost; `torch` was already an installed dependency of
+  `mlx-whisper` (Phase 8), so the marginal new weight is the package
+  itself plus a ~90MB model cached locally after one first download.
+  **This is a SEPARATE decision from the "no vector store" call above for
+  Facts** — the Vault (hundreds of notes, not the small curated Facts
+  store) is a real, distinct use case where keyword matching's limits
+  actually show up; not a reversal of that earlier reasoning. A single
+  content-hashed `.npz` cache file (gitignored), not a real vector-index
+  library — brute-force cosine similarity over an in-memory matrix is
+  sub-millisecond at this scale, no ANN index needed.
 
 ## Verification discipline
 

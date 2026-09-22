@@ -12680,3 +12680,373 @@ succeeds. Full backend `pytest`: 418 passed (11 new), 3 failed — the same
 pointer flake, the pre-existing "APPLE" gap in `SUPERVISOR_SYSTEM_PROMPT_FALLBACK`)
 — this round's edits never touch `supervisor.py`'s prompt text or
 `thread_store.py` at all. Not committed.
+
+## 150. Vault semantic search (backlog Section 3 feature idea, second of three)
+
+**What:** the second item from the backlog's Section 3 sequencing (live
+Claude Code visibility → vault semantic search → workflow bridge).
+`obsidian_tools.py`'s `search_vault` used exact substring matching only —
+a real limit as the vault grows past its 138+ (now 268, checked live)
+notes: a paraphrase or synonym-shaped query finds nothing a keyword
+scanner can. Scoped via a short grilling exchange on the one real open
+decision — the embedding mechanism — since the original feature idea's
+"no new external service" framing needed re-checking against what's
+actually installed: `torch` turned out to already be a real dependency
+(via `mlx-whisper`, Phase 8's STT), which changes the cost/weight
+calculus for a local embedding model considerably. Chose local
+`sentence-transformers` over both a no-new-dependency lexical-only
+improvement and an external embeddings API (Voyage AI, Anthropic's own
+recommended partner) — real semantic quality, no per-query cost, no new
+service to trust.
+
+**A real cost finding before committing to the design:** a cold model
+load took ~140s on this network (one-time, first use only) but a
+`local_files_only=True` load after that first download took ~0.3s — the
+slow part is entirely a network round-trip checking for model updates,
+not actual inference startup. `_load_model()` tries the fast local-only
+path first and only falls back to a real network-enabled load if nothing
+is cached yet, rather than always paying the network round-trip.
+
+**Built:** new `assistant/vault_search.py` — `semantic_search(query,
+top_k=5)` embeds the query and every current note's title + first ~500
+characters, ranks by cosine similarity, and returns matches at or above a
+0.3 similarity floor (calibrated from a real live spot-check: genuinely
+related text scored ~0.5, unrelated ~0.1, so 0.3 sits clearly between the
+two). A single content-hashed `.npz` cache file (new dependency
+`sentence-transformers`, `pyproject.toml`/`requirements.txt` kept in
+sync) — deliberately NOT a real vector-index library: brute-force cosine
+similarity over an in-memory matrix is sub-millisecond at vault scale, no
+approximate-nearest-neighbor index needed, the same minimalism call this
+project's own Tech stack section already made once for Facts (Chroma
+rejected at Phase 7) — but a SEPARATE decision for the Vault specifically,
+not a reversal of that one (a real, distinct use case where keyword
+matching's limits actually show up, not the same "small curated store"
+Facts is). Cache entries for renamed/deleted notes are pruned on every
+search, not left to accumulate forever.
+
+`obsidian_tools.py`'s `search_vault` now runs its existing exact substring
+search first (unchanged), then supplements with semantic hits for any
+note the substring pass missed (deduped by title) — never replaces the
+exact search, since a course code or other precise term is still found
+better by it. `search_vault`'s own tool docstring (what the model reads)
+and the module docstring were both updated to describe the new behavior,
+including what a "(semantic match...)" annotation in results means.
+
+**A real test-isolation bug found and fixed while writing tests, not
+theoretical:** `vault_search.py` imports `VAULT_DIR` from
+`obsidian_tools.py` via a plain `from ... import VAULT_DIR` — a one-time
+binding that does NOT track `obsidian_tools.VAULT_DIR` being reassigned
+later. `test_obsidian_tools.py`'s existing `_temp_vault()` helper
+reassigns `obsidian_tools.VAULT_DIR` to a tempdir for test isolation, but
+without a matching fix every existing `search_vault` test would have
+silently searched the REAL `~/Documents/OniVault` (268 real notes) via
+the new semantic supplement instead of the test's own clean tempdir —
+slow, non-deterministic, and a real isolation leak. Fixed by having
+`_temp_vault()` also stub `vault_search.semantic_search` for its
+duration (defaulting to no semantic hits, matching this file's existing
+exact-match-only expectations; an optional `semantic_results` parameter
+lets a test opt into exercising the hybrid-merge behavior explicitly).
+Confirmed the fix actually worked, not just assumed: the full
+`test_obsidian_tools.py` suite (25 tests, 2 new) now runs in ~0.1s, proving
+none of them touch the real model or real vault anymore.
+
+**A second real bug found and fixed, this one in `semantic_search` itself
+(caught by a deliberately adversarial test, not found by inspection):**
+the function's own early-return for an empty vault (`if not notes: return
+[]`) skipped the cache-pruning logic entirely — meaning deleting every
+note in the vault would leave a now-fully-stale cache behind forever,
+never cleaned up. Fixed by moving the pruning logic (which needs no model,
+so it's cheap regardless) before that early return.
+
+**Verification:** live end-to-end against the real `~/Documents/OniVault`
+(268 real notes) before writing any test — a real query ("how do I
+understand my own personality traits") correctly found the one genuinely
+relevant note by score alone; a real query ("recursion and base cases in
+programming") correctly ranked three real course notes on recursion
+above tangentially-related ones; confirmed the hybrid merge via
+`search_vault` itself, including a query with heavy exact-match overlap
+correctly suppressing all semantic duplicates. New
+`tests/test_vault_search.py` (6 tests, a fake deterministic model — no
+real ML inference, no network dependency in the test suite) covers
+ranking/thresholding, cache reuse for an unchanged note, re-embedding for
+a changed one, stale-entry pruning (including the empty-vault edge case
+above), a missing vault directory, and the local-then-network model-load
+fallback. `tests/test_obsidian_tools.py` extended (2 new tests) for the
+hybrid-merge and no-duplicate behavior. `ruff check .` — same 1
+pre-existing, unrelated finding as STEPS.md 148/149. Full backend
+`pytest`: 427 passed (9 new), 2 failed — both the same confirmed
+pre-existing/unrelated failures as STEPS.md 148/149 (the `threads.sqlite`
+flake and the pre-existing "APPLE" gap; the third transient
+`APIConnectionError` from those two entries happened not to reproduce
+this run, consistent with it being real network flakiness rather than a
+deterministic failure). No frontend changes this round. Not committed.
+
+## 151. Phase 29 closed (live-verification explicitly waived); a new reliability/orchestration backlog scoped from an outside architecture audit
+
+**Phase 29 status flip:** the user was asked directly whether to
+live-verify the "Instrument" design-system replacement before closing it
+(Phase 26's own precedent: code-complete without a real look at the
+running app normally holds the status flip open) or close it without
+that look. Told explicitly to skip verification and close — "don't test
+it out, just close Phase 29 and move on." CLAUDE.md's Current Status
+block and PLAN.md's own Phase 29 entry both flipped to COMPLETE with
+that waiver recorded as a deliberate exception, not a silent lowering of
+the done bar (PLAN.md's entry now says so explicitly, so a future
+rendering bug in this UI reads as a bug against already-closed work, not
+an open item).
+
+**New backlog, separate from the existing Section 2/3 backlog (STEPS.md
+147-150) and not yet given a section number of its own:** a user-supplied
+list of generic "make any agent app better" engineering ideas (prompt
+caching, response caching, model routing, streaming, parallel tool
+execution, context pruning, structured inter-agent messages, an event
+bus, idempotency keys, per-service circuit breakers, tiered memory, a
+conversation-embeddings index, write-ahead logging, structured
+trace-correlated logging, MCP health checks, graceful degradation) was
+checked item-by-item against the REAL codebase, not answered from
+general knowledge — grepped/read `supervisor.py`/`sub_agents.py`/
+`mcp_tools.py`/`write_tools.py`/`compaction.py`/`memory_extraction.py`,
+and confirmed directly from the installed `langgraph` package's own
+`ToolNode._afunc` source that multi-tool-call turns already fan out via
+`asyncio.gather` (parallel tool execution exists for free at the
+framework level; Oni's own `NoParallelWrites`/`NoParallelMacWrites`/
+`NoParallelCodingWrites`/`NoParallelSpecialistCalls` middleware already
+correctly narrows that to serialize only write-shaped/delegation-shaped
+calls, not reads).
+
+**Six items were already fully built** (prompt caching, model routing,
+streaming, parallel tool execution, context pruning/compaction, tiered
+hot/warm/cold memory including `vault_search.py`'s cold tier) — no
+action. **Two were reconsidered and closed as deliberately out of
+scope** (a generic Pydantic inter-agent message schema — no documented
+incident justifies it, would be exactly the kind of speculative
+abstraction CLAUDE.md's own conventions warn against; a generic
+decoupled event bus — `adispatch_custom_event` has exactly one real
+consumer, `server.py`'s SSE relay, so there is no second-subscriber
+problem to solve). Both were reconsidered a second time when the user
+pushed back ("I want anything that can make oni better") and found to
+each have a real, narrower, Oni-specific version worth building instead
+of the generic architecture pattern — see below.
+
+**Nine concrete items scoped for this batch, in build order (cheapest/
+highest-leverage first):**
+1. SQLite WAL mode on every store this project writes from multiple
+   concurrent channels (checkpointer, `thread_store.py`, `memory_
+   store.py`, `board_store.py`, `workflow_store.py`) — justified by a
+   real precedent already in the codebase (`cost_cache.py`'s own
+   concurrent-write race, STEPS.md 147).
+2. App-level structured logging (`logging.getLogger("oni")`) replacing
+   scattered `print()` calls, correlated with the active Langfuse trace
+   id via `observability.py`'s existing `tracing_context()`.
+3. A timeout on individual MCP tool calls (`mcp_tools.py`'s existing
+   `tool_interceptors` list gains one more), distinct from
+   `RepeatedToolFailureCircuitBreaker` (that guards a model retrying the
+   same failing call; this guards a single call that never returns at
+   all because the Node subprocess is wedged) — ties directly to the
+   project's own standing "never be surprised by a silent background
+   process" rule (STEPS.md 122).
+4. Idempotency protection on gated write tools, reusing Phase 25's
+   existing approved-vs-executed workflow audit log rather than building
+   new infrastructure — closes the real (narrow-window, high-consequence)
+   gap where a crash between `interrupt()` approval and the actual side
+   effect completing could replay the side effect on resume.
+5. A small TTL cache on read-only external tool calls (Gmail/Calendar
+   search, Tavily), same interceptor pattern as `mcp_tools.py`'s existing
+   `_cap_result_size`.
+6. A typed result object for `_invoke_agent_graph`/`call_specialist`'s
+   existing four-piece return contract (reply text, A2UI surfaces, phone
+   actions, executed-action audit records) — these already exist as
+   separate pieces threaded through untyped `additional_kwargs` dict
+   markers accreted across five phases; this pins the shape down, it
+   doesn't invent new structure.
+7. A durable `activity_log` table that `adispatch_custom_event`
+   dispatches also write to (not just relay live) — the real feature
+   the generic "event bus" idea was gesturing at: "what happened while I
+   wasn't watching the dashboard," a direct extension of `active_
+   turns.py`'s own reasoning (STEPS.md 122) to non-live-observed
+   background/automation/phone-channel activity.
+8. Extending `vault_search.py`'s existing local-embedding infrastructure
+   to also index conversation turns (`conversation_memory.sqlite`), not
+   just the Obsidian vault — same module, same cache pattern, new corpus.
+9. MCP-server health visibility (a status indicator in the dashboard,
+   mirroring `ActiveTurnBanner`'s own pattern) plus telling
+   `life_admin_agent`'s prompt when its Gmail/Calendar tools failed to
+   load, so a missing integration produces a clear message instead of a
+   confusing tool-not-found response.
+
+Building each in sequence below, one commit-boundary-worthy save point
+per item (not batched to the end), per this project's own logging
+convention.
+
+## 152. All nine reliability/orchestration backlog items built (STEPS.md 151's scope)
+
+**What:** all nine items scoped above are code-complete and unit/
+integration-tested at a proportionate depth (moderate, not exhaustive —
+same deliberate-scope precedent as `media_tools.py`'s own coverage call,
+STEPS.md 148). Verified via targeted test runs per item as it was built,
+not one slow sweep at the end — the full real-API `pytest` suite (`test_
+server.py`/`test_supervisor.py` make real Anthropic calls per test) was
+deliberately NOT re-run wholesale this session, at the user's own direct
+cost-conscious instruction ("don't perform too many tests, don't waste my
+money") — every new/changed test that needed to be proven correct was run
+individually and passed; a full-suite pass is the natural next step before
+any commit, left for the user's own call on timing/cost.
+
+**1. WAL mode** — `PRAGMA journal_mode=WAL` added to every store's own
+`_connect()`/checkpointer choke point (`thread_store.py`, `memory_store.py`,
+`workflow_store.py`, `board_store.py`, `memory.py`'s `AsyncSqliteSaver`
+wrapper) — one line each, live-confirmed via a direct `PRAGMA journal_mode`
+read-back (returned `"wal"`, not just trusted the call succeeded).
+`tests/test_thread_store.py`/`test_memory_store.py`/`test_workflow_store.py`/
+`test_memory.py` (43 tests) all pass unmodified — no behavior change from
+any existing caller's perspective, only the on-disk journal mode.
+
+**2. Structured logging + trace correlation** — new `assistant/logging_
+config.py`'s `configure_logging(name)`: one root logger, a formatter
+including timestamp/level/logger-name/Langfuse-trace-id (`_TraceIdFilter`,
+reading `observability.get_client().get_current_trace_id()` — confirmed
+cheap, an ambient-OTEL-context read, not assumed), writing to both stderr
+and `~/Library/Logs/PersonalAssistant/oni-backend.log` (same directory the
+dev launcher's own `oni-dev.log` already uses). Wired into `main.py`/
+`server.py` startup; `server.py`'s nightly memory-review job's `print()`
+calls converted to `logger.info`/`logger.exception`. Live-verified: a real
+log line written and read back from the real file, trace defaulting to
+`"-"` with no active span. `tests/test_logging_config.py` (5 tests, new)
+covers idempotent configuration and the trace-id filter's fail-soft
+behavior.
+
+**3. MCP call timeout** — `mcp_tools.py`'s new `_timeout_hung_calls`
+interceptor (outermost in the chain — confirmed via the installed
+`langchain_mcp_adapters` source that "first in list = outermost", not
+assumed), 30s `asyncio.wait_for`, returns a clean error `CallToolResult`
+on timeout rather than hanging the whole graph turn or raising ("tool
+errors are data, not exceptions"). Distinct from `RepeatedToolFailure
+CircuitBreaker` (guards a model retrying an already-returned failure; this
+guards a single call that never returns at all). 2 new tests in `tests/
+test_mcp_tools.py` (a fast pass-through case, and a real-hang case with
+the timeout shortened to 0.05s).
+
+**4. Idempotency guard on gated sends** — new `assistant/idempotency_
+store.py` (plain sync `sqlite3`, keyed on LangChain's own stable
+`tool_call_id` via `InjectedToolCallId`), wired into `write_tools.py`'s
+`send_email` and `mac_tools.py`'s `send_imessage` — the two tools where
+"already sent" is irreversible and most likely to genuinely confuse a
+real recipient. **Live-probed before building, not assumed:** a direct
+`asyncio.gather` of two `Command(resume=True))` calls against a bare
+`interrupt()`-then-sleep node proved a SEQUENTIAL second resume (after the
+first fully completed) is already a harmless no-op — LangGraph just
+returns the final state — but a CONCURRENT second resume for the same
+still-in-flight interrupt genuinely re-runs the node body. That's the
+real, narrower window this closes (a client retrying `/resume` before the
+first attempt's response ever came back), not the broader "any resume
+could double-fire" framing initially assumed. Required a supporting fix
+to both gated tools' own test harnesses (`test_write_tools.py`/`test_mac_
+tools.py`): their shared `_run_turn`/`_build_tool_graph` helpers invoked
+tools via a bare args dict, which `InjectedToolCallId` now rejects —
+switched to the full LangChain `ToolCall` shape (`{"args", "id", "name",
+"type"}`), a stable id generated once per logical call (not per node
+rerun, which would have defeated the guard's own stability requirement).
+Also added `_isolated_idempotency_store` fixtures/contextmanagers to both
+test files after a first run left a real `idempotency.sqlite` in the repo
+root (caught immediately, not shipped) — this project's own verification-
+discipline rule. 2 new concurrent-resume tests (one per tool, both
+directly reproducing the real race via `asyncio.gather`) plus all existing
+write_tools/mac_tools tests (61 combined) still pass. **Known pre-existing,
+unrelated flake found while testing:** `test_mac_tools.py` +
+`test_write_tools.py` run together (not separately) reproduce a real
+`uname`/`file` subprocess-call leak into `test_open_app_uses_plain_open_
+cli_not_osascript`'s mocked-subprocess assertion — confirmed via `git
+stash` to reproduce identically on unmodified `main`, not introduced here.
+
+**5. Response/tool-call caching** — new `assistant/tool_cache.py`
+(`TTLCache`, plain in-memory dict, JSON-hashed keys), wired into `mcp_
+tools.py` as `_cache_read_only_calls` (innermost interceptor — caches the
+FINAL args after every other interceptor's own mutation), 60s TTL,
+scoped to a conservative allowlist of genuinely read-only Gmail/Calendar
+tools — deliberately EXCLUDING `get-event`/`get_filter`/`read_email`,
+which `write_tools.py` uses for its own read-back-before-gating security
+check; caching those would let a confirmation gate show possibly-stale
+state right before a security decision. Tavily/`web_search` caching
+considered and deliberately deferred (it's a bare third-party `TavilySearch`
+instance, not a project-owned wrapper — reusing this same `TTLCache`
+class for it later is a small, low-risk follow-up, not a redesign). 7 new
+tests (`test_tool_cache.py` — 7 unit tests on the cache itself; 3 more in
+`test_mcp_tools.py` for the interceptor: cache hit, excluded-tool bypass,
+different-args-don't-collide).
+
+**6. Typed specialist-result contract** — new `SpecialistResult(NamedTuple)`
+in `supervisor.py`, replacing the bare 4-tuple `_invoke_agent_graph`/
+`_invoke_research_agent_via_http` had returned since Phases 17/21/25 each
+added one more untyped position to it. `NamedTuple` chosen specifically so
+every existing `content, surfaces, phone_actions, executed_actions =
+await invoke(...)` destructuring call site (including `server.py`'s own
+automation-fire path) needed zero changes — this pins down and documents
+an already-existing, organically-accreted contract rather than inventing
+new structure. `test_supervisor.py`: 26/27 pass (the 1 failure is the
+same already-documented pre-existing "APPLE" gap in `SUPERVISOR_SYSTEM_
+PROMPT_FALLBACK`, STEPS.md 147-150, confirmed unrelated — this session's
+edits never touch that prompt constant).
+
+**7. Durable cross-channel activity log** — new `assistant/activity_log.py`
+(`aiosqlite`, WAL mode from day one), recording one row per completed
+supervisor->specialist delegation (`call_specialist`'s own try/except/
+finally in `supervisor.py`, best-effort — a logging failure is caught and
+swallowed, never allowed to break a real turn). Deliberately scoped to
+the OUTER delegation boundary only, not each specialist's inner tool
+calls — the same scope cut `active_turns.py`'s own module docstring
+already made and explained for the identical reason (a nested specialist's
+isolated `ainvoke()` has no reliable `thread_id` to key a row on). New
+`GET /activity/log` (server.py) — the durable complement to the existing
+`GET /activity/active`'s live/last-30-seconds-only view; this is the real
+feature the generic "event bus" wishlist idea was actually gesturing at.
+5 new tests in `tests/test_activity_log.py`, 1 new fast endpoint test in
+`test_server.py` (no real graph turn needed — seeds the store directly).
+Frontend surfacing (a dashboard panel/banner entry) deliberately NOT built
+this session — the API is there and tested, but adding real UI for all
+nine items in one sitting would have unbalanced effort across them; noted
+as an open, cheap follow-up rather than silently skipped.
+
+**8. Conversation semantic search** — new `assistant/conversation_
+search.py`, reusing `vault_search.py`'s exact local-embedding approach
+(`sentence-transformers`/`all-MiniLM-L6-v2`, content-hashed `.npz` cache)
+for a different corpus: past chat threads, not Obsidian notes. Cache keyed
+on `thread_store`'s own cheap `last_active_at` field (avoids re-fetching
+full message history just to check "has this thread changed"), not a
+content hash of the full history. **Deliberately a dashboard endpoint
+(`GET /search/conversations`, server.py), not an agent tool** — an agent
+tool would need the SUPERVISOR's own compiled graph to read state
+correctly (`graph.aget_state()`, this project's own established rule
+against hand-parsing the checkpointer directly, STEPS.md 54), but the
+graph object doesn't exist yet while its own tools are still being
+constructed — a real circular dependency avoided by building this at the
+server layer, which already holds `app.state.graph` post-construction.
+7 new tests in `tests/test_conversation_search.py` (fake model, fake
+`fetch_messages`, no real embedding load or API call) plus 1 new `test_
+server.py` integration test that seeds a real thread's checkpoint state
+via `graph.aupdate_state()` directly (no real `/chat` turn, no API cost)
+and fakes the embedding model the same way.
+
+**9. MCP integration health visibility + graceful degradation** — `server.
+py`'s lifespan now computes `app.state.integration_status` (`{"gmail":
+bool, "calendar": bool}`, checked independently via known tool-name-set
+overlap, not just "mcp_tools is empty") and exposes it via new `GET
+/health/integrations`. New `sub_agents.py`'s `_life_admin_unavailable_
+integrations_note(mcp_tools)` appends a note to `life_admin_agent`'s
+system prompt AT AGENT-CONSTRUCTION TIME (once per process, not per turn
+— confirmed this doesn't fight `AnthropicPromptCachingMiddleware`, since
+the prompt is still a stable prefix for the whole process lifetime) when
+either integration is missing, so a routed request gets "Gmail is
+currently unavailable" instead of a confusing tool-not-found reply. Noted
+but NOT fixed: `load_mcp_tools()` resolves both servers' env-var paths
+unconditionally in one `MultiServerMCPClient` construction, so today a
+single missing env var actually takes both servers down together — the
+new independent-check logic doesn't assume that coupling stays true, but
+decoupling the two servers' construction is a larger, separate change,
+left as a documented follow-up. 1 new test in `test_sub_agents.py`
+(the note-building function directly, offline, no API cost) — the
+existing test suite proved importing sub_agents/server still works cleanly
+(a plain `import` smoke check, not a new pytest test, to avoid the real-
+API/network cost of spinning up another full agent-construction test).
+
+**Not committed** — save-point proposal given directly to the user (a
+git-workflow decision per CLAUDE.md's own rule), not drafted here.

@@ -31,6 +31,20 @@ tokens.json
 # conversation-history files during a real commit pass (2026-08-08).
 *.sqlite-x-checkpoints-*.bin
 
+# cost_cache.py's own durable /cost fallback (last-known-good Langfuse
+# figures) — runtime state, same category as the *.sqlite stores above.
+cost_cache.json
+
+# vault_search.py's cached note embeddings (backlog Section 3 feature,
+# STEPS.md 150) — a derived, rebuildable cache keyed by content hash, same
+# runtime-state category as cost_cache.json above.
+vault_embeddings_cache.npz
+
+# conversation_search.py's cached thread embeddings (STEPS.md 151/152) —
+# same derived, rebuildable-cache category as vault_embeddings_cache.npz
+# above, just a different corpus.
+conversation_embeddings_cache.npz
+
 # LangGraph Studio (`langgraph dev`) local runtime state
 .langgraph_api/
 

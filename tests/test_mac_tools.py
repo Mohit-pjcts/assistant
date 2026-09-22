@@ -27,7 +27,25 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 import assistant.mac_tools as mac_tools
+from assistant import idempotency_store
 from assistant.memory import get_checkpointer
+
+
+@contextmanager
+def _isolated_idempotency_store(tmp_dir: Path):
+    """send_imessage now checks idempotency_store (STEPS.md 151) — without
+    this, tests would share the real, default-path idempotency.sqlite,
+    both polluting real state and letting one test's recorded tool_call_id
+    leak into another's. A plain contextmanager, not a pytest fixture,
+    matching this file's own no-framework-required convention (its
+    docstring, and the __main__ block at the bottom) — reuses whatever
+    temp dir the caller already made for the checkpointer db."""
+    original = idempotency_store.DEFAULT_DB_PATH
+    idempotency_store.DEFAULT_DB_PATH = tmp_dir / "idempotency.sqlite"
+    try:
+        yield
+    finally:
+        idempotency_store.DEFAULT_DB_PATH = original
 
 
 class State(TypedDict):
@@ -205,12 +223,26 @@ def test_iso_datetime_argv_bad_timezone_raises_not_swallowed() -> None:
 
 
 def _build_tool_graph(checkpointer, tool_name: str, tool_args: dict):
+    # Generated once per graph build, outside node() — send_imessage now
+    # declares an InjectedToolCallId param (STEPS.md 151's idempotency
+    # guard), which requires the full ToolCall invocation shape below, and
+    # that id must stay stable across a resume (node() reruns from the top
+    # on Command(resume=...)), not be regenerated each time it runs.
+    call_id = str(uuid.uuid4())
+
     def node(state: State) -> dict:
         # A minimal, correctly-shaped GatedAgentState stand-in — this test
         # graph's own State (just {"result": ...}) doesn't match the
         # calendar tools' expected InjectedState shape.
         target = getattr(mac_tools, tool_name)
-        return {"result": target.invoke({**tool_args, "state": {"messages": []}})}
+        call = {
+            "args": {**tool_args, "state": {"messages": []}},
+            "id": call_id,
+            "name": tool_name,
+            "type": "tool_call",
+        }
+        msg = target.invoke(call)
+        return {"result": msg.content}
 
     builder = StateGraph(State)
     builder.add_node("act", node)
@@ -221,13 +253,14 @@ def _build_tool_graph(checkpointer, tool_name: str, tool_args: dict):
 
 async def _run_gated_tool(tool_name: str, tool_args: dict, resume, capture=_capture_subprocess_calls):
     with tempfile.TemporaryDirectory() as tmp:
-        async with get_checkpointer(Path(tmp) / "scratch.sqlite") as checkpointer:
-            graph = _build_tool_graph(checkpointer, tool_name, tool_args)
-            config = {"configurable": {"thread_id": str(uuid.uuid4()), "checkpoint_ns": ""}}
-            with capture() as calls:
-                first = await graph.ainvoke({"result": None}, config=config)
-                assert "__interrupt__" in first, f"expected interrupt, got {first}"
-                resumed = await graph.ainvoke(Command(resume=resume), config=config)
+        with _isolated_idempotency_store(Path(tmp)):
+            async with get_checkpointer(Path(tmp) / "scratch.sqlite") as checkpointer:
+                graph = _build_tool_graph(checkpointer, tool_name, tool_args)
+                config = {"configurable": {"thread_id": str(uuid.uuid4()), "checkpoint_ns": ""}}
+                with capture() as calls:
+                    first = await graph.ainvoke({"result": None}, config=config)
+                    assert "__interrupt__" in first, f"expected interrupt, got {first}"
+                    resumed = await graph.ainvoke(Command(resume=resume), config=config)
             return calls, resumed
 
 
@@ -510,6 +543,42 @@ def test_send_imessage_approved_passes_recipient_and_message_as_argv() -> None:
     # return value only comes from the actual AppleScript, not exercised by
     # this mocked-subprocess test (this file's own docstring).
     assert resumed["result"] == "(done)"
+
+
+def test_send_imessage_concurrent_resume_does_not_send_twice() -> None:
+    """Same real, empirically-verified race as write_tools.py's own
+    test_send_email_concurrent_resume_does_not_send_twice (STEPS.md 151,
+    idempotency_store.py's module docstring has the full probe writeup):
+    two overlapping Command(resume=True) calls for the SAME interrupt
+    genuinely both re-run the node body, so without the idempotency guard
+    this would send the real iMessage twice."""
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as tmp:
+            with _isolated_idempotency_store(Path(tmp)):
+                async with get_checkpointer(Path(tmp) / "scratch.sqlite") as checkpointer:
+                    graph = _build_tool_graph(
+                        checkpointer,
+                        "send_imessage",
+                        {"recipient": "+15551234567", "message": "running late"},
+                    )
+                    config = {"configurable": {"thread_id": str(uuid.uuid4()), "checkpoint_ns": ""}}
+                    with _capture_subprocess_calls() as calls:
+                        first = await graph.ainvoke({"result": None}, config=config)
+                        assert "__interrupt__" in first
+                        r1, r2 = await asyncio.gather(
+                            graph.ainvoke(Command(resume=True), config=config),
+                            graph.ainvoke(Command(resume=True), config=config),
+                        )
+                    return calls, r1, r2
+
+    calls, r1, r2 = asyncio.run(_run())
+    assert len(calls) == 1, "osascript must run exactly once, not twice, despite the overlapping resume"
+    results = {r1["result"], r2["result"]}
+    assert "(done)" in results, "one of the two resumes must see the real send succeed"
+    assert any("Already sent" in r for r in results), (
+        "the other resume must see the idempotency short-circuit, not a second real send"
+    )
 
 
 def test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim() -> None:
@@ -870,6 +939,8 @@ if __name__ == "__main__":
     print("OK: test_send_imessage_declined_never_invokes_osascript")
     test_send_imessage_approved_passes_recipient_and_message_as_argv()
     print("OK: test_send_imessage_approved_passes_recipient_and_message_as_argv")
+    test_send_imessage_concurrent_resume_does_not_send_twice()
+    print("OK: test_send_imessage_concurrent_resume_does_not_send_twice")
     test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim()
     print("OK: test_send_imessage_payload_carries_the_real_recipient_and_message_verbatim")
     test_extract_message_text_prefers_plain_text_column()
@@ -894,4 +965,4 @@ if __name__ == "__main__":
     print("OK: test_photos_search_passes_query_as_argv")
     test_photos_export_writes_into_the_workspace_containment_boundary()
     print("OK: test_photos_export_writes_into_the_workspace_containment_boundary")
-    print("\n31 tests passed")
+    print("\n32 tests passed")
