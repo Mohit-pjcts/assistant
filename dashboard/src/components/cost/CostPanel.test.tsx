@@ -19,6 +19,9 @@ const emptyWindow = {
   total_cost: 0,
   prompt_cost: 0,
   completion_cost: 0,
+  stale: false,
+  no_data: false,
+  read_at: "2026-08-09T12:00:00.000Z",
 };
 
 const sampleStats = {
@@ -49,6 +52,7 @@ const sampleStats = {
       total_cost: 123.45,
     },
   },
+  rate_limited: null,
 };
 
 beforeEach(() => {
@@ -102,5 +106,55 @@ describe("CostPanel", () => {
     await user.click(screen.getByRole("button", { name: /refresh/i }));
 
     await waitFor(() => expect(mockedFetchCost).toHaveBeenCalledTimes(2));
+  });
+
+  // The user's own direct ask, 2026-08-09 (twice — a first fix still just
+  // showed a bare error banner): a live Langfuse rate limit must never
+  // blank the grid. server.py's /cost now absorbs this itself, returning
+  // a normal 200 whose windows carry the last recorded figures
+  // (`stale: true`) plus a top-level `rate_limited` countdown target —
+  // there is no error class to mock anymore, just a degraded response.
+  it("shows the rate-limited banner, a countdown, and the last recorded figures", async () => {
+    const resetAt = new Date(Date.now() + 3_600_000).toISOString();
+    mockedFetchCost.mockResolvedValue({
+      ...sampleStats,
+      windows: {
+        today: { ...sampleStats.windows.today, stale: true },
+        week: { ...sampleStats.windows.week, stale: true },
+        all_time: { ...sampleStats.windows.all_time, stale: true },
+      },
+      rate_limited: {
+        message: "Rate limit exceeded",
+        retry_after_seconds: 3600,
+        reset_at: resetAt,
+      },
+    });
+
+    render(<CostPanel />);
+
+    expect(await screen.findByText(/Langfuse rate-limited/i)).toBeInTheDocument();
+    expect(screen.getByText(/Resets in/i)).toBeInTheDocument();
+    // The stat cards are still on screen, not blanked by the failure.
+    expect(screen.getByText("Today")).toBeInTheDocument();
+    expect(screen.getByText("$1.2345")).toBeInTheDocument();
+    expect(screen.getAllByText(/^Read /).length).toBeGreaterThan(0);
+  });
+
+  it("shows an em-dash placeholder for a window that has never recorded anything", async () => {
+    mockedFetchCost.mockResolvedValue({
+      project: "langfuse",
+      windows: {
+        today: { ...emptyWindow, stale: true, no_data: true, read_at: null },
+        week: { ...emptyWindow, stale: true, no_data: true, read_at: null },
+        all_time: { ...emptyWindow, stale: true, no_data: true, read_at: null },
+      },
+      rate_limited: { message: "Rate limit exceeded", retry_after_seconds: 60, reset_at: null },
+    });
+
+    render(<CostPanel />);
+
+    expect(await screen.findByText("Today")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBe(3);
+    expect(screen.getAllByText(/No data recorded yet/i).length).toBe(3);
   });
 });
