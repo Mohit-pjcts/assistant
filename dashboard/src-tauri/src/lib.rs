@@ -108,19 +108,35 @@ fn spawn_backend() -> std::io::Result<Child> {
     let uvicorn = root.join(".venv/bin/uvicorn");
     free_port(BACKEND_PORT);
     eprintln!("[assistant] starting backend: {}", uvicorn.display());
-    Command::new(uvicorn)
-        .args([
-            "assistant.server:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            &BACKEND_PORT.to_string(),
-            "--reload",
-            "--reload-dir",
-            "assistant",
-        ])
-        .current_dir(&root)
-        .spawn()
+    let mut command = Command::new(uvicorn);
+    command.args([
+        "assistant.server:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        &BACKEND_PORT.to_string(),
+    ]);
+    // `--reload --reload-dir assistant` ONLY in debug builds (`npm run
+    // tauri dev`) — a real, twice-reproduced incident (STEPS.md, 2026-09-23
+    // and 2026-09-24) found this is not just a dev convenience but a real
+    // reliability hazard: uvicorn's `--reload` supervisor spawns its actual
+    // worker via Python's own `multiprocessing` (`spawn_main`), and when
+    // that SUPERVISOR process dies (observed twice, root cause not fully
+    // pinned down — the watcher itself, not the worker, is what disappears),
+    // its worker is orphaned (reparented to launchd) holding the listening
+    // socket, un-killable by a plain SIGTERM (`free_port` above), and unable
+    // to ever reload or restart again — silently serving stale code for
+    // hours/weeks, or in the second incident, simply hanging every request.
+    // A packaged release build has no reason to carry this risk at all: its
+    // own `assistant/` source never changes between runs the way a live dev
+    // session's does, so there is nothing for `--reload` to usefully watch
+    // for in the first place. `cfg!(debug_assertions)` is Tauri/Cargo's own
+    // standard dev-vs-release switch — true for `tauri dev`, false for
+    // `tauri build` — so this needs no separate build flag of its own.
+    if cfg!(debug_assertions) {
+        command.args(["--reload", "--reload-dir", "assistant"]);
+    }
+    command.current_dir(&root).spawn()
 }
 
 /// Block `setup()` (and therefore the main window's appearance — Tauri

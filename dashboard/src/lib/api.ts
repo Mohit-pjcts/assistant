@@ -394,7 +394,20 @@ export interface Project {
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const response = await fetch(`${API_BASE_URL}/projects`);
+  // fetchWithRetry, matching fetchThreads above (a real, live-reproduced
+  // bug, 2026-09-24): ThreadSidebar.tsx calls both in one
+  // `Promise.all([fetchThreads(), fetchProjects()])` at mount — the SAME
+  // startup race this file's own module comment already documents for
+  // fetchThreads/fetchHistory/fetchCost (the Tauri window can appear
+  // before uvicorn is actually listening). Since fetchThreads already
+  // retries past that window, a bare fetchProjects failing immediately on
+  // the very first attempt was enough to fail the whole Promise.all and
+  // permanently show "Load failed" in the sidebar for the rest of that
+  // session, even though fetchThreads alone would have recovered fine —
+  // caught testing a real packaged (non-dev) build, where a cold uvicorn
+  // start (first-time torch/sentence-transformers imports) took long
+  // enough to actually land inside this exact race.
+  const response = await fetchWithRetry(`${API_BASE_URL}/projects`);
   if (!response.ok) {
     throw new Error(`/projects failed (${response.status}): ${await response.text()}`);
   }
