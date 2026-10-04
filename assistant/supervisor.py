@@ -182,6 +182,7 @@ write_tools.py/mac_tools.py/interrupts.py/disk_tools.py:
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 from functools import partial
 from typing import Annotated, Any, Awaitable, Callable, NamedTuple, TypedDict
 
@@ -197,13 +198,14 @@ from langchain_core.messages.utils import convert_to_messages
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_config
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
-from assistant import activity_log, observability, prompts, workflow_store
+from assistant import activity_log, observability, prompts, stage, workflow_store
 from assistant.a2ui import A2UI_SURFACE_KEY, build_render_form_tool, build_render_ui_tool
 from assistant.circuit_breaker import RepeatedToolFailureCircuitBreaker
 from assistant.compaction import (
@@ -253,8 +255,8 @@ class GraphState(TypedDict):
 # this module's docstring for the full why a closed list (not "the model
 # decides what's risky") is what keeps this design's accepted TOCTOU
 # weakening small and auditable. Every key here is a REAL tool name that
-# ALSO independently gates itself via interrupt() (interrupts.py,
-# write_tools.py, mac_tools.py) — this dict only controls what the
+# ALSO independently gates itself via interrupt() (interrupts.py, disk_tools.py,
+# write_tools.py, mac_tools.py, stage.py) — this dict only controls what the
 # supervisor is ALLOWED to pre-clear, never removes any tool's own gate.
 GATED_ACTIONS: dict[str, str] = {
     "send_test_notification": "coding_agent",
@@ -269,6 +271,11 @@ GATED_ACTIONS: dict[str, str] = {
     "calendar_create_event": "mac_control_agent",
     "calendar_update_event": "mac_control_agent",
     "send_imessage": "mac_control_agent",
+    # Stage (stage.py): code-backed specialists whose tool name IS the
+    # action — Backstage acts in real apps, Onstage sends a screenshot off
+    # the Mac. Both gate themselves; see SELF_CONFIRMING_ACTIONS below.
+    stage.BACKSTAGE_ACTION: stage.BACKSTAGE_ACTION,
+    stage.ONSTAGE_ACTION: stage.ONSTAGE_ACTION,
     # calendar_delete_event is deliberately NOT here — ungated at the
     # user's own explicit request, 2026-08-25 (mac_tools.py's own
     # docstring), so there's no confirmation for the supervisor to
@@ -279,6 +286,14 @@ GATED_ACTIONS: dict[str, str] = {
     # chose to leave it ungated (phone_tools.py's own module docstring),
     # diverging from mac_tools.py's run_shortcut precedent on purpose.
 }
+
+# GATED_ACTIONS whose own confirmation card already shows the EXACT
+# content verbatim (Stage's command/question) — so the supervisor calls
+# them directly instead of spending a request_gated_action_confirmation
+# round trip on a paraphrase of the same thing. Still in GATED_ACTIONS so a
+# propose_workflow plan can include them (one card for a whole chain).
+SELF_CONFIRMING_ACTIONS = frozenset({stage.BACKSTAGE_ACTION, stage.ONSTAGE_ACTION})
+_UPFRONT_CONFIRMATION_ACTIONS = sorted(a for a in GATED_ACTIONS if a not in SELF_CONFIRMING_ACTIONS)
 
 # additional_kwargs marker key on the ToolMessage request_gated_action_
 # confirmation returns when approved — how _pre_approved_actions_this_turn
@@ -311,7 +326,7 @@ _GATED_TOOL_CANCELLED_TEXT = "Cancelled — user did not confirm."
 # `_GATED_TOOL_CANCELLED_TEXT` above.
 _GATED_TOOL_NOOP_TEXT = "Nothing to update — no fields were provided."
 
-# The five specialist-delegation tool names — used by
+# The specialist-delegation tool names — used by
 # _prior_specialist_results_this_turn to recognize which prior ToolMessages
 # this turn are actual specialist RESULTS worth forwarding (as opposed to
 # request_gated_action_confirmation's/propose_workflow's own bookkeeping
@@ -322,7 +337,15 @@ _SPECIALIST_TOOL_NAMES = {
     "life_admin_agent",
     "mac_control_agent",
     "phone_agent",
+    stage.BACKSTAGE_ACTION,
+    stage.ONSTAGE_ACTION,
 }
+
+# The tool_call_id of the specialist call in progress, for a CODE-backed
+# specialist (Stage) that needs it as its idempotency key the way
+# send_imessage gets it via InjectedToolCallId — `invoke`'s shared
+# (messages, pre_approved) signature has no room for it.
+_SPECIALIST_TOOL_CALL_ID: ContextVar[str | None] = ContextVar("specialist_tool_call_id", default=None)
 
 
 SUPERVISOR_MODEL_NAME = "claude-sonnet-5"
@@ -360,6 +383,24 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "calendar'), opening a URL in Brave, sending or reading iMessages "
     "(send_imessage/read_imessages), or a WhatsApp compose draft "
     "(send-only, needs the user to tap Send themselves).\n"
+    "- backstage (Stage's background agents): does a job inside ANY real "
+    "Mac app in background windows while the user keeps working — several "
+    "apps in parallel from ONE sentence (e.g. 'work out 15% of 80 in "
+    "Calculator, and check Tokyo's weather in Weather'); best for apps with "
+    "no API and multi-app errands. Pass the whole job as one plain command "
+    "naming each app, one clause per app separated by commas, with every "
+    "concrete value spelled out; prefer mac_control_agent when one of its "
+    "fixed actions fits exactly. Reports each agent done (with what it "
+    "read) or failed (with why) — tell the user both honestly.\n"
+    "- onstage (Stage's screen explainer): answers a question about what "
+    "is on the Mac's screen RIGHT NOW ('what does this button do', 'how do "
+    "I make a pivot table here') — speaks the answer and draws on the real "
+    "controls; 'how do I…' becomes a lesson the user steps through by "
+    "saying 'next' (send 'next'/'back'/'repeat'/'stop' to onstage as-is). "
+    "Never clicks or types; never from the iPhone channel.\n"
+    "stage_status / stop_backstage: Stage's state and recent runs (also "
+    "hotkey runs, or one still going), and stopping Backstage's agents — "
+    "call stop_backstage at once when the user says stop.\n"
     "- phone_agent: ONLY for the iPhone the user is currently messaging you "
     "FROM (Action Button / Share Sheet channel — never the Mac dashboard/"
     "CLI/voice) — reading the latest synced health snapshot, opening an "
@@ -403,7 +444,7 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "render_ui call more than once — tell the user plainly if it fails "
     "again.\n\n"
     "Before delegating a request that is EXACTLY ONE of these actions — "
-    + ", ".join(sorted(GATED_ACTIONS)) + " — call "
+    + ", ".join(_UPFRONT_CONFIRMATION_ACTIONS) + " — call "
     "request_gated_action_confirmation FIRST, describing in `summary` "
     "exactly what will happen using the real specifics from the user's "
     "request (the actual message, recipient, event time — not a vague "
@@ -420,7 +461,9 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "completely different thing from the vault's own "
     "write_vault_note/update_vault_note/delete_vault_note, which are not "
     "in this list and never need request_gated_action_confirmation — just "
-    "call them yourself directly.\n\n"
+    "call them yourself directly. backstage and onstage are never in that "
+    "list: they show the user their own exact confirmation, so call them "
+    "directly.\n\n"
     "If a single request genuinely needs TWO OR MORE gated actions — a "
     "cross-app chain, e.g. parsing something then creating a calendar "
     "event AND sending a message — do NOT call "
@@ -668,6 +711,23 @@ def _prior_specialist_results_this_turn(state: GraphState) -> list[AnyMessage]:
     return forwarded
 
 
+def _specialist_called_this_turn(state: GraphState, tool_name: str) -> bool:
+    """Whether `tool_name` already returned a result THIS turn (same
+    turn-boundary rule as `_pre_approved_actions_this_turn`)."""
+    messages = state["messages"]
+    turn_start = 0
+    for i, m in enumerate(messages):
+        if is_genuine_human_turn(m):
+            turn_start = i
+    call_ids = {
+        (tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+        for m in messages[turn_start:]
+        for tc in (getattr(m, "tool_calls", None) or [])
+        if (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)) == tool_name
+    }
+    return any(isinstance(m, ToolMessage) and m.tool_call_id in call_ids for m in messages[turn_start:])
+
+
 def _extract_gated_action_executions(result_messages: list[AnyMessage]) -> list[dict[str, Any]]:
     """PLAN.md Phase 25 — the "executed" half of the approved-vs-executed
     audit, extracted with ZERO changes to any gated tool's own code.
@@ -788,7 +848,8 @@ def _make_confirmation_tool() -> BaseTool:
             "user gets ONE confirmation for the whole plan rather than one "
             "per action. Call this first whenever the request clearly "
             "involves exactly one of the known gated actions: "
-            + ", ".join(sorted(GATED_ACTIONS)) + ". Give `summary` in plain "
+            + ", ".join(_UPFRONT_CONFIRMATION_ACTIONS) + " (never backstage or "
+            "onstage: they show their own exact confirmation). Give `summary` in plain "
             "language describing exactly what will happen, using the specific "
             "details from the user's own request (e.g. the real message text, "
             "the real recipient, the real event time) — not a vague "
@@ -811,7 +872,24 @@ def _make_confirmation_tool() -> BaseTool:
                         ToolMessage(
                             content=(
                                 f"Error: {action!r} is not a recognized gated action. "
-                                f"Valid actions: {sorted(GATED_ACTIONS)}."
+                                f"Valid actions: {_UPFRONT_CONFIRMATION_ACTIONS}."
+                            ),
+                            tool_call_id=tool_call_id,
+                        )
+                    ]
+                }
+            )
+        if action in SELF_CONFIRMING_ACTIONS:
+            # Pre-clearing these by NAME would let every later call this
+            # turn run unseen, whatever its command; their own card shows the
+            # exact command/question instead, so there's nothing to add here.
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=(
+                                f"Error: don't pre-confirm {action} — call the {action} tool "
+                                "directly; it shows the user its own exact confirmation."
                             ),
                             tool_call_id=tool_call_id,
                         )
@@ -1262,6 +1340,11 @@ def _make_specialist_tool(
             HumanMessage(content=request),
         ]
         pre_approved = _pre_approved_actions_this_turn(state)
+        if tool_name in SELF_CONFIRMING_ACTIONS and _specialist_called_this_turn(state, tool_name):
+            # A propose_workflow approval covers ONE Backstage/Onstage step:
+            # this action can do anything in any app, so a name-level approval
+            # must not cover a second, different command later in the turn.
+            pre_approved = pre_approved - {tool_name}
         await adispatch_custom_event(
             "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
         )
@@ -1279,12 +1362,20 @@ def _make_specialist_tool(
             except Exception:
                 pass
 
+        token = _SPECIALIST_TOOL_CALL_ID.set(tool_call_id)
         try:
             content, surfaces, phone_actions, executed_actions = await invoke(seed, pre_approved)
+        except GraphBubbleUp:
+            # An interrupt() (a confirmation gate pausing this call) is
+            # control flow, not a failure: the call replays on /resume and
+            # is logged then. Logging it as an error left a spurious error
+            # row in the activity log for every confirmation.
+            raise
         except Exception:
             await _log_outcome(activity_log.OUTCOME_ERROR)
             raise
         finally:
+            _SPECIALIST_TOOL_CALL_ID.reset(token)
             await adispatch_custom_event(
                 "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
             )
@@ -1324,6 +1415,19 @@ def _make_specialist_tool(
     return call_specialist
 
 
+async def _invoke_backstage(messages: list[AnyMessage], pre_approved_actions: set[str]) -> SpecialistResult:
+    """The code-backed `backstage` specialist (stage.py's module docstring
+    has the why: no LLM hop in front of an engine that plans for itself)."""
+    outcome = await stage.run_backstage(messages, pre_approved_actions, _SPECIALIST_TOOL_CALL_ID.get())
+    return SpecialistResult(outcome.content, [], [], outcome.executed)
+
+
+async def _invoke_onstage(messages: list[AnyMessage], pre_approved_actions: set[str]) -> SpecialistResult:
+    """The code-backed `onstage` specialist (stage.py)."""
+    outcome = await stage.run_onstage(messages, pre_approved_actions)
+    return SpecialistResult(outcome.content, [], [], outcome.executed)
+
+
 _CODING_TOOL_DESCRIPTION = (
     "Delegate a coding/file/shell task (or a test/demo notification) to "
     "the coding specialist (a Claude Code CLI wrapper) — it only sees "
@@ -1345,6 +1449,21 @@ _MAC_CONTROL_TOOL_DESCRIPTION = (
     "specialist. Give it a clear, self-contained instruction; gated actions "
     "still pause for the user's own confirmation regardless of what you "
     "ask for."
+)
+_BACKSTAGE_TOOL_DESCRIPTION = (
+    "Backstage: give Stage's background agents a job to do inside the "
+    "user's real Mac apps, in background windows, one agent per app in "
+    "parallel. `request` is the whole job as ONE plain command naming each "
+    "app (one comma-separated clause per app), every value spelled out — it "
+    "goes to the agents verbatim, with no conversation context. Shows the "
+    "user that exact command to approve; returns each agent's outcome."
+)
+_ONSTAGE_TOOL_DESCRIPTION = (
+    "Onstage: answer a question about what's on the Mac's screen right now "
+    "— spoken, and drawn on the real controls. `request` is the user's "
+    "question in their own words (or 'next'/'back'/'repeat'/'stop' inside a "
+    "lesson). Shows the user the question to approve, since a screenshot "
+    "leaves the Mac."
 )
 _PHONE_TOOL_DESCRIPTION = (
     "Delegate a request specific to the iPhone the user is currently "
@@ -1401,6 +1520,9 @@ def build_supervisor(
             _PHONE_TOOL_DESCRIPTION,
             partial(_invoke_agent_graph, phone_agent_graph, "phone_agent"),
         ),
+        _make_specialist_tool(stage.BACKSTAGE_ACTION, _BACKSTAGE_TOOL_DESCRIPTION, _invoke_backstage),
+        _make_specialist_tool(stage.ONSTAGE_ACTION, _ONSTAGE_TOOL_DESCRIPTION, _invoke_onstage),
+        *stage.DIRECT_TOOLS,
     ]
     return create_agent(
         model=model,

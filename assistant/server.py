@@ -1202,7 +1202,10 @@ _PHONE_CHANNEL_MARKER = (
     "which act on THIS phone, not mac_control_agent's Mac-only equivalents "
     "(open_app/open_url_in_brave/compose_whatsapp), which would act on the "
     "user's Mac somewhere else instead — the wrong device for a request "
-    "made from the phone in hand.]"
+    "made from the phone in hand. Stage works on the Mac too: use backstage "
+    "only when the user explicitly asks for something to be done on their "
+    "Mac, and never onstage (it explains the Mac's screen, which the user "
+    "can't see from here).]"
 )
 
 

@@ -36,10 +36,18 @@ afterEach(() => {
 });
 
 describe("AgentActivityGraph", () => {
-  it("renders the supervisor and all five specialists", () => {
+  it("renders the supervisor and every specialist, Stage's two included", () => {
     render(<AgentActivityGraph activeAgent={null} activeTool={null} />);
     expect(screen.getByText("supervisor")).toBeInTheDocument();
-    for (const label of ["coding", "research", "life_admin", "mac_control", "phone"]) {
+    for (const label of [
+      "coding",
+      "research",
+      "life_admin",
+      "mac_control",
+      "phone",
+      "backstage",
+      "onstage",
+    ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
   });

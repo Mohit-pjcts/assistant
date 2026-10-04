@@ -13050,3 +13050,138 @@ API/network cost of spinning up another full agent-construction test).
 
 **Not committed** — save-point proposal given directly to the user (a
 git-workflow decision per CLAUDE.md's own rule), not drafted here.
+
+## 154. Backstage desktop agents in Oni — the HacKU 2026 engine as a mac_control_agent capability, no new phase number opened yet
+
+**Superseded by STEPS.md 155** (same branch): the engine became `stage/`, the four `mac_control_agent` tools were replaced by two code-backed supervisor specialists (`backstage`, `onstage`), and `assistant/backstage_tools.py` was deleted. Kept here for the record of the first design and its live check.
+
+**2026-10-04, ~21:10–21:35.** Requested directly: "I want Oni to have
+access to the features like the project in HackU does" (after first
+asking for the HackU folder to be "integrated into oni" — read at first as
+the OniVault Obsidian vault, where seven HacKU notes were written and are
+deliberately kept; the user then clarified they meant Oni the assistant).
+The HackU project is **Backstage** (HacKU 2026, 2–4 Oct): one hotkey,
+coloured agents doing a job in real apps in BACKGROUND windows, one agent
+per app in parallel, every step decided by TypeSafe jev (a calibrated
+classifier, ~$0.00008 / 0.6 s per decision) instead of an LLM, plus an
+explain mode that answers about the screen out loud and draws on it.
+Note: STEPS.md 153 (daily diary) exists only in the uncommitted `main`
+working copy; this entry was written on branch `backstage-bridge`.
+
+**Approach decision — bridge, not port.** Backstage is ~4,100 lines of
+TypeScript on Bun plus Swift helpers (overlay, fast lane) and a pinned
+native dependency (Cua Driver 0.32.0). Porting it to Python would mean
+rewriting and re-verifying all of it; instead the engine was copied into
+this repo as `backstage/` (from `HackU/final/mac/`, without `.env`,
+`node_modules`, run logs or build output; its own nested .gitignore keeps
+keys/logs out) and Oni drives its existing local HTTP API. The hackathon
+submission repo itself was not touched (code-freeze hygiene).
+
+**Two small Backstage changes (the only diff from the submission):**
+1. `POST /api/run` now also returns the new run's `runId` — `execute()`
+   records the run synchronously before its first await, so `runs[0]` is
+   it — letting Oni poll `GET /api/state` for exactly its own run.
+2. New `POST /api/explain {question}` — explain mode WITHOUT the hotkey's
+   router. Found while reading `server.ts`: the hotkey path routes any text
+   to either explain mode or the agents, so sending a model-written
+   "question" over the overlay socket could have started real agents with
+   no confirmation. The new endpoint can only ever explain.
+   `Explainer.ask()` now resolves with what it said (`ExplainResult`);
+   existing callers ignore the value. `bunx tsc --noEmit` clean, `bun
+   test` 30/30.
+
+**Oni side — `assistant/backstage_tools.py`, on `mac_control_agent`:**
+- `run_desktop_agents(command)` — **gated** (acts in real apps;
+  interrupt shows the exact command, voice-approvable). Checks Backstage
+  is up / idle / has a TypeSafe key BEFORE asking, so the user is never
+  asked to approve a run that can't start. Idempotency-guarded like
+  `send_imessage` (a replayed /resume would otherwise start a second real
+  run). Polls up to `BACKSTAGE_RUN_WAIT_SECONDS` (180 s), then returns
+  each agent's done+answer or failed+reason; answers clipped to 600 chars
+  (Cost rule). Backstage's own in-code safety still applies underneath (no
+  secret fields, no unasked pay/delete/send clicks, no file deletes).
+- `explain_screen(question)` — **gated too, a deliberate decision**: it
+  never clicks or types, but it sends a screenshot off the Mac and returns
+  screen content into the conversation, where a prompt-injected turn
+  could pass it on via the deliberately-ungated `open_url_in_brave`.
+  Backstage's hotkey is the user's own consent; here a model decides, so a
+  human approves. Voice-approvable. Easy to ungate later if the user
+  chooses to, like other tools in this file's history — not done
+  silently.
+- `desktop_agents_status()` (read-only) and `stop_desktop_agents()`
+  (only halts) — ungated.
+- Both gated names added to `supervisor.GATED_ACTIONS` →
+  `mac_control_agent`; supervisor and mac_control_agent fallback prompts
+  describe the four tools (Phase 3's lesson). Dashboard `InterruptGate`
+  gets verbatim renderers + a "Backstage" badge for both gates.
+- Backstage absent / another app on the port / busy / no key are all
+  reported in words (with start instructions), never as a hang.
+
+**Tests:** new `tests/test_backstage_tools.py` (13, offline — an in-memory
+fake Backstage, `time.sleep` stubbed, isolated idempotency db): decline
+never reaches Backstage, approve posts exactly `{command, brain: "jev"}`,
+pre-approval skips the interrupt, unreachable/busy/no-key report without
+asking, a replayed call can't start a second run, explain only ever hits
+`/api/explain` (even for "delete all my files"), status/stop never
+interrupt, a non-Backstage server isn't trusted, long answers are clipped.
+Plus 1 wiring test in `test_sub_agents.py` (asserts against the local
+FALLBACK prompt, since the Langfuse-served copy only changes after a
+sync). `test_backstage_tools`/`test_sub_agents`/`test_mac_tools`/
+`test_prompts`: 75 passed. Dashboard: 2 new ChatPanel tests, full vitest
+177/177, `tsc` + `prettier` clean. `ruff check .`: only the pre-existing
+UP035 in supervisor.py:186. Per the standing cost instruction, the real-
+API `test_server.py`/`test_supervisor.py` suites were NOT re-run.
+
+**Live check (real Backstage from `backstage/`, port 3100, overlay off,
+the HacKU `.env` keys loaded via `bun --env-file`, never printed):**
+through Oni's own Python bridge — status reported both keys set;
+`/api/explain` rejected an empty question and handled "stop" with no
+screenshot; a real `run_desktop_agents("compute 128 times 37 in
+Calculator")` (pre-approved path) started, was polled and reported back
+in 12.2 s — the agent itself honestly **failed** with Backstage's own
+"Calculator opened no window on this desktop (is it in full screen or on
+another desktop?)" (the user was away; a window on another Space is a
+documented Backstage limit, not a bridge bug); replaying the same call was
+refused by the idempotency guard. **Not yet live-verified:** a
+successful real-app run, explain mode with a real screenshot (deliberately
+not taken while the user was away), the dashboard gate cards in the real
+running app, and the supervisor routing to these tools in a real turn.
+
+**Follow-ups for the user:** run `python scripts/sync_prompts_to_langfuse.py`
+(the Langfuse-served prompts still describe the old toolset until then);
+`cd backstage && bun install`, copy `.env.example` → `.env`, then `bash
+scripts/start.sh` before asking Oni for desktop agents.
+
+**Not committed** — branch `backstage-bridge` in worktree
+`.claude/worktrees/backstage-bridge`; save-point proposal given directly
+to the user per CLAUDE.md's git rule.
+
+## 155. Stage: full code review of the HacKU engine + Oni bridge, renamed Stage/Backstage/Onstage, Backstage/Onstage as code-backed supervisor specialists, no new phase number opened yet
+
+**2026-10-04 23:30 – 2026-10-05 ~03:00.** Requested directly (user away, no permission prompts): "Do a full code review… check if it's sloppy… improve the integration more… optimize time and money. Backstage doesn't have an agent architecture, but when it's getting introduced to Oni, it's getting introduced to an agent architecture… The whole system is called Stage. The agents which can run tasks in the background are called Backstage. The system which can explain anything that's on your screen is called Onstage." Supersedes STEPS.md 154's design.
+
+**Review method:** three parallel read-only reviewers (engine orchestration/API/cost; engine execution + safety; Oni bridge + architecture), then two parallel fixing engineers on disjoint engine files (safety/loop; fast lane/driver/injection/cost), coordinator on the server/Onstage/planner/scripts/overlay and all of Oni's side. Every finding was checked against the code before fixing.
+
+**Architecture decision (the "agent architecture" ask) — code-backed specialists.** Stage already plans for itself (rules/compilers in code, jev picks the app, Claude only for open-ended plans), so STEPS 154's path supervisor (Sonnet) → `mac_control_agent` (Sonnet, ~25 tool schemas) → a tool that only forwarded a sentence was a pure re-typing hop. Now `backstage` and `onstage` are supervisor specialists built by the existing `_make_specialist_tool` with an HTTP-backed `invoke` (`supervisor._invoke_backstage`/`_invoke_onstage` → `assistant/stage.py`), so they inherit the activity relay, durable activity log, pre-approval and the Phase 25 workflow audit with no new mechanism. **Measured:** adds ~760 tokens (cached prefix) to every supervisor call; removes ~4,950 input tokens × 2 `mac_control_agent` calls plus its output/thinking per Stage request (~10K tokens, several seconds). `mac_control_agent`/`sub_agents.py` are back to HEAD.
+- **Self-confirming gates (`SELF_CONFIRMING_ACTIONS`):** both specialists gate themselves with the EXACT command/question (stricter than an upfront paraphrase, and one fewer supervisor round trip), so they're excluded from the single-action `request_gated_action_confirmation` list (which now refuses them outright) but stay in `GATED_ACTIONS` for `propose_workflow`. A workflow pre-approval covers only the FIRST call of that specialist in the turn (`_specialist_called_this_turn`) — "backstage" can do anything in any app, so a name-level approval must not cover a second command. Backstage's gate is `voice_approvable: False` (free text driving real clicks — same tier as every free-text gate); Onstage's is voice-approvable. Lesson words (next/back/repeat/stop) take no screenshot and need no approval (the engine is asked with `control: true` first, which refuses to capture).
+- **Onstage refuses the iPhone channel** (new `active_turns.channel_of`); the phone marker tells the supervisor too. Phone Backstage runs wait 20 s max, then "still running".
+- **No polling:** engine long poll `GET /api/runs/{id}?since=&wait=`; each Backstage agent's start/finish is relayed as `agent_activity` (agent "backstage"); the dashboard graph has `backstage`/`onstage` nodes. A cancelled Oni turn stops ITS run only (`/api/stop {runId}`, shielded).
+- **Replay safety moved to the engine:** each run carries the specialist call's tool_call_id as `clientRunId` (contextvar `_SPECIALIST_TOOL_CALL_ID`, set in `call_specialist`); a replayed POST returns the original run (and its real result) instead of starting a second one.
+- **Onstage's result tells the supervisor whether it was already spoken/drawn** (overlay connected) so the reply doesn't repeat or re-speak it, and labels it untrusted screen content.
+
+**Pre-existing Oni bugs found and fixed:** (1) every specialist call that paused for a confirmation logged a spurious "error" row in the activity log (`GraphInterrupt` is an `Exception`; `call_specialist` now re-raises `GraphBubbleUp` unlogged); (2) the dashboard's upfront-confirmation card (`{action, summary}`) rendered the action's own empty fields ("To: (unknown)") and never showed the summary being approved — new `UpfrontSummaryGateBody` + test.
+
+**Engine (stage/) — API/orchestration (coordinator):** run records with owner (`source`), `outcome` (done/partial/failed), `version`, per-run AbortController; summaries instead of full records; history capped at 20; 400 for malformed bodies + an `error()` handler; `app:"stage"`/`overlay` in state; a per-launch token required on every route and the overlay socket, written to `~/Library/Application Support/Stage/server.json` (0600: port, token, pid; removed on exit; the overlay and Oni read it); an explicit `PORT` no longer silently falls back; `start.sh` only kills Stage itself and waits for the server file instead of `sleep 2`; Onstage's API path (`askFromApi`) never borrows the hotkey's screenshot, only moves a lesson on exact lesson commands, returns busy during a hotkey ask, skips `skipApps` (default `Oni`: Oni's own window is in front after approval) when choosing the window, lists ≤70 controls to the model (clickable first, nearest the pointer; all still used for snapping), and its prompt treats screen text as data; Onstage's Cua session no longer reuses agent name "Mint-3"; a leftover screenshot after a bad capture is deleted; planner: "X in Calculator and Y in TextEdit" (plain "and") was ONE task that dropped the second app — `splitAtAppBoundaries` fixes it (verified on the reviewer's failing examples); sessions end in parallel; duplicated regex/label helpers merged. New `tests/server.test.ts` (7, offline via injectable `PanelDeps`).
+
+**Engine — safety + loop (engineer 1):** one `clickBlocked`/`guardedClick` for EVERY click (several click paths skipped the guard; the list was widened: submit/remove/trash/replace/sign out/post/publish/confirm/unsubscribe/…); `enterForbidden` (Return can fire a dialog's default "Delete"); goal permission is now negation- and scope-aware ("do not delete" no longer allows Delete); `sendIntent()` replaces `SEND_INTENT` ("tell me…" used to unlock Send buttons); Finder moves: realpath root, no symlinks, no-overwrite link+unlink, an undo script that runs as written; ownership by field + exact value; no blanking other fields or clicking the wrong Clear button; Stop re-checked before every action; per-call plan source (a shared `lastSource` raced across agents), LLM plans never cached; separate stall counters; verify retried once; "uncertain" fast-lane results re-observe instead of failing or retyping; a no-jev fast path for exact code-compiled steps (still fully guarded). Tests: `tests/fsops.test.ts`, `tests/loop-guards.test.ts`, expanded `tests/safety.test.ts`.
+
+**Engine — fast lane, driver, injection, cost (engineer 2):** FastLane.swift verifies the element's window (CGWindowID via `_AXUIElementGetWindow`, else frame+title), exact normalized labels, refuses empty/class-like labels, a per-request deadline (no late double press), -25205 no longer "success", "uncertain" never blindly redone via Cua, inserts never replace a selection; `UNTRUSTED_SCREEN` in every planner/writer/verifier prompt; `checkUrl` allowlist (http/https + maps:/stocks:, no local/private hosts, no long text to unfamiliar hosts); SIGKILL after SIGTERM; a strict ElevenLabs semaphore; LLM cost summed across retries, unknown models priced high instead of $0; `jevModel()` reported by the server. Tests: fastlane/apps/voice/llm/decide.
+- **One of engineer 2's cost changes deliberately reverted:** it removed the controls from jev's state (keeping them only as item options) to save 26–33% of jev input — but the reference loop and our 20/20 accuracy run sent them in both places, the kind question needs them, and the saving is ~$0.00001–0.00005 per decision. Not worth an unmeasured accuracy risk with nobody at the Mac to run `bench.ts`. The 120-char label cap and the de-duplicated plan are kept.
+
+**Naming:** engine folder `stage/`, package `stage`, overlay "Stage Overlay" (bundle id `dev.stage.overlay` — macOS will ask for its permissions again once), signing identity "Stage Local Signing" (an existing "Backstage Local Signing" is still used), panel title "Stage · Backstage", "Onstage" everywhere explain mode was user-facing; in Oni: `assistant/stage.py`, specialists `backstage`/`onstage`, tools `stage_status`/`stop_backstage`, env `STAGE_URL`/`STAGE_SKIP_APPS`/`STAGE_RUN_WAIT_SECONDS`. The `~/backstage-test` fixture folder and the `~/Documents/Backstage/` output folder keep their names (existing folders on disk).
+
+**Verification:** engine `tsc` clean, `bun test` 83/83 (10 files); the overlay and FastLane.swift compile; Oni offline suites 140 passed (test_stage: 20 new, through the REAL `_make_specialist_tool` + ToolNode + checkpointer interrupt/resume path, fake engine); `test_server.py`/`test_supervisor.py` collected (98) but NOT run (paid real-API calls, per the standing cost instruction); dashboard vitest 178/178, `tsc`/prettier clean; `ruff check .` only the pre-existing UP035 at supervisor.py:186. **Live (real rebuilt Stage, port 3100, temp server file, HacKU keys loaded, never printed):** through Oni's own `stage.py` — token accepted; status correct; Onstage "stop" handled with no screenshot; a real `backstage("compute 128 times 37 in Calculator")` started, was long-polled to completion and reported structurally (`outcome: failed`, `executed: False`); the replay with the same id returned the original run; clean shutdown removed the server file. The agent itself again hit "Calculator opened no window on this desktop" (the user was away; a documented Space limit, not the integration).
+
+**Not done / follow-ups:** a successful real-app run, Onstage with a real screenshot, the new FastLane.swift window checks against real windows, and the dashboard cards in the running app all still need the user at the Mac; re-run `bun run src/bench.ts` there; `python scripts/sync_prompts_to_langfuse.py` (the served prompts don't know backstage/onstage until then); rebuild the overlay (`bash stage/scripts/build-overlay.sh`) and re-grant its permissions (new name); the fail-closed costs listed in stage/README.md's Limits ("Allow"/"Reset"/"Post"/prices refused unless asked; lowercase recipient names refused as send intent; a dialog shown as its own window isn't seen by the Enter check).
+
+**Not committed** — branch `backstage-bridge`, worktree `.claude/worktrees/backstage-bridge`; save-point proposal given to the user per CLAUDE.md's git rule. Merge note: STEPS.md 153 (daily diary) exists only in the uncommitted main working copy; keep both entries.

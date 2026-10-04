@@ -11,12 +11,16 @@ interface SpecialistDef {
   baseY: number;
 }
 
+// backstage/onstage: Stage's code-backed specialists (stage.py) — their
+// agent_activity events use the same shape as every LLM specialist's.
 const SPECIALISTS: SpecialistDef[] = [
-  { id: "coding_agent", label: "coding", baseY: 25 },
-  { id: "research_agent", label: "research", baseY: 75 },
-  { id: "life_admin_agent", label: "life_admin", baseY: 125 },
-  { id: "mac_control_agent", label: "mac_control", baseY: 175 },
-  { id: "phone_agent", label: "phone", baseY: 225 },
+  { id: "coding_agent", label: "coding", baseY: 20 },
+  { id: "research_agent", label: "research", baseY: 53 },
+  { id: "life_admin_agent", label: "life_admin", baseY: 86 },
+  { id: "mac_control_agent", label: "mac_control", baseY: 119 },
+  { id: "phone_agent", label: "phone", baseY: 152 },
+  { id: "backstage", label: "backstage", baseY: 185 },
+  { id: "onstage", label: "onstage", baseY: 218 },
 ];
 
 const SUPERVISOR_X = 30;

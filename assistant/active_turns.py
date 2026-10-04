@@ -151,6 +151,15 @@ def finish_turn(thread_id: str, *, outcome: Outcome = "completed") -> None:
     del _recently_ended[:-_RECENTLY_ENDED_LIMIT]
 
 
+def channel_of(thread_id: str) -> Channel | None:
+    """Which channel the in-flight turn on `thread_id` came from, or None
+    when no turn is registered (voice and CLI turns never are). Read by
+    stage.py's Onstage to refuse a screen question asked from the iPhone,
+    where the user isn't at the Mac to see the answer drawn."""
+    turn = _active.get(thread_id)
+    return turn.channel if turn else None
+
+
 def list_active() -> list[dict[str, object]]:
     """Every currently in-flight turn, across all channels, oldest first."""
     return [t.to_dict() for t in sorted(_active.values(), key=lambda t: t.started_at)]
