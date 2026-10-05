@@ -13185,3 +13185,48 @@ to the user per CLAUDE.md's git rule.
 **Not done / follow-ups:** a successful real-app run, Onstage with a real screenshot, the new FastLane.swift window checks against real windows, and the dashboard cards in the running app all still need the user at the Mac; re-run `bun run src/bench.ts` there; `python scripts/sync_prompts_to_langfuse.py` (the served prompts don't know backstage/onstage until then); rebuild the overlay (`bash stage/scripts/build-overlay.sh`) and re-grant its permissions (new name); the fail-closed costs listed in stage/README.md's Limits ("Allow"/"Reset"/"Post"/prices refused unless asked; lowercase recipient names refused as send intent; a dialog shown as its own window isn't seen by the Enter check).
 
 **Not committed** — branch `backstage-bridge`, worktree `.claude/worktrees/backstage-bridge`; save-point proposal given to the user per CLAUDE.md's git rule. Merge note: STEPS.md 153 (daily diary) exists only in the uncommitted main working copy; keep both entries.
+
+
+## 156. Stage: approval gates removed at the user's request; live testing across 26 real-app tasks made it smarter, faster and more honest (2026-10-05)
+
+**Ask (user, verbatim):** "run tests. not just known apps go further and test the feature as far as u can to make it smarter and more reliable. remove the approval gates for stage. report back to me when stage is actually smart, fast, and reliable."
+
+### 156.1 Approval gates removed — a deliberate, documented weakening (user's explicit decision)
+
+Same category as `open_url_in_brave` (Phase 13), `run_shortcut_on_phone` (STEPS.md 112) and Apple Calendar delete (STEPS.md 146): `backstage` and `onstage` no longer `interrupt()`. `assistant/stage.py` lost `StageOutcome`/the gated execution path; `run_backstage(messages, tool_call_id)` and `run_onstage(messages)` run at once. `supervisor.py`: both removed from `GATED_ACTIONS` (a comment says they're deliberately absent), the self-confirming/upfront-confirmation special cases deleted, the prompt says "backstage and onstage need no confirmation of any kind: call them directly". Dashboard: the two `InterruptGate` renderers and their tests removed. What still stands between a command and the apps is Stage's in-code safety (send/delete/buy/install guards, Enter checks, field-ownership rules), which no prompt can talk past — and which this entry hardened further (156.3). Onstage is still refused from the iPhone (no screen to show an answer on). `stage_status` now says when the Mac's screen is locked.
+
+### 156.2 How it was tested
+
+A live suite (`live_suite.py`, job tmp) drives the REAL Stage engine through Oni's own `assistant/stage.py` helpers: 26 tasks across 19 apps — Calculator (3), Safari (Wikipedia, Hacker News), Weather, Stocks, Maps, TextEdit (2), Finder (2 sorts), Dictionary, Clock, System Settings, App Store, Notes, Reminders, Brave, Activity Monitor, Music, Podcasts, Font Book, Spotify, Microsoft Word, and one 3-agent parallel command. Every failure's step log was read and the root cause reproduced with small probes (`searchprobe.ts`, `peek.ts`) before changing code. Answers were checked against ground truth where possible (`top -o mem` for Activity Monitor; Helvetica's real 6 styles; HN's real #1).
+
+### 156.3 What live testing found, and the fixes
+
+1. **Search boxes that never searched (Font Book, Music, App Store, Podcasts).** STEPS.md 155's own fix (SET a native field's value, since keystrokes drop letters in SwiftUI) fires no filtering: Font Book's box held "Helvetica" over an unfiltered list. Probed four ways — set; set+Return; set+confirm: list unchanged (147 rows); typed: 18 rows. Fix: search boxes are TYPED, read back, and set only if keys were dropped (`typeInto(..., searchBox)`); a search box holding a term from before the task is retyped once instead of skipped; the "Search button with a filled box" path retypes before submitting.
+2. **Results already on screen counted as failure (Podcasts).** "Nothing new appeared" failed a search whose results were showing from an earlier run. Fix (`jevhelper.verify`, code only): a search goal is done if a line other than the search box's own text names the term.
+3. **A false "done" from the screenshot reader (Music).** Asked "does it show results?", it answered "No … no search results are displayed" with found=true. Fix: the question now asks to NAME results, and an answer starting with no/none/nothing is not found.
+4. **An answer from the model's own knowledge (App Store).** The LLM tie-break answered "Apple makes Xcode" — "the official Xcode app is made by Apple" — with no "Apple" on screen, despite its prompt saying "ONLY the text visible". Fix in code, not prompt: `groundedIn()` — at least half of an LLM answer's own words (beyond the question's) must appear on screen, else not achieved. App Store now fails honestly (its result cards aren't in the accessibility tree at all; only their "Get" buttons are — which the install guard correctly refused, confirmed live).
+5. **Wrong answers.** HN "top story" answered with #3 (the rank "1." is its own text element on HN): the line ranked 1 is now taken in code. Dictionary answered with the word's Wikipedia etymology (the sense never repeats the word, so goal-word ranking buried it): "what does X mean" takes the first sentence after the part of speech, in code.
+6. **Cost/speed.** "(17 + 25) times 3" compiled to 17+25= and dropped "× 3" — an LLM call finished it ($0.0068): `calcChain()` compiles chains and a leading bracket group, Equals after each operation, and refuses precedence traps ("2 + 3 × 4"). "in Brave, search for X Then: tell me Y" sent ", search for … Then: tell me the number" to Google (the comma left by removing "in Brave" blocked the verb strip): fixed, 29.9 s → 11.2 s, $0.013 → $0.004.
+7. **Reminders flake.** jev once declared done before adding anything, then the LLM planned only "click Add Reminder" twice. `remindersPlan()` compiles "add a reminder called X"; a compiled type step with text and no named field goes into the single new unlabeled empty field in code.
+8. **Onstage wording.** A spoken answer self-corrected mid-sentence ("42 times 126... actually 42×3"); one prompt line added.
+
+### 156.4 Results (same 26 tasks, real apps)
+
+| | before (this entry's first run) | after |
+|---|---|---|
+| done | 21/26 (≈19 correct: HN and Dictionary wrong) | 23/26, all correct; no false "done" after 156.3 #3/#4 |
+| total cost | $0.061 | $0.035 |
+| median time (done tasks) | 10.8 s | 9.4 s |
+| LLM calls | 22 | 14 |
+
+The final full run reported App Store "done" (the knowledge answer, #4) and Reminders failed (#7); both fixed afterwards and re-run live (App Store now fails honestly; Reminders done in 9.9 s, both steps in code). Most tasks cost $0.00002–0.0002 (jev only); Calculator ~6 s, Clock/Activity Monitor/Podcasts 2–3 s.
+
+**Still failing, honestly (platform limits, not bugs):** App Store (result cards not in the accessibility tree), Music (results not in the tree; the window picture showed none), Spotify (no accessibility tree at all). Each stops without guessing. Also: adding a reminder whose exact title already exists fails (the verifier can't see a new row) — reported as not done, never as done.
+
+**Through Oni itself (worktree backend on :8011, Langfuse disabled so the new local prompts were used; separate, fresh databases; the user's live Oni untouched):** "can you use my mac to work out 17 percent of 2480 in the Calculator app?" → supervisor → `backstage` (no interrupt) → real Calculator → "421.6", 13.1 s end to end. An `onstage` question answered honestly ("I don't see an AC button") when Brave, not Calculator, was in front at capture time. Onstage via the API directly: 6.1 s, $0.014; lesson word "next" 0.01 s, no screenshot.
+
+**Verification:** engine `tsc` clean, `bun test` 95/95 (new `tests/live-fixes.test.ts`, 12 tests: one per live finding); Oni `tests/test_stage.py` 15/15; dashboard chat vitest 37/37 + `tsc` clean; `ruff` only the pre-existing UP035 at supervisor.py:187. Test artifacts removed (test notes, reminders, Word documents created by the runs).
+
+**Not done / follow-ups:** prompts not yet re-synced to Langfuse (the served supervisor prompt still predates the gate removal; harmless — code no longer gates — but run `python scripts/sync_prompts_to_langfuse.py` after merging); the dashboard app needs `npm run tauri build` (or the dev launcher) to drop the removed gate cards; restart Stage from main after merging (`bash stage/scripts/start.sh`).
+
+**Not committed** — branch `backstage-bridge`, worktree `.claude/worktrees/backstage-bridge`, per CLAUDE.md's git rule; git on the main checkout is also out of reach from this isolated session.

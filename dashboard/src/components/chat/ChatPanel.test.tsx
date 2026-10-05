@@ -589,51 +589,6 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Voice OK")).toBeInTheDocument();
   });
 
-  it("shows a backstage interrupt with the verbatim command, a Backstage badge, text-only", async () => {
-    mockedSendChat.mockResolvedValue({
-      type: "interrupt",
-      payload: {
-        action: "backstage",
-        command: "compute 15% of 80 in Calculator, and check the weather in Tokyo in Weather",
-        spoken_prompt: "Permission for Backstage to do this on your Mac?",
-        voice_approvable: false,
-      },
-    });
-
-    const user = userEvent.setup();
-    render(<ChatPanel />);
-    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
-    await user.type(screen.getByPlaceholderText(/message the assistant/i), "do my errands");
-    await user.click(screen.getByRole("button", { name: /send/i }));
-
-    await screen.findByTestId("interrupt-gate");
-    expect(screen.getByTestId("interrupt-backstage-command")).toHaveTextContent(
-      "compute 15% of 80 in Calculator, and check the weather in Tokyo in Weather",
-    );
-    expect(screen.getByText("Backstage")).toBeInTheDocument();
-    expect(screen.getByText("Text only")).toBeInTheDocument();
-  });
-
-  it("shows an onstage interrupt with the verbatim question and an Onstage badge", async () => {
-    mockedSendChat.mockResolvedValue({
-      type: "interrupt",
-      payload: { action: "onstage", question: "how do I make a pivot table here?" },
-    });
-
-    const user = userEvent.setup();
-    render(<ChatPanel />);
-    await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
-    await user.type(screen.getByPlaceholderText(/message the assistant/i), "help me with excel");
-    await user.click(screen.getByRole("button", { name: /send/i }));
-
-    await screen.findByTestId("interrupt-gate");
-    expect(screen.getByTestId("interrupt-onstage-question")).toHaveTextContent(
-      "how do I make a pivot table here?",
-    );
-    expect(screen.getByText("Onstage")).toBeInTheDocument();
-    expect(screen.getByText(/ONE screenshot/)).toBeInTheDocument();
-  });
-
   it("shows an upfront confirmation's own summary, not the action's empty fields", async () => {
     mockedSendChat.mockResolvedValue({
       type: "interrupt",

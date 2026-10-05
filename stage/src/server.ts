@@ -14,6 +14,7 @@ import { planTasks, runCommand, type PlannedTask } from "./manager.ts";
 import { Explainer, type ToOverlay } from "./explain.ts";
 import { route } from "./router.ts";
 import { agentLabel, spokenSummary, tidyAnswer } from "./results.ts";
+import { LOCKED_MESSAGE, screenLocked } from "./apps.ts";
 import { fromThisComputer } from "./localonly.ts";
 import type { ServerWebSocket } from "bun";
 
@@ -75,11 +76,14 @@ export interface PanelDeps {
   driver?: CliDriver;
   run?: typeof runCommand;
   onstage?: (send: (m: ToOverlay) => void) => Explainer;
+  /** whether the Mac's screen is locked (the real check reads the login session) */
+  locked?: () => Promise<boolean>;
 }
 
 export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", deps: PanelDeps = {}) {
   const driver = deps.driver ?? new CliDriver();
   const run = deps.run ?? runCommand;
+  const isLocked = deps.locked ?? screenLocked;
   const helper = makeHelper();
   const html = Bun.file(join(import.meta.dir, "..", "viewer", "index.html"));
   const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
@@ -296,7 +300,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
           { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } },
         );
       }
-      if (url.pathname === "/api/state") return json(snapshot());
+      if (url.pathname === "/api/state") return json({ ...snapshot(), locked: await isLocked() });
 
       // one run, long-polled: answers at once if the run changed after `since` (or is over), else when it next changes
       const one = url.pathname.match(/^\/api\/runs\/([\w-]+)$/);
@@ -321,6 +325,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
         const existing = clientRunId ? runs.find((r) => r.clientRunId === clientRunId) : undefined;
         if (existing) return json({ ok: true, runId: existing.runId, existing: true });
         const brain: BrainKind = b.brain === "llm" ? "llm" : "jev";
+        if (await isLocked()) return json({ ok: false, error: LOCKED_MESSAGE, locked: true });
         const err = guard(brain);
         if (err) return json({ ok: false, error: err, busy });
         busy = true;
@@ -337,6 +342,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
       if (req.method === "POST" && url.pathname === "/api/explain") {
         const b = await body(req);
         if (!b || typeof b.question !== "string" || !b.question.trim()) return json({ ok: false, error: "send {question: string}" }, 400);
+        if (b.control !== true && (await isLocked())) return json({ ok: false, error: LOCKED_MESSAGE, locked: true, overlay: overlays.size > 0 });
         const skip = Array.isArray(b.skipApps) ? b.skipApps.filter((x): x is string => typeof x === "string").slice(0, 10) : [];
         const result = await onstage.askFromApi(b.question.trim().slice(0, 1000), { controlOnly: b.control === true, skipApps: skip });
         return json({ ...result, overlay: overlays.size > 0 });

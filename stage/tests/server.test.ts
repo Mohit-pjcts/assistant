@@ -15,6 +15,7 @@ const H = { "X-Stage-Token": TOKEN, "Content-Type": "application/json" };
 
 // a run that waits until the test lets it finish (or it's stopped)
 let release: (() => void) | undefined;
+let locked = false;
 let lastSignal: AbortSignal | undefined;
 let update: ((tasks: Task[]) => void) | undefined;
 const task = (status: Task["status"]): Task => ({
@@ -49,7 +50,7 @@ let base = "";
 const started: string[] = [];
 beforeAll(() => {
   process.env.TYPESAFE_API_KEY ||= "test";
-  server = startPanel(0, TOKEN, { driver: fakeDriver, run: fakeRun, onstage: fakeOnstage });
+  server = startPanel(0, TOKEN, { driver: fakeDriver, run: fakeRun, onstage: fakeOnstage, locked: async () => locked });
   base = `http://127.0.0.1:${server.port}`;
 });
 afterEach(() => { release?.(); release = undefined; });
@@ -147,4 +148,19 @@ test("Onstage's API path passes control and skipApps through, and says whether t
   const r = await post("/api/explain", { question: "next", control: true, skipApps: ["Oni", 7] });
   expect(r.json).toEqual({ ok: true, steps: ["Click Insert."], overlay: false });
   expect(explainCalls).toEqual([{ q: "next", opts: { controlOnly: true, skipApps: ["Oni"] } }]);
+});
+
+test("a locked screen is reported plainly, not as a per-app window error", async () => {
+  locked = true;
+  try {
+    const r = await post("/api/run", { command: "open Calculator" });
+    expect(r.json.ok).toBe(false);
+    expect(r.json.locked).toBe(true);
+    expect(r.json.error).toContain("screen is locked");
+    expect((await get("/api/state")).json.locked).toBe(true);
+    const e = await post("/api/explain", { question: "what is this?" });
+    expect(e.json.locked).toBe(true);
+  } finally {
+    locked = false;
+  }
 });

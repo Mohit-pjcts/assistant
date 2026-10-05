@@ -6,6 +6,7 @@
 // Agents think in parallel. With the fast lane (src/fastlane.ts) their clicks and native text inserts are parallel too;
 // what still goes through Cua (web typing, keys, launching) shares its single input lane.
 import { WORD_DOC } from "./compile.ts";
+import { folderIn } from "./fsops.ts";
 import type { AppInfo, Brain, BrainKind, Driver, Helper, Logger, RunTotals, Task } from "./contracts.ts";
 import { AGENT_NAMES } from "./contracts.ts";
 import { prepareWindow, matchApp } from "./apps.ts";
@@ -13,6 +14,8 @@ import { HELPER_MODEL, callTool, hasClaude } from "./llm.ts";
 import { JevBrain } from "./decide.ts";
 import { nowIso } from "./logger.ts";
 import { runTask } from "./loop.ts";
+
+export { folderIn }; // kept here too: callers and tests import it from the planner
 
 export interface PlannedTask { app: string; goal: string; url?: string }
 
@@ -81,28 +84,33 @@ export function splitClauses(command: string): { text: string; newAgent: boolean
   return out;
 }
 
-/** a folder the user names by path ("~/Desktop/stuff", "/Users/me/x"): the Finder window is opened there */
-export function folderIn(clause: string): string | undefined {
-  const m = clause.match(/(?:^|\s)((?:~|\/Users)\/[^\s,;"'“”]+(?:\s(?![a-z]+\b)[^\s,;]+)*)/);
-  return m ? m[1]!.replace(/[.,;:]$/, "") : undefined;
-}
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const appAlias = (n: string) =>
-  n === "Brave Browser" ? "brave(?:\\s+browser)?" : n === "Google Chrome" ? "(?:google\\s+)?chrome" : escapeRe(n).replace(/ /g, "\\s+");
+/** how people name an app: "Brave" for Brave Browser, "Chrome", "Excel" (not "Word": "a word doc" isn't Microsoft Word) */
+const appAlias = (n: string) => {
+  if (n === "Brave Browser") return "brave(?:\\s+browser)?";
+  if (n === "Google Chrome") return "(?:google\\s+)?chrome";
+  const ms = n.match(/^Microsoft (Excel|PowerPoint|Outlook|Teams|OneNote)$/);
+  if (ms) return `(?:microsoft\\s+)?${ms[1]}`;
+  return escapeRe(n).replace(/ /g, "\\s+");
+};
 const placeOf = (n: string) => new RegExp(`\\b(?:in|on|using|with|via)\\s+(?:a\\s+new\\s+|the\\s+|my\\s+)?${appAlias(n)}\\b`, "i");
 
-/** "compute 76x49 in Calculator and write a reminder in TextEdit" is two jobs for two apps, joined by a plain "and"
- * (the clause splitter only cuts at ", and <verb>" or "and in <App>"). Cut at " and <verb>" only where the part
- * before it already names an app as its place, so "compute 6 and add 7 in Calculator" stays one clause. */
+/** "compute 76x49 in Calculator and write a reminder in TextEdit" (or "…in Calculator, check the weather in Tokyo in
+ * Weather") is two jobs for two apps, joined by a plain "and" or a comma (the clause splitter only cuts at ", and
+ * <verb>" or "and in <App>"). Cut at " and <verb>" / ", <verb>" only where the part before it already names an app as
+ * its place, so "compute 6 and add 7 in Calculator" and "write hello, world in TextEdit" stay one clause. */
 export function splitAtAppBoundaries(clause: string, names: string[]): string[] {
   const out: string[] = [];
   let rest = clause;
   for (;;) {
-    const cut = [...rest.matchAll(/\s+and\s+(?=(?:then\s+)?\S)/gi)].find((m) => {
+    const cut = [...rest.matchAll(/,\s*(?:and\s+)?|\s+and\s+/gi)].find((m) => {
       const left = rest.slice(0, m.index);
       const right = rest.slice(m.index! + m[0].length);
-      return names.some((n) => placeOf(n).test(left)) && TASKY_START.test(right);
+      // the part before the cut must be a whole clause with its own action, not just a lead-in: "In Finder, organise
+      // the files in ~/x" is ONE task (live, cutting after "In Finder" lost the folder and the agent sorted another one)
+      const leftAction = TASKY.test(names.reduce((s, n) => s.replace(placeOf(n), " "), left));
+      return leftAction && names.some((n) => placeOf(n).test(left)) && TASKY_START.test(right);
     });
     if (!cut) break;
     out.push(rest.slice(0, cut.index).trim());
@@ -130,15 +138,17 @@ export async function planWithJev(command: string, names: string[]): Promise<{ t
     // mentioned first ("use Claude ... about the weather" is a Claude task)
     let named: string | undefined;
     let at = Infinity;
+    // app names inside a web address or path don't count: "news" in news.ycombinator.com is not the News app (live)
+    const words = clause.replace(/\b[\w-]+(?:\.[\w-]+)+(?:\/\S*)?/g, " ").replace(/(?:~|\/Users)\/\S+/g, " ");
     for (const n of names) {
-      if (placeOf(n).test(clause)) { named = n; at = -1; break; }
+      if (placeOf(n).test(words)) { named = n; at = -1; break; }
     }
     if (!named) for (const n of names) {
-      const m = new RegExp(`\\b${appAlias(n)}\\b`, "i").exec(clause);
+      const m = new RegExp(`\\b${appAlias(n)}\\b`, "i").exec(words);
       if (m && (m.index < at || (m.index === at && n.length > (named?.length ?? 0)))) { named = n; at = m.index; }
     }
     // written without its spaces or capitals ("appstore", "system settings" as "systemsettings")
-    if (!named) named = names.filter((n) => compact(n).length >= 5 && compact(clause).includes(compact(n))).sort((a, b) => b.length - a.length)[0];
+    if (!named) named = names.filter((n) => compact(n).length >= 5 && compact(words).includes(compact(n))).sort((a, b) => b.length - a.length)[0];
     if (named === "Finder") { tasks.push({ app: named, goal: clause, url: folderIn(clause) }); continue; }
     if (WORD_DOC.test(clause) && (!named || /^(TextEdit|Microsoft Word|Notes|Pages)$/.test(named)) && names.includes("TextEdit")) { tasks.push({ app: "TextEdit", goal: clause }); continue; }
     if (named) { tasks.push({ app: named, goal: clause }); continue; }
@@ -163,7 +173,10 @@ export const plannerMode = (): PlannerMode => (process.env.HELPER === "haiku" ? 
 export async function planTasks(command: string, apps: AppInfo[], mode: PlannerMode = plannerMode()): Promise<{ tasks: PlannedTask[]; costUsd: number; ms: number; via: "llm" | "parser" | "jev" }> {
   const names = [...new Set([...COMMON_APPS, ...apps.filter((a) => a.running).map((a) => a.name)])].filter((n) => apps.some((a) => a.name === n));
   // an app the user names explicitly also counts, even if it is not running
-  for (const a of apps) if (a.name.length >= 4 && (new RegExp(`\\b${escapeRe(a.name)}\\b`, "i").test(command) || (compact(a.name).length >= 5 && compact(command).includes(compact(a.name)))) && !names.includes(a.name)) names.push(a.name);
+  // (by the names people use: "Brave" for Brave Browser, live: "in Brave" went to Safari because Brave wasn't running;
+  // never by a name inside a web address)
+  const said = command.replace(/\b[\w-]+(?:\.[\w-]+)+(?:\/\S*)?/g, " ");
+  for (const a of apps) if (a.name.length >= 4 && (new RegExp(`\\b${appAlias(a.name)}\\b`, "i").test(said) || (compact(a.name).length >= 5 && compact(said).includes(compact(a.name)))) && !names.includes(a.name)) names.push(a.name);
   if (mode === "jev") return { ...(await planWithJev(command, names)), via: "jev" };
   if (!hasClaude()) return { tasks: planWithoutLlm(command, names), costUsd: 0, ms: 0, via: "parser" };
   const r = await callTool<{ tasks: PlannedTask[] }>({

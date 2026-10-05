@@ -27,6 +27,9 @@ const RISKY: [group: string, re: string][] = [
   ["subscribe", String.raw`subscrib(?:e|es|ed|ing)`],
   ["unsubscribe", String.raw`unsubscrib(?:e|es|ed|ing)`],
   ["uninstall", String.raw`uninstall(?:s|ed|ing)?`],
+  // installing software (App Store's button is just "Get": see riskyIn). Live: an agent asked to look Xcode up clicked a
+  // "Get" button, which the list didn't cover
+  ["install", String.raw`(?:re-?)?install(?:s|ed|ing)?|download(?:s|ed|ing)? (?:the |this |an? )?(?:app|update|game|software)|update(?:s|d)? (?:all|now)|in-app purchases?`],
   ["cancel", String.raw`cancel(?:s|led|ling)? (?:my |the |your |this )?(?:subscription|order|booking|reservation|membership|plan|account|trip|flight)`],
   ["deactivate", String.raw`deactivat(?:e|es|ed|ing)|(?:close|disable)[sd]? (?:my |your |the )?account`],
   ["leave", String.raw`leav(?:e|es|ing) (?:the |this )?(?:group|chat|channel|conversation|team|meeting|call)|exit (?:the |this )?group|end (?:the )?call`],
@@ -35,6 +38,9 @@ const RISKY: [group: string, re: string][] = [
 const RISKY_RE = new RegExp(String.raw`\b(?:${RISKY.map(([, r]) => `(${r})`).join("|")})\b`, "gi");
 
 function riskyIn(text: string): { group: string; at: number; phrase: string }[] {
+  // a control labelled only "Get" (or "Get…") is an App Store install button: risky. "get" anywhere else is an ordinary
+  // word ("Get Info", "Get directions", "get the weather") and is left alone
+  if (/^\s*get\s*\W?\s*$/i.test(text)) return [{ group: "install", at: 0, phrase: "get" }];
   return [...text.matchAll(RISKY_RE)].map((m) => ({ group: RISKY[m.slice(1).findIndex((g) => g !== undefined)]![0], at: m.index!, phrase: m[0] }));
 }
 

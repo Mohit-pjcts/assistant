@@ -22,18 +22,22 @@ compilers in code, jev to pick an app, Claude only for open-ended plans), so put
 only re-type the supervisor's instruction into a tool call — an extra Sonnet round trip per request for nothing. The
 supervisor's instruction goes to Stage as-is (`assistant/stage.py` has the full design).
 
-| Oni | Stage endpoint | Asks you first? |
-|---|---|---|
-| `backstage` specialist | `POST /api/run {command, clientRunId}`, then the long poll `GET /api/runs/{id}?since=&wait=` | yes, showing the exact command (text only, never by voice) |
-| `onstage` specialist | `POST /api/explain {question, control: true}` first (a lesson word: no screenshot), then `{question, skipApps}` | yes for a screenshot (voice is fine); never for next/back/repeat/stop |
-| `stage_status` | `GET /api/state` | no (read-only) |
-| `stop_backstage` | `POST /api/stop` (`{runId}` stops just that run) | no (only halts work) |
+| Oni | Stage endpoint |
+|---|---|
+| `backstage` specialist | `POST /api/run {command, clientRunId}`, then the long poll `GET /api/runs/{id}?since=&wait=` |
+| `onstage` specialist | `POST /api/explain {question, skipApps}` (a lesson word — next/back/repeat/stop — takes no screenshot) |
+| `stage_status` | `GET /api/state` (also says when the Mac's screen is locked) |
+| `stop_backstage` | `POST /api/stop` (`{runId}` stops just that run) |
+
+**No approval cards, by your choice** (2026-10-05): Oni calls Backstage and Onstage at once. What stands between a
+command and your apps is the in-code safety below (it can't be talked past by a prompt), which is why it was hardened
+before the cards were removed.
 
 * **Live progress.** Each Backstage agent shows up in Oni's activity graph while it works (the long poll answers the
   moment a run changes: no polling).
 * **Replays are safe.** Oni sends its tool-call id as `clientRunId`; a replayed request gets the original run back, never
   a second run in your apps. A cancelled Oni turn stops its own run, not one you started with the hotkey.
-* **Onstage skips Oni's own window** (`STAGE_SKIP_APPS`, default `Oni`): you just approved the screenshot there, so it's
+* **Onstage skips Oni's own window** (`STAGE_SKIP_APPS`, default `Oni`): you just asked there, so it's
   in front, but you're asking about the app behind it. It never borrows a screenshot you took with the hotkey, and from
   the iPhone it says no (you're not at the Mac to see the answer).
 * **Access.** Every launch writes `~/Library/Application Support/Stage/server.json` (readable by you only: port, a fresh
@@ -95,6 +99,27 @@ The **"LLM brain"** mode replaces jev with Claude Sonnet choosing every step fro
   * Safari read the founding year of the University of Hong Kong from Wikipedia ("1911; origins 1887").
   * Two agents at once: your front app never changed.
 * Through Cua, clicks take ~0.6 s with the tuned daemon (2.4 s with Cua's defaults), and Cua runs one action at a time across all agents. The **fast lane** (below) removes both limits for clicks and native text fields.
+
+### 26 tasks across 19 real apps (5 Oct 2026, through Oni's bridge)
+
+Calculator (3), Safari (Wikipedia, Hacker News), Weather, Stocks, Maps, TextEdit (2), Finder (2 folder sorts), Dictionary,
+Clock, System Settings, App Store, Notes, Reminders, Brave, Activity Monitor, Music, Podcasts, Font Book, Spotify,
+Microsoft Word, and one command that ran three agents at once.
+
+| | first run | after the fixes it found |
+|---|---|---|
+| correct | ≈19/26 (two wrong answers) | **23/26, no false "done"** |
+| whole suite | $0.061 | **$0.035** |
+| median task | 10.8 s | **9.4 s** |
+| LLM calls | 22 | 14 |
+
+Most tasks are jev-only ($0.00002–0.0002); Calculator ~6 s, Clock / Activity Monitor / Podcasts 2–3 s, three agents at
+once 9.9 s. What the runs found and fixed is in `tests/live-fixes.test.ts` (one test per finding): search boxes that
+never searched (a value set through accessibility fires no filter, so search boxes are typed and read back), a search
+whose results were already showing, the top story answered with #3, a dictionary answering with the etymology, an LLM
+answer from its own knowledge ("Apple makes Xcode" with no "Apple" on screen: answers to questions must now be on
+screen), a screenshot reader saying "no results" while flagged found, bracketed sums sent to an LLM, and a web search
+sent the whole sentence. The three that still fail stop without guessing: see Limits.
 
 ## The fast lane: clicks and typing straight through accessibility, Cua for the rest
 
@@ -211,7 +236,7 @@ bun run src/cli.ts "... same command ..." --brain llm      # the LLM brain, for 
 ## Tests
 
 ```sh
-bun test            # engine tests on a simulated Calculator: plan → verified answer, low-confidence stop, wrong result refused, …
+bun test            # 95 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
 bun run typecheck
 ```
 
@@ -259,6 +284,9 @@ Measured on a 10-file sandbox:
 ## Limits (honest list)
 
 * **macOS only.** Apps must expose accessibility labels. Native apps and web pages do; canvas apps, games and some Electron apps don't.
+  Measured: Spotify exposes nothing; App Store's and Music's search results aren't in the tree (App Store shows only the
+  results' "Get" buttons, which the install guard refuses). A question can still be answered from one picture of the
+  agent's window, but nothing is ever clicked from a picture.
 * **No keyboard shortcuts in the background.** macOS/Cua refuse Cmd-key combinations to background apps. Enter is sent through accessibility (`AXConfirm`) where possible.
 * An app with **two or more windows** may refuse background key presses; clicks and typing still work.
 * **Pop-ups, date pickers and menus** are separate windows that the agent can't see yet (for example, Reminders' due-date picker).

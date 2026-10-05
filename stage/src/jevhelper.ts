@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { Helper, Item, PlanStep } from "./contracts.ts";
 import { asksQuestion, compilePlan, explicitText, FIND_FIELD, goalValues, MESSAGE_FIELD, mustCompute } from "./compile.ts";
 import { JEV_MODEL, JEV_PRICE_PER_TOKEN } from "./decide.ts";
-import { joinFragments, relevantLines } from "./perceive.ts";
+import { joinFragments, relevantLines, TEXT_INPUT } from "./perceive.ts";
 
 const CACHE = join(import.meta.dir, "..", "runs", "plan-cache.json");
 const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
@@ -19,11 +19,34 @@ export interface HelperStats { compiled: number; cached: number; llmFallback: nu
  *  would let another agent's plan call decide this agent's mode */
 export type PlanSource = "compiled" | "cached" | "llm" | "none";
 
+const FILLER_WORDS = new Set(["the", "and", "are", "was", "were", "has", "have", "its", "it's", "this", "that", "with", "for", "from", "about", "approximately", "around", "roughly", "shown", "shows", "screen", "made", "makes", "maker", "developer", "developed", "called", "named", "answer", "which", "there", "one", "app", "application"]);
+const answerWords = (s: string) => s.toLowerCase().replace(/,(?=\d{3})/g, "").match(/[\p{L}\p{N}][\p{L}\p{N}.]*/gu)?.map((w) => w.replace(/\.$/, "")) ?? [];
+
+/**
+ * An LLM's answer to a question must be READ off the screen: at least half of its answer words (beyond the question's
+ * own words) have to be there. The prompt already says "only the text visible", and still, live, the App Store tie-break
+ * answered "Apple makes Xcode" because "the official Xcode app is made by Apple", with no "Apple" anywhere on screen.
+ */
+export function groundedIn(answer: string, goal: string, screen: string[], items: Item[]): boolean {
+  const asked = new Set(answerWords(goal));
+  const key = answerWords(answer).filter((w) => !asked.has(w) && !FILLER_WORDS.has(w) && (w.length >= 3 || /\d/.test(w)));
+  if (!key.length) return true;
+  const seen = new Set(answerWords([...screen, ...items.map((i) => `${i.text} ${i.value ?? ""}`)].join(" ")));
+  return key.filter((w) => seen.has(w)).length / key.length >= 0.5;
+}
+
 export class JevHelper implements Helper {
   private client: TypeSafeClient;
   readonly stats: HelperStats = { compiled: 0, cached: 0, llmFallback: 0, none: 0 };
 
   get canEscalate() { return !!this.fallback; }
+
+  /** reading a picture needs vision: the LLM fallback's, when there is one (counted like any other fallback) */
+  get readPicture() {
+    const fb = this.fallback;
+    if (!fb?.readPicture) return undefined;
+    return (goal: string, png: string) => { this.stats.llmFallback++; return fb.readPicture!(goal, png); };
+  }
 
   constructor(private fallback?: Helper, model = JEV_MODEL) {
     this.client = new TypeSafeClient({ timeout: 4000, retry: { maxRetries: 1 }, defaultModel: model });
@@ -93,6 +116,15 @@ export class JevHelper implements Helper {
     return { text: "", costUsd: 0, ms: 0 };
   }
 
+  /** the LLM's verdict, with an answer to a question held to the screen (groundedIn) */
+  private async llmVerify(goal: string, screen: string[], items: Item[], before?: string[]) {
+    const v = await this.fallback!.verify(goal, screen, items, before);
+    if (v.achieved && asksQuestion(goal) && !groundedIn(v.answer, goal, screen, items)) {
+      return { ...v, achieved: false, answer: "", reason: `the answer "${v.answer.slice(0, 60)}" is not on the screen (not read off it)` };
+    }
+    return v;
+  }
+
   // ---------- "done?" ----------
   async verify(goal: string, screen: string[], items: Item[], before?: string[], opts?: { acted?: boolean }) {
     const t0 = performance.now();
@@ -115,17 +147,40 @@ export class JevHelper implements Helper {
       // candidates: not the window title (evidence only). A compute task got here only after acting (checked above), so
       // a line that was already on screen counts too: the agent may have recomputed the same value
       screen = joinFragments(screen); // "… starts every night at" + "8:00 p.m. sharp"
-      const lines = relevantLines(screen, goal, 30, 8).filter((l) => l.length <= 300 && !l.startsWith("window title:"));
+      // what a text field holds is what was typed into it (by the agent, or left over), never the answer: live, a search
+      // box's leftover sentence was picked as "the weather in Tokyo"
+      const echoes = items
+        .filter((i) => TEXT_INPUT.has(i.role) && (i.value ?? "").trim().length >= 4)
+        .map((i) => i.value!.replace(/\s+/g, " ").trim().slice(0, 40).toLowerCase());
+      const echo = (l: string) => echoes.some((e) => l.replace(/\s+/g, " ").trim().toLowerCase().startsWith(e));
+      // "what does X mean": a dictionary entry's first sense, the first real sentence after its part of speech. The sense
+      // rarely repeats the word itself, so ranking lines by the goal's words buried it under every "Serendipity (film)"
+      // (live: jev answered with the word's Wikipedia etymology)
+      if (/\b(mean(s|ing)?|definition|define)\b/i.test(goal)) {
+        const pos = screen.findIndex((l) => /^\[?(noun|verb|adjective|adverb|mass noun|count noun|n\.|v\.|adj\.)\]?$/i.test(l.trim()));
+        const sense = pos >= 0 ? screen.slice(pos + 1, pos + 6).find((l) => !/^\[.*\]$/.test(l.trim()) && (l.match(/[\p{L}]+/gu) ?? []).length >= 4) : undefined;
+        if (sense) return { achieved: true, answer: sense.replace(/\s+/g, " ").trim().slice(0, 300), reason: "the dictionary sense after its part of speech", costUsd: cost, ms: Math.round(performance.now() - t0) };
+      }
+      // "the top story / first result": the line ranked 1, in code (live, jev answered Hacker News' top story with #3)
+      if (/\b(top|first|number one|#\s?1)\s+(stor(y|ies)|result|item|post|article|headline|link|song|entry|news)\b/i.test(goal)) {
+        // "1. Title" on one line, or "1." alone with the title on the next (Hacker News exposes the rank as its own text)
+        const at = screen.findIndex((l) => /^1[.)](\s|$)/.test(l.trim()));
+        const ranked = at < 0 ? undefined : screen[at]!.trim().replace(/^1[.)]\s*/, "") || screen[at + 1]?.trim();
+        if (ranked && ranked.length >= 2) return { achieved: true, answer: ranked.replace(/\s+/g, " ").slice(0, 300), reason: "the line ranked 1 on screen", costUsd: cost, ms: Math.round(performance.now() - t0) };
+      }
+      const lines = relevantLines(screen, goal, 30, 8).filter((l) => l.length <= 300 && !l.startsWith("window title:") && !echo(l));
       if (lines.length) {
         const crit: Record<string, string> = Object.fromEntries(lines.map((l, i) => [String(i), l]));
         crit.none = "No line on screen answers it yet";
-        const a = await ask({ line: choice(`Which line on the screen answers: ${goal}`, crit) }, { goal, screen_lines: lines });
+        // "directly": live, for "what does serendipity mean" jev picked the word's HISTORY over its definition
+        const a = await ask({ line: choice(`Which line on the screen directly answers: ${goal} (the line that states the answer itself, such as a definition, value or name; not background, history or a related fact)`, crit) }, { goal, screen_lines: lines });
         const pick = a.line;
         const ms = Math.round(performance.now() - t0);
-        if (this.fallback && pick.confidence >= 0.2 && pick.confidence < 0.4) {
-          // borderline: let the LLM break the tie (only here)
+        // borderline: let the LLM break the tie (only here). Up to 0.6, not 0.4: live, jev picked "About Privacy" at 0.55
+        // as the macOS version, a wrong answer reported as done, which is far worse than one extra LLM call
+        if (this.fallback && pick.confidence >= 0.2 && pick.confidence < 0.6) {
           this.stats.llmFallback++;
-          const v = await this.fallback.verify(goal, screen, items, before);
+          const v = await this.llmVerify(goal, screen, items, before);
           return { ...v, costUsd: v.costUsd + cost, reason: `jev unsure which line answers (confidence ${pick.confidence.toFixed(2)}), LLM tie-break: ${v.reason}`, llm: true };
         }
         if (pick.choice !== "none" && pick.confidence >= 0.4) {
@@ -134,7 +189,7 @@ export class JevHelper implements Helper {
           const around = (idx >= 0 ? screen.slice(Math.max(0, idx - 1), idx + 2) : [lines[Number(pick.choice)]!]).filter((l) => !l.startsWith("window title:"));
           const answer = around.join(" ").replace(/\s+/g, " ").trim().slice(0, 300);
           // a quantity question needs a number in the answer, otherwise it is not answered yet
-          const needsNumber = /\b(how (many|much|tall|long|old|far)|population|year|when|price|cost|number|percent|temperature|weather|forecast)\b/i.test(goal);
+          const needsNumber = /\b(how (many|much|tall|long|old|far|big)|population|year|when|price|cost|number|percent|temperature|weather|forecast|version|what time|rating|size|score|age)\b/i.test(goal);
           if (needsNumber && !/\d/.test(answer)) {
             return { achieved: false, answer: "", reason: `the chosen line has no number: "${answer.slice(0, 80)}"`, costUsd: cost, ms };
           }
@@ -145,7 +200,7 @@ export class JevHelper implements Helper {
             if (!got.some((n) => !given.has(n))) {
               if (this.fallback) {
                 this.stats.llmFallback++;
-                const v = await this.fallback.verify(goal, screen, items, before);
+                const v = await this.llmVerify(goal, screen, items, before);
                 return { ...v, costUsd: v.costUsd + cost, reason: `no result on screen yet (only "${answer.slice(0, 40)}"), LLM check: ${v.reason}`, llm: true };
               }
               return { achieved: false, answer: "", reason: `no computed result on screen yet: "${answer.slice(0, 60)}"`, costUsd: cost, ms };
@@ -169,6 +224,15 @@ export class JevHelper implements Helper {
       const yes = a.done.noul as number;
       return { achieved: yes >= 0.7, answer: yes >= 0.7 ? "it was already so" : "", reason: `already on screen? jev ${(yes * 100).toFixed(0)}%`, costUsd: cost, ms: Math.round(performance.now() - t0) };
     }
+    // "search for X" whose results are ALREADY on screen (the app kept an earlier search: live, Podcasts showed the Lex
+    // Fridman results from before the task and this rule failed it as "nothing new"): done, if a line other than the
+    // search box's own text names the term. Code-only, no classifier call
+    const term = goal.match(/\b(?:search(?:es|ed|ing)?\s+(?:for\s+)?|look\s+up\s+|find\s+)["“]?(.+?)["”]?\s*[.?!]?$/i)?.[1]?.trim().toLowerCase();
+    if (before && fresh.length === 0 && term && term.length >= 3 && !/\b(and|then|tell|what|which|how)\b/i.test(term)) {
+      const boxes = new Set(items.filter((i) => TEXT_INPUT.has(i.role)).map((i) => (i.value ?? i.text).replace(/\s+/g, " ").trim().toLowerCase()));
+      const hits = screen.filter((l) => { const s = l.replace(/\s+/g, " ").trim().toLowerCase(); return s.includes(term) && !boxes.has(s) && !s.startsWith("window title:"); });
+      if (hits.length) return { achieved: true, answer: hits.slice(0, 3).join(" | ").slice(0, 300), reason: `results for "${term}" are on screen (${hits.length} lines)`, costUsd: cost, ms: Math.round(performance.now() - t0) };
+    }
     // an action: something must have CHANGED on screen, and jev must agree the change achieves the goal
     if (before && fresh.length === 0) {
       return { achieved: false, answer: "", reason: "nothing new appeared on screen since the task started", costUsd: cost, ms: Math.round(performance.now() - t0) };
@@ -182,7 +246,7 @@ export class JevHelper implements Helper {
     if (this.fallback && yes >= 0.35 && yes < 0.85) {
       // borderline yes/no: let the LLM break the tie (only here)
       this.stats.llmFallback++;
-      const v = await this.fallback.verify(goal, screen, items, before);
+      const v = await this.llmVerify(goal, screen, items, before);
       return { ...v, costUsd: v.costUsd + cost, reason: `jev ${(yes * 100).toFixed(0)}% sure, LLM tie-break: ${v.reason}`, llm: true };
     }
     const ms = Math.round(performance.now() - t0);

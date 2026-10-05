@@ -21,10 +21,13 @@ export function matchApp(apps: AppInfo[], name: string): AppInfo | null {
 export async function windowsOf(driver: Driver, appName: string): Promise<WindowRef[]> {
   const { windows } = await driver.listWindows();
   return windows
-    // only windows the agent can actually read: not minimised, not on another desktop (Space)
-    .filter((w) => w.app_name === appName && w.title && w.title.trim() !== "" && w.bounds.height > 100 && w.is_on_screen !== false && w.on_current_space !== false)
+    // only windows the agent can actually read: not minimised, not on another desktop (Space). A window may have no
+    // title (System Settings launched in the background has none until a pane loads: live, "opened no window"), so an
+    // untitled one counts when it is a real, sizeable window, not one of the thin untitled "ghost" strips apps keep
+    .filter((w) => w.app_name === appName && w.bounds.height > 100 && w.is_on_screen !== false && w.on_current_space !== false &&
+      ((w.title ?? "").trim() !== "" || ((w as any).layer === 0 && w.bounds.width > 200 && w.bounds.height > 200)))
     .sort((a, b) => b.bounds.width * b.bounds.height - a.bounds.width * a.bounds.height)
-    .map((w) => ({ pid: w.pid, windowId: w.window_id, app: appName, title: w.title }));
+    .map((w) => ({ pid: w.pid, windowId: w.window_id, app: appName, title: (w.title ?? "").trim() || appName }));
 }
 
 async function waitForWindow(driver: Driver, appName: string, pred: (w: WindowRef) => boolean, ms = 8000): Promise<WindowRef | null> {
@@ -49,6 +52,26 @@ export async function restoreMinimized(appName: string): Promise<boolean> {
   const n = Number((await new Response(p.stdout).text()).trim()) || 0;
   if (n) await Bun.sleep(900); // the restore animation
   return n > 0;
+}
+
+/**
+ * whether the Mac's screen is locked. Then macOS hides every window from accessibility and no agent can see or do
+ * anything: say so plainly instead of a confusing "could not read the window" per app (live: every task failed with
+ * ax_window_unresolved while the user had stepped away). Read from the login session (ioreg), ~20 ms, no permission.
+ */
+export const LOCKED_MESSAGE = "the Mac's screen is locked: Backstage and Onstage only work while you're logged in with the screen unlocked";
+let lockCache: { at: number; locked: boolean } | undefined;
+export async function screenLocked(): Promise<boolean> {
+  if (lockCache && Date.now() - lockCache.at < 2000) return lockCache.locked;
+  try {
+    const p = Bun.spawn(["ioreg", "-n", "Root", "-d1", "-a"], { stdout: "pipe", stderr: "ignore" });
+    const out = await new Response(p.stdout).text();
+    const locked = /<key>CGSSessionScreenIsLocked<\/key>\s*<true\/>/.test(out);
+    lockCache = { at: Date.now(), locked };
+    return locked;
+  } catch {
+    return false; // can't tell: never block on it
+  }
 }
 
 export async function frontApp(): Promise<string> {

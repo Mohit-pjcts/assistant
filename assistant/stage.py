@@ -18,8 +18,8 @@ Stage has two halves, named for where they work:
 **How it sits in Oni's agent architecture (the load-bearing decision):**
 `backstage` and `onstage` are SPECIALISTS of the supervisor, like
 coding_agent or research_agent — built by supervisor.py's own
-`_make_specialist_tool`, so they inherit the activity relay, the durable
-activity log, pre-approval and the Phase 25 workflow audit — but they are
+`_make_specialist_tool`, so they inherit the activity relay and the durable
+activity log — but they are
 CODE-backed, not LLM-backed. The engine already plans for itself (rules and
 compilers in code, jev to pick an app, Claude only for open-ended plans), so
 an LLM specialist in front of it would only re-type the supervisor's own
@@ -27,32 +27,27 @@ instruction into a tool call: an extra Sonnet round trip (two model calls,
 ~6K input tokens of prompt and tool schemas each, measured) per request for
 nothing. The supervisor's `request` goes to the engine as-is.
 
-Gating (CLAUDE.md's standing confirmation rule):
+**No approval gates — the user's own explicit decision (2026-10-05, STEPS.md
+156), recorded the same way as `open_url_in_brave` and
+`run_shortcut_on_phone`.** Backstage and Onstage run as soon as the
+supervisor calls them. This is a DELIBERATE, accepted weakening of
+CLAUDE.md's standing confirmation rule, not an oversight — don't re-add a
+gate without discussing it. What still stands underneath, whatever the
+command says, is the engine's own in-code safety (stage/README.md, "Safety"):
+no irreversible click or Enter the command didn't ask for, no typing into
+password/card/ID fields, messages only when asked to send, files never
+deleted or overwritten, links only to websites, screen text treated as data.
+Accepted risk, stated plainly: a prompt-injected turn can now start a
+Backstage run or an Onstage screenshot with no human in the loop; those
+in-code rules are the only thing between it and your apps.
 
-- **Backstage gates itself** with the EXACT command the agents will get —
-  stricter than the supervisor's upfront summary (no paraphrase can diverge
-  from what runs) and cheaper (no separate confirmation round trip; see
-  `SELF_CONFIRMING_ACTIONS` in supervisor.py). Not voice-approvable: a
-  free-text instruction that drives real clicks and typing, the same tier as
-  every other free-text gate here. The engine's own rules still apply
-  underneath whatever the command says (no typing into password/card/ID
-  fields, no irreversible click the command didn't ask for, no deleting or
-  overwriting files). Replays are safe at the engine: every run carries this
-  specialist call's tool_call_id as its `clientRunId`, and a replayed POST
-  gets the original run back instead of a second one.
-- **Onstage gates itself too**, though it never clicks or types: it sends a
-  screenshot off the Mac and brings screen content into the conversation,
-  where a prompt-injected turn could pass it on (`open_url_in_brave` is
-  deliberately ungated). The user's own hotkey is Stage's consent for a
-  screenshot; here a model decides, so a human approves. A lesson word
-  ("next", "back", "repeat", "stop") takes no screenshot, so it isn't gated:
-  the engine is asked with `control: true` first, which refuses to capture.
-  Voice-approvable (a question; nothing changes). Refused from the iPhone:
-  the user isn't at the Mac to see or hear the answer. Oni's own window is
-  skipped when choosing what to explain (it's in front: the user just
-  approved there). What comes back is screen content — untrusted data.
-- `stage_status` (read-only) and `stop_backstage` (only halts work) are
-  ungated.
+- **Backstage**: runs carry this specialist call's tool_call_id as their
+  `clientRunId`, so a replayed request gets the original run back instead of
+  a second one.
+- **Onstage**: refused from the iPhone (the user isn't at the Mac to see or
+  hear the answer). Oni's own window is skipped when choosing what to explain
+  (it's usually in front). Lesson words ("next", "back", "repeat", "stop")
+  take no screenshot. What comes back is screen content — untrusted data.
 
 **Time and money:** no polling — `GET /api/runs/{id}?since=&wait=` is a
 long poll that answers the moment the run changes, and each change is
@@ -77,7 +72,6 @@ import asyncio
 import json
 import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -85,7 +79,6 @@ import httpx
 from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.tools import tool
 from langgraph.config import get_config
-from langgraph.types import interrupt
 
 from assistant import active_turns
 
@@ -98,8 +91,8 @@ SERVER_FILE = Path(
         Path.home() / "Library" / "Application Support" / "Stage" / "server.json",
     )
 )
-# Windows Onstage never explains: Oni's own (the user just approved the
-# screenshot there, so it's in front). Comma-separated app names.
+# Windows Onstage never explains: Oni's own (usually in front: the user just
+# asked there). Comma-separated app names.
 SKIP_APPS = [a.strip() for a in os.environ.get("STAGE_SKIP_APPS", "Oni").split(",") if a.strip()]
 
 _REQUEST_TIMEOUT_SECONDS = 10.0
@@ -124,24 +117,11 @@ _START_HINT = (
     "Cua Driver 0.32.0 and a TYPESAFE_API_KEY in stage/.env; see "
     "stage/README.md)."
 )
-_CANCELLED = "Cancelled — user did not confirm."
 
 
 class StageUnavailable(Exception):
     """Stage didn't answer, refused the token, answered with an HTTP error,
     or something else is listening on its port."""
-
-
-@dataclass
-class StageOutcome:
-    """What a Backstage/Onstage specialist call came to, before supervisor.py
-    wraps it into its own `SpecialistResult`. `executed` is the Phase 25
-    workflow-audit record (`_extract_gated_action_executions`'s shape),
-    reported structurally rather than inferred from the text — empty when
-    nothing gated was attempted."""
-
-    content: str
-    executed: list[dict[str, Any]] = field(default_factory=list)
 
 
 # --- HTTP (module-level so tests can replace them) ---------------------------
@@ -288,63 +268,22 @@ async def _activity(phase: str, tool_label: str) -> None:
         pass
 
 
-def _execution(action: str, request: str, executed: bool, result_text: str) -> dict[str, Any]:
-    return {
-        "action": action,
-        "args": {"request": request},
-        "executed": executed,
-        "result_text": result_text,
-    }
-
-
 # --- Backstage ------------------------------------------------------------------
 
 
-async def run_backstage(
-    messages: list[Any], pre_approved: set[str], tool_call_id: str | None
-) -> StageOutcome:
+async def run_backstage(messages: list[Any], tool_call_id: str | None) -> str:
     """The `backstage` specialist: hand one plain-words command to Backstage's
     agents, follow the run (relaying progress live), report each agent's
-    outcome. Gated on the exact command unless pre-cleared this turn."""
+    outcome. No approval gate (see this module's docstring)."""
     command = _request_text(messages)
     if not command:
-        return StageOutcome("Error: give Backstage a command.")
-    # Checked BEFORE asking, so the user is never asked to approve a run that
-    # can't start (a plain read: safe to repeat when /resume replays this).
-    try:
-        before = await _state()
-    except StageUnavailable as exc:
-        return StageOutcome(f"Error: {exc}")
-    if not (before.get("keys") or {}).get("typesafe"):
-        return StageOutcome(
-            "Error: Stage has no TYPESAFE_API_KEY (add it to stage/.env and restart Stage)."
-        )
-    if before.get("busy") and not _already_started(before, tool_call_id):
-        text = "Error: Backstage's agents are busy with another job (maybe one started with the hotkey); wait, or stop it with stop_backstage."
-        return StageOutcome(text)
-
-    if BACKSTAGE_ACTION not in pre_approved:
-        approved = interrupt(
-            {
-                "action": BACKSTAGE_ACTION,
-                "command": command,
-                "spoken_prompt": f"Permission for Backstage to do this on your Mac: {command}?",
-                "voice_approvable": False,
-            }
-        )
-        if not approved:
-            return StageOutcome(
-                _CANCELLED, [_execution(BACKSTAGE_ACTION, command, False, _CANCELLED)]
-            )
-
+        return "Error: give Backstage a command."
     try:
         started = await _post("/api/run", {"command": command, "clientRunId": tool_call_id})
     except StageUnavailable as exc:
-        text = f"Error: {exc}"
-        return StageOutcome(text, [_execution(BACKSTAGE_ACTION, command, False, text)])
+        return f"Error: {exc}"
     if not started.get("ok"):
-        text = f"Error: Stage didn't start the run: {started.get('error', 'unknown reason')}"
-        return StageOutcome(text, [_execution(BACKSTAGE_ACTION, command, False, text)])
+        return f"Error: Backstage didn't start: {started.get('error', 'unknown reason')}"
     run_id = str(started.get("runId", ""))
 
     wait = _PHONE_WAIT_SECONDS if _channel() == "phone" else _RUN_WAIT_SECONDS
@@ -356,8 +295,7 @@ async def run_backstage(
         await asyncio.shield(_stop_quietly(run_id))
         raise
     except StageUnavailable as exc:
-        text = f"Error: lost contact with Stage mid-run ({exc}). The agents may still be working; check stage_status."
-        return StageOutcome(text, [_execution(BACKSTAGE_ACTION, command, True, text)])
+        return f"Error: lost contact with Stage mid-run ({exc}). The agents may still be working; check stage_status."
 
     text = format_run(run) if run else f"Backstage run {run_id} started."
     if not finished:
@@ -365,16 +303,7 @@ async def run_backstage(
             f"\nStill running after {wait:.0f} s; it carries on in the background. "
             "Check it later with stage_status, or stop it with stop_backstage."
         )
-    # Structural, not text-matched: did anything actually get done?
-    executed = not finished or (run or {}).get("outcome") in ("done", "partial")
-    return StageOutcome(text, [_execution(BACKSTAGE_ACTION, command, executed, text)])
-
-
-def _already_started(state: dict[str, Any], tool_call_id: str | None) -> bool:
-    """Busy with THIS call's own run (a replay after the POST): not a reason to refuse."""
-    return bool(tool_call_id) and any(
-        r.get("clientRunId") == tool_call_id for r in state.get("runs") or []
-    )
+    return text
 
 
 async def _follow_run(run_id: str, wait_seconds: float) -> tuple[dict[str, Any] | None, bool]:
@@ -423,55 +352,20 @@ async def _stop_quietly(run_id: str | None = None) -> None:
 # --- Onstage --------------------------------------------------------------------
 
 
-async def run_onstage(messages: list[Any], pre_approved: set[str]) -> StageOutcome:
+async def run_onstage(messages: list[Any]) -> str:
     """The `onstage` specialist: answer a question about what's on the Mac's
     screen right now — spoken and drawn by Stage's overlay — and hand the text
-    back. A lesson word needs no screenshot and no approval; anything else is
-    gated (a screenshot leaves the Mac) unless pre-cleared, and refused from
+    back. One call: the engine itself handles lesson words without a
+    screenshot. No approval gate (see this module's docstring); refused from
     the iPhone."""
     question = _request_text(messages)
     if not question:
-        return StageOutcome("Error: ask Onstage a question about the screen.")
-    try:
-        # A lesson word is handled with no screenshot; anything else comes back
-        # `needsCapture` (control: true makes the engine refuse to capture).
-        control = await _post("/api/explain", {"question": question, "control": True})
-    except StageUnavailable as exc:
-        return StageOutcome(f"Error: {exc}")
-    if control.get("ok"):
-        return StageOutcome(_onstage_text(control))
-    if not control.get("needsCapture"):
-        return StageOutcome(
-            f"Error: Onstage couldn't answer: {control.get('error', 'unknown reason')}"
-        )
-
+        return "Error: ask Onstage a question about the screen."
     if _channel() == "phone":
-        return StageOutcome(
+        return (
             "Onstage only works at the Mac: it looks at the Mac's screen and answers by speaking and drawing on it. "
             "Ask again from the Mac (the Oni dashboard, or Stage's own hotkey: hold Control + Option)."
         )
-    try:
-        state = await _state()
-    except StageUnavailable as exc:
-        return StageOutcome(f"Error: {exc}")
-    if not (state.get("keys") or {}).get("anthropic"):
-        return StageOutcome(
-            "Error: Stage has no ANTHROPIC_API_KEY (Onstage needs Claude's vision)."
-        )
-
-    if ONSTAGE_ACTION not in pre_approved:
-        approved = interrupt(
-            {
-                "action": ONSTAGE_ACTION,
-                "question": question,
-                "spoken_prompt": "Permission to take one screenshot of your Mac's screen and send it to Claude to answer that?",
-            }
-        )
-        if not approved:
-            return StageOutcome(
-                _CANCELLED, [_execution(ONSTAGE_ACTION, question, False, _CANCELLED)]
-            )
-
     try:
         result = await _post(
             "/api/explain",
@@ -479,13 +373,10 @@ async def run_onstage(messages: list[Any], pre_approved: set[str]) -> StageOutco
             timeout=_ONSTAGE_TIMEOUT_SECONDS,
         )
     except StageUnavailable as exc:
-        text = f"Error: {exc}"
-        return StageOutcome(text, [_execution(ONSTAGE_ACTION, question, False, text)])
+        return f"Error: {exc}"
     if not result.get("ok"):
-        text = f"Error: Onstage couldn't answer: {result.get('error', 'unknown reason')}"
-        return StageOutcome(text, [_execution(ONSTAGE_ACTION, question, False, text)])
-    text = _onstage_text(result)
-    return StageOutcome(text, [_execution(ONSTAGE_ACTION, question, True, text)])
+        return f"Error: Onstage couldn't answer: {result.get('error', 'unknown reason')}"
+    return _onstage_text(result)
 
 
 def _onstage_text(result: dict[str, Any]) -> str:
@@ -532,6 +423,8 @@ async def stage_status() -> str:
         f"TypeSafe key {'set' if keys.get('typesafe') else 'MISSING'}, "
         f"Anthropic key {'set' if keys.get('anthropic') else 'MISSING'}."
     )
+    if state.get("locked"):
+        head += " The Mac's screen is LOCKED: nothing can run until it's unlocked."
     runs = (state.get("runs") or [])[:3]
     if not runs:
         return head + " No Backstage runs yet."

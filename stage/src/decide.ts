@@ -320,6 +320,29 @@ export class ClaudeHelper implements Helper {
     });
     return { achieved: !!r.input.achieved, answer: String(r.input.answer ?? ""), reason: String(r.input.reason ?? ""), costUsd: r.costUsd, ms: r.ms };
   }
+
+  /** the answer read off ONE picture of the agent's window (apps whose content isn't in the accessibility tree) */
+  async readPicture(goal: string, png: string) {
+    const { readFileSync } = await import("node:fs");
+    const r = await callTool<{ found: boolean; answer: string }>({
+      model: LLM_BRAIN_MODEL,
+      system:
+        "You read the answer to the user's question off a picture of one app window. Answer ONLY from what the picture " +
+        "shows; if it doesn't show the answer, set found=false (never guess, never use your own knowledge). Keep the answer " +
+        "short and include the exact value shown (numbers, names, units). " + UNTRUSTED_SCREEN,
+      user: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: readFileSync(png).toString("base64") } },
+        { type: "text", text: `Question: ${goal}` },
+      ],
+      tool: {
+        name: "read",
+        description: "The answer as shown in the picture.",
+        input_schema: { type: "object", properties: { found: { type: "boolean" }, answer: { type: "string" } }, required: ["found", "answer"] },
+      },
+      maxTokens: 300,
+    });
+    return { found: !!r.input.found && !!String(r.input.answer ?? "").trim(), answer: String(r.input.answer ?? "").trim(), costUsd: r.costUsd, ms: r.ms };
+  }
 }
 
 export const isTextInput = (it: Item | undefined) => !!it && TEXT_INPUT.has(it.role);

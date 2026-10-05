@@ -6,16 +6,52 @@ export const CAP = 40;
 
 export const ACTIONABLE = new Set([
   "AXButton", "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXCheckBox", "AXRadioButton",
-  "AXPopUpButton", "AXMenuButton", "AXLink", "AXCell", "AXTab", "AXDisclosureTriangle", "AXSlider", "AXIncrementor",
+  "AXPopUpButton", "AXMenuButton", "AXLink", "AXCell", "AXRow", "AXTab", "AXDisclosureTriangle", "AXSlider", "AXIncrementor",
   "AXImage", // Finder's file and folder icons (only those that can be opened are kept, see below)
 ]);
 export const TEXT_INPUT = new Set(["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"]);
 
+/**
+ * plain text that can be pressed: SwiftUI apps (Clock's "Choose a City" results) make their list rows text with a press
+ * action and no button or cell around them, so without these the agent can't see the thing to click. Kept out: text
+ * with no press action (just words on screen), and long text (a paragraph is something to read, not a row to press).
+ */
+/**
+ * names for list rows that carry no label of their own: the first text inside each one. System Settings' sidebar (and
+ * many outline/table lists) is rows like that, with the name ("General", "About") in a text element inside; without a
+ * name the row was dropped, so the agent couldn't open a settings pane at all.
+ */
+export function namesOfRows(els: AxElement[]): Map<number, string> {
+  const byIndex = new Map(els.map((e) => [e.index, e]));
+  const names = new Map<number, string>();
+  for (const e of els) {
+    const text = (e.label || e.value || "").replace(/\s+/g, " ").trim();
+    if (e.role !== "AXStaticText" || !text) continue;
+    let up = e.parent;
+    for (let hops = 0; hops < 4 && up !== undefined; hops++) {
+      const parent = byIndex.get(up);
+      if (!parent) break;
+      if (parent.role === "AXRow" || parent.role === "AXCell") {
+        if (!names.has(parent.index)) names.set(parent.index, text.slice(0, 80));
+        break;
+      }
+      up = parent.parent;
+    }
+  }
+  return names;
+}
+
+export function pressableText(e: AxElement): boolean {
+  const text = e.label || e.value || "";
+  return (e.role === "AXStaticText" || e.role === "AXHeading") && e.actions.includes("AXPress") && !!text && text.length <= 80;
+}
+
 export const ROLE_WORDS: Record<string, string> = {
   AXButton: "button", AXTextField: "text field", AXTextArea: "text area", AXSearchField: "search field",
   AXComboBox: "combo box", AXCheckBox: "checkbox", AXRadioButton: "radio button", AXPopUpButton: "drop-down",
-  AXMenuButton: "menu button", AXLink: "link", AXCell: "row", AXTab: "tab", AXDisclosureTriangle: "disclosure",
+  AXMenuButton: "menu button", AXLink: "link", AXCell: "row", AXRow: "row", AXTab: "tab", AXDisclosureTriangle: "disclosure",
   AXSlider: "slider", AXIncrementor: "stepper", AXImage: "file",
+  AXStaticText: "pressable text", AXHeading: "pressable heading", // only pressable ones become items (pressableText)
 };
 
 const junkLabel = (s: string | undefined) => !s || !s.trim() || /^_NS:\d+$/.test(s.trim()) || /^_SC_/.test(s.trim());
@@ -107,12 +143,14 @@ export function perceive(obs: Observation, goal = "", cap = CAP, focus = ""): Pe
   const focusNorm = focus.trim().toLowerCase();
   const cands: { e: AxElement; label: string; score: number; order: number }[] = [];
   const seen = new Set<string>();
+  const rowNames = namesOfRows(els);
   els.forEach((e, order) => {
-    if (!ACTIONABLE.has(e.role) || !e.token) return;
+    if (!e.token || !(ACTIONABLE.has(e.role) || pressableText(e))) return;
     if (e.role === "AXImage" && !e.actions.includes("AXOpen")) return; // decorative images
     let label = junkLabel(e.label) ? "" : e.label!.trim();
     if (label && classLike(label)) label = e.value?.trim() ? `${ROLE_WORDS[e.role] ?? e.role} "${e.value.trim().slice(0, 50)}"` : "";
     if (!label && TEXT_INPUT.has(e.role)) label = e.value?.trim() ? `${ROLE_WORDS[e.role]} containing "${e.value.trim().slice(0, 40)}"` : `${ROLE_WORDS[e.role]} (no label)`;
+    if (!label && (e.role === "AXRow" || e.role === "AXCell")) label = rowNames.get(e.index) ?? "";
     if (!label) return;
     const id = `${e.role}:${label}`;
     if (seen.has(id)) return;

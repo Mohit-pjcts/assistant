@@ -54,6 +54,8 @@ export interface Driver {
   setValue(agent: AgentName, w: WindowRef, token: string, value: string): Promise<ActionResult>;
   /** put text on the clipboard and Cmd+V it into the field (optional: drivers without a clipboard skip it) */
   paste?(agent: AgentName, w: WindowRef, token: string, text: string): Promise<ActionResult>;
+  /** optional: a picture of this one window (not the screen), saved to a temporary PNG the caller deletes */
+  windowPicture?(agent: AgentName, w: WindowRef): Promise<string | undefined>;
   endSession(agent: AgentName): Promise<void>;
 }
 
@@ -131,6 +133,9 @@ export interface Helper {
   verify(goal: string, screenText: string[], items: Item[], before?: string[], opts?: { acted?: boolean }): Promise<{ achieved: boolean; answer: string; reason: string; costUsd: number; ms: number; llm?: boolean }>;
   /** true if this helper can call an LLM when jev is stuck */
   canEscalate?: boolean;
+  /** optional: read the answer to a question off ONE picture of the agent's own window, for apps that draw their content
+   * without accessibility (App Store's results). Read only: nothing is ever clicked from a picture */
+  readPicture?(goal: string, png: string): Promise<{ found: boolean; answer: string; costUsd: number; ms: number }>;
 }
 
 // ---------- tasks ----------

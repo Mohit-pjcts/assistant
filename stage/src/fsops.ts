@@ -10,6 +10,25 @@ import { basename, join, resolve } from "node:path";
 import type { AxElement, Observation } from "./contracts.ts";
 
 /** the folder a Finder window shows, read from its path bar (Macintosh HD › Users › … › folder) */
+/** a folder the user names by path ("~/Desktop/stuff", "/Users/me/x"): the Finder window is opened there */
+export function folderIn(clause: string): string | undefined {
+  const m = clause.match(/(?:^|\s)((?:~|\/Users)\/[^\s,;"'“”]+(?:\s(?![a-z]+\b)[^\s,;]+)*)/);
+  return m ? m[1]!.replace(/[.,;:]$/, "") : undefined;
+}
+
+/** whether two folder paths are the same folder (~ expanded, links and case resolved by the file system) */
+export function sameFolder(a: string, b: string): boolean {
+  const real = (p: string) => {
+    const full = resolve(p.replace(/^~(?=\/|$)/, homedir()));
+    try {
+      return realpathSync(full);
+    } catch {
+      return full;
+    }
+  };
+  return real(a) === real(b);
+}
+
 export function finderFolder(obs: Observation): string | null {
   const pathList = obs.elements.find((e) => e.role === "AXList" && e.label === "path");
   if (!pathList) return null;

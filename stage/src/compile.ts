@@ -159,13 +159,71 @@ export function calculatorPlan(goal: string, items: Item[]): PlanStep[] | null {
     const keys = [...digitsOf(n), "Multiply", ...digitsOf(n), "Equals"];
     if (keys.every((k) => labels.has(k))) return press([...(clear ? [clear] : []), ...keys]);
   }
-  m = g.match(/(\d+(?:\.\d+)?)\s*(times|x|×|\*|multiplied by|plus|\+|minus|−|-|divided by|over|÷|\/)\s*(\d+(?:\.\d+)?)/i);
-  if (!m) return null;
-  const op = OPS.find(([re]) => re.test(m![2]!.trim()))?.[1];
-  if (!op) return null;
-  const keys = [...digitsOf(m[1]!), op, ...digitsOf(m[3]!), "Equals"];
+  const chain = calcChain(g);
+  if (!chain) return null;
+  // Equals after every operation: the Calculator carries the result into the next one (no reliance on its precedence)
+  const keys = [...digitsOf(chain.first), ...chain.rest.flatMap(([op, n]) => [op, ...digitsOf(n), "Equals"])];
   if (keys.some((k) => !labels.has(k))) return null; // the window doesn't show these buttons: don't guess
   return press([...(clear ? [clear] : []), ...keys]);
+}
+
+const RANK: Record<string, number> = { Add: 1, Subtract: 1, Multiply: 2, Divide: 2 };
+
+/**
+ * "128 times 37", "(17 + 25) times 3", "250 + 175 - 80" -> a first number and [operation, number] pairs, worked left to
+ * right. Only where left to right IS the arithmetic: at most one bracketed group, at the start, and never a stronger
+ * operation after a weaker one ("2 + 3 x 4" is 14, not 20: left to an LLM instead). Live, "(17 + 25) times 3" compiled
+ * to 17 + 25 = and dropped the "times 3"; an LLM call ($0.007) finished it.
+ */
+export function calcChain(goal: string): { first: string; rest: [string, string][] } | null {
+  const g = goal
+    .replace(/\bmultiplied by\b|\btimes\b/gi, " × ").replace(/\bdivided by\b|\bover\b/gi, " ÷ ")
+    .replace(/\bplus\b/gi, " + ").replace(/\bminus\b/gi, " − ").replace(/(\d)\s*[xX*]\s*(?=[\d(])/g, "$1 × ");
+  const run = g.match(/\(?\s*\d[\d.\s()+\-−×÷/]*[\d)]/)?.[0];
+  if (!run) return null;
+  const tokens = run.match(/\d+(?:\.\d+)?|[()+\-−×÷/]/g) ?? [];
+  const opOf = (t: string) => OPS.find(([re]) => re.test(t))?.[1];
+  let i = 0;
+  // a group (or the whole run): number (op number)*, never a stronger operation after a weaker one
+  const seq = (): [string, [string, string][]] | null => {
+    const first = tokens[i++];
+    if (!first || !/^\d/.test(first)) return null;
+    const rest: [string, string][] = [];
+    while (i < tokens.length && opOf(tokens[i]!)) {
+      const op = opOf(tokens[i]!)!;
+      const n = tokens[i + 1];
+      if (!n || !/^\d/.test(n)) return null;
+      if (rest.length && RANK[op]! > RANK[rest[rest.length - 1]![0]]!) return null;
+      rest.push([op, n]);
+      i += 2;
+    }
+    return [first, rest];
+  };
+  let first: string;
+  let rest: [string, string][] = [];
+  if (tokens[0] === "(") {
+    i = 1;
+    const grp = seq();
+    if (!grp || tokens[i] !== ")") return null;
+    i++;
+    [first, rest] = grp;
+    const after: [string, string][] = [];
+    while (i < tokens.length && opOf(tokens[i]!)) {
+      const op = opOf(tokens[i]!)!;
+      const n = tokens[i + 1];
+      if (!n || !/^\d/.test(n)) return null;
+      if (after.length && RANK[op]! > RANK[after[after.length - 1]![0]]!) return null;
+      after.push([op, n]);
+      i += 2;
+    }
+    rest = [...rest, ...after];
+  } else {
+    const all = seq();
+    if (!all) return null;
+    [first, rest] = all;
+  }
+  if (i < tokens.length || !rest.length) return null; // brackets elsewhere, or no operation at all
+  return { first, rest };
 }
 
 // ---------- the web ----------
@@ -207,9 +265,14 @@ export function openSitesPlan(goal: string): PlanStep[] | null {
 export function webPlan(goal: string): PlanStep[] | null {
   const sites = openSitesPlan(goal);
   if (sites) return sites;
-  const g = goal.replace(APP_WORDS, " ").replace(/\s+/g, " ").trim();
+  // "in Brave, search for X": the comma left behind kept the search words from being stripped (live: Google got
+  // ", search for the population of Hong Kong Then: tell me the number", and an LLM had to redo the search)
+  const g = goal.replace(APP_WORDS, " ").replace(/\s+/g, " ").replace(/^[\s,;:.-]+/, "").trim();
   const site = g.match(/\b(?:open|go to|visit)\s+((?:https?:\/\/)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/\S*)?)/i);
-  if (site && !/\b(search|look up|find|tell me)\b/i.test(g)) return [{ action: "open_url", text: site[1]!.startsWith("http") ? site[1]! : `https://${site[1]}` }];
+  // a site the goal names is opened even when the goal asks a question about it ("go to news.ycombinator.com and tell
+  // me the top story"): the answer is read off THAT page. Live, the question sent the whole sentence to Google instead,
+  // and the "answer" came from a search engine's AI summary. (A goal that searches the site is a search, below)
+  if (site && !/\b(search|look up)\b/i.test(g)) return [{ action: "open_url", text: site[1]!.replace(/[.,;:!?]+$/, "").startsWith("http") ? site[1]!.replace(/[.,;:!?]+$/, "") : `https://${site[1]!.replace(/[.,;:!?]+$/, "")}` }];
   if (/\byoutube\b/i.test(g) && !/\bsearch\b/i.test(g)) return [{ action: "open_url", text: "https://www.youtube.com" }];
   if (!asksQuestion(g) && !/\b(search|find)\b/i.test(g)) return null;
   if (/\bwikipedia\b/i.test(g)) {
@@ -223,7 +286,10 @@ export function webPlan(goal: string): PlanStep[] | null {
     if (what) return [{ action: "open_url", text: `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(what)}` }];
   }
   // otherwise a web search with the whole information need: search engines handle natural language well
-  const q = g.replace(/^(?:please\s+)?(?:look up|search(?: for)?|find(?: out)?|tell me|check)\s+/i, "").replace(/[.?!]+$/, "");
+  // the search is the thing named; a follow-up ("Then: tell me the number") is answered from the results page
+  const strip = (x: string) => x.replace(/^(?:please\s+)?(?:look up|search(?: for)?|find(?: out)?|tell me|check)\s+/i, "").replace(/[.?!]+$/, "").trim();
+  const head = /^(?:please\s+)?(?:look up|search|find)\b/i.test(g) ? strip(g.split(/\s+Then:\s+/i)[0]!) : "";
+  const q = head || strip(g);
   return [{ action: "open_url", text: `https://www.google.com/search?q=${encodeURIComponent(q)}` }];
 }
 
@@ -244,6 +310,20 @@ export function writePlan(goal: string, items: Item[]): PlanStep[] | null {
   if (!text) return null;
   const field = items.find((i) => i.role === "AXTextArea" && i.state === "empty") ?? items.find((i) => i.role === "AXTextArea");
   return [{ action: "type", target: field?.text, text }];
+}
+
+// ---------- Reminders ----------
+
+/**
+ * "add a reminder called X" -> press Add Reminder (in code), then type X into the new row. Live, left to jev and the LLM
+ * planner, it once called the task done before adding anything, then twice planned only "click Add Reminder" and left
+ * two blank reminders behind.
+ */
+export function remindersPlan(goal: string, items: Item[]): PlanStep[] | null {
+  const m = goal.match(/\b(?:add|create|make|set|new)\b.*?\breminders?\b\s*(?:called|named|titled|that says|saying|to|:)\s*["“'‘]?(.+?)["”'’]?\s*[.!]?$/i);
+  const add = items.find((i) => /^(add reminder|new reminder)$/i.test(i.text.trim()));
+  if (!m?.[1]?.trim() || !add) return null;
+  return [{ action: "click", target: add.text }, { action: "type", text: m[1].trim() }];
 }
 
 // ---------- Finder ----------
@@ -307,7 +387,15 @@ export function weatherPlan(goal: string): PlanStep[] | null {
   return m ? [{ action: "pick_city", text: m[1]!.trim() }] : null;
 }
 
-export function compilePlan(app: string, goal: string, items: Item[], files: string[] = []): PlanStep[] | null {
+/** "check the weather in Tokyo in Weather" -> "check the weather in Tokyo": a trailing "in <this app>" names the app,
+ * not the content (live, the Weather plan searched for the city "Tokyo in Weather" and found nothing) */
+export function withoutAppSuffix(app: string, goal: string): string {
+  const name = app.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+  return goal.replace(new RegExp(`[,\\s]+(?:in|on|using|with|via)\\s+(?:the\\s+)?${name}(?:\\s+app)?\\s*([.?!]*)\\s*$`, "i"), "$1");
+}
+
+export function compilePlan(app: string, rawGoal: string, items: Item[], files: string[] = []): PlanStep[] | null {
+  const goal = withoutAppSuffix(app, rawGoal);
   if (app === "Calculator") return calculatorPlan(goal, items);
   if (app === "Maps") return mapsPlan(goal);
   if (app === "Stocks") return stocksPlan(goal);
@@ -315,5 +403,6 @@ export function compilePlan(app: string, goal: string, items: Item[], files: str
   if (app === "Finder") return finderPlan(goal, files);
   if (["Safari", "Google Chrome", "Brave Browser", "Arc", "Firefox"].includes(app)) return webPlan(goal);
   if (["TextEdit", "Notes"].includes(app)) return writePlan(goal, items);
+  if (app === "Reminders") return remindersPlan(goal, items);
   return null;
 }

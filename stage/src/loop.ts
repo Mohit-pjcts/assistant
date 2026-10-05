@@ -2,16 +2,16 @@
 //   observe (accessibility tree, text only) -> perceive (<=40 controls + text on screen) -> brain decides
 //   -> confidence gate (escalate rather than guess) -> act (click / type / key / scroll) -> ... -> "done"?
 //   -> verifier reads the screen -> achieved (with the answer) or keep going / give up with a reason.
-import type { AxElement, ActionResult, Brain, Decision, Driver, ExceptionCode, Facts, Helper, Item, Logger, PlanStep, Task, WindowRef } from "./contracts.ts";
+import type { AxElement, ActionResult, Brain, Decision, Driver, ExceptionCode, Facts, Helper, Item, Logger, PlanStep, Rect, Task, WindowRef } from "./contracts.ts";
 import { stepText } from "./contracts.ts";
 import { GATE, isTextInput } from "./decide.ts";
-import { openUrl, restoreMinimized, windowsOf } from "./apps.ts";
-import { FileOps, finderFolder, listTree, looseFiles, safeRoot } from "./fsops.ts";
+import { LOCKED_MESSAGE, openUrl, restoreMinimized, screenLocked, windowsOf } from "./apps.ts";
+import { FileOps, finderFolder, folderIn, listTree, looseFiles, safeRoot, sameFolder } from "./fsops.ts";
 import { join } from "node:path";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { nowIso } from "./logger.ts";
-import { FIND_FIELD, goalValues, MESSAGE_FIELD, openOnly, SEARCH_FIELD, sendIntent } from "./compile.ts";
+import { asksQuestion, FIND_FIELD, goalValues, MESSAGE_FIELD, openOnly, SEARCH_FIELD, sendIntent } from "./compile.ts";
 import { perceive, screenFromMarkdown, screenText, signature, TEXT_INPUT } from "./perceive.ts";
 import { clickBlocked, editAllowed, enterForbidden, typingForbidden } from "./safety.ts";
 
@@ -54,10 +54,25 @@ const topOf = (p?: Record<string, number>) =>
   p ? Object.entries(p).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`).join(", ") : "";
 
 const BROWSERS = /safari|chrome|brave|arc|edge|firefox|vivaldi|opera/i;
+// a field whose label says it searches (strict: not SEARCH_FIELD's "address"/"location" or FIND_FIELD's "name"/"number",
+// where Enter could submit a form), and a goal that is a search
+const SEARCH_BOX = /\b(search|find|filter)\b/i;
+const SINGLE_LINE = new Set(["AXTextField", "AXSearchField", "AXComboBox"]);
+const SEARCH_GOAL = /\b(search(es|ing)?|look(s|ing)? up|find|google)\b/i;
+// what a field shows when it is EMPTY: its prompt, not something anyone wrote
+const PLACEHOLDER = /^(search|find|filter|type here|enter|add|new)\b/i;
 /** apps that open a link of their own (a folder, a maps:// route, a stocks:// symbol) */
 const URL_APPS = /^(Finder|Maps|Stocks)$/;
 
 /** browser tabs: AXRadioButtons whose parent is the window itself (Brave, Chrome and Safari all expose them this way) */
+/** how much two rectangles overlap, as a share of the smaller one (1 = one sits inside the other) */
+export function overlapShare(a: Rect, b: Rect): number {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const smaller = Math.min(a.w * a.h, b.w * b.h);
+  return smaller > 0 ? (ix * iy) / smaller : 0;
+}
+
 function tabsOf(obs?: { elements: any[] }): { label?: string }[] {
   const els = obs?.elements ?? [];
   const byIndex = new Map(els.map((e) => [e.index, e]));
@@ -75,6 +90,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   // agent's work (a note that merely CONTAINS the same words is not)
   const wrote = new Map<string, string>();
   const typedInto = new Map<string, string>(); // field -> the text typed into it (not again, even if unreadable)
+  const submittedSearch = new Set<string>(); // field|term already submitted with Enter (once each)
   const uncertainTyped = new Set<string>(); // field|text whose insert may or may not have happened
   const retriedTyping = new Set<string>(); // ... and was retried once already
   const sendAsked = sendIntent(task.goal);
@@ -92,7 +108,18 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       (!W || (e.frame.y < W.y + 110 && e.frame.x > W.x + W.w * 0.3)));
   };
   const notReached = new Set<string>(); // clicked, but it did not become the open content
-  const fieldKey = (e?: AxElement) => (e?.frame ? `${e.role}@${Math.round(e.frame.x)},${Math.round(e.frame.y)}` : "");
+  // a field's identity follows it when it shifts or grows (a toolbar search box widens once it holds text: Dictionary):
+  // the same role, overlapping where it was, is the same field. An exact-position key made typing look like it landed
+  // in "another" field, which the agent then undid
+  const knownFields: { key: string; role: string; frame: Rect }[] = [];
+  const fieldKey = (e?: AxElement) => {
+    if (!e?.frame) return "";
+    const hit = knownFields.find((k) => k.role === e.role && overlapShare(k.frame, e.frame!) >= 0.6);
+    if (hit) { hit.frame = e.frame; return hit.key; }
+    const key = `${e.role}@${Math.round(e.frame.x)},${Math.round(e.frame.y)}`;
+    knownFields.push({ key, role: e.role, frame: e.frame });
+    return key;
+  };
   /** a field's identity: its position; without a frame, its role and order among the window's fields of that role */
   const fieldId = (o: { elements: AxElement[] }, token: string | undefined, role: string) => {
     const e = o.elements.find((x) => x.token === token);
@@ -147,6 +174,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   const resetCounts = () => { sameChoice = 0; blockedHere = 0; failedHere = 0; uncertainRetried = false; };
   let notDone = 0;
   let notDoneReason: string | undefined;
+  let pictureRead = false; // the picture fallback for reading an answer: once per task
+  let searchOpenedAt = -99; // the step when the agent last pressed a "Search" control
   let plan: PlanStep[] | undefined;
   let planPos = 0;
   let planSource = "none"; // where the current plan came from (per call, not a helper-wide field shared by agents)
@@ -213,8 +242,37 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     if (why) return refused(why);
     return driver.click(agent, win, token);
   };
-  const typeInto = async (token: string, text: string, foreground?: boolean): Promise<ActionResult> =>
-    signal.aborted ? refused("stopped by the user") : driver.typeText(agent, win, token, text, foreground);
+  /** submit a search field: a real Return first (live, App Store ignored the field's accessibility "confirm" and only a
+   * key press ran the search), the accessibility confirm when keys are refused in the background */
+  const submitField = async (token: string, actions?: string[]): Promise<ActionResult> => {
+    const r = await driver.pressKey(agent, win, "return", token);
+    if (r.ok || !actions?.includes("AXConfirm")) return r;
+    return driver.confirm(agent, win, token);
+  };
+
+  const typeInto = async (token: string, text: string, foreground?: boolean, role?: string, searchBox?: AxElement): Promise<ActionResult> => {
+    if (signal.aborted) return refused("stopped by the user");
+    // a SEARCH box filters as keys arrive, and a value set through accessibility fires nothing (live: Font Book's box
+    // held "Helvetica" while the list stayed unfiltered; typed, 147 rows became the Helvetica family). So type it for
+    // real, read it back, and set the whole text only if keys were dropped (live: Weather's "Tokyo" became "oy")
+    if (searchBox?.frame && role && SINGLE_LINE.has(role) && !BROWSERS.test(task.app) && !foreground) {
+      const t = await driver.typeText(agent, win, token, text);
+      if (t.ok) {
+        const now = (await driver.observe(agent, win)).elements.find((e) => e.token && e.role === role && e.frame && overlapShare(e.frame, searchBox.frame!) > 0.8);
+        if (now?.value !== undefined && norm(now.value) === norm(text)) return t;
+        const fix = now?.token ? await driver.setValue(agent, win, now.token, text) : undefined;
+        return fix?.ok ? fix : t;
+      }
+    }
+    // any other native single-line field gets its whole text SET (complete and instant): background keystrokes drop
+    // letters in SwiftUI fields, and setting it still brings up the app's suggestions. Same result as typing, since these
+    // fields are emptied first. Not in browsers (some pages react only to real key presses) and not in a foreground retry
+    if (role && SINGLE_LINE.has(role) && !BROWSERS.test(task.app) && !foreground) {
+      const r = await driver.setValue(agent, win, token, text);
+      if (r.ok) return r;
+    }
+    return driver.typeText(agent, win, token, text, foreground);
+  };
 
   /**
    * Browsers: the page text must belong to the tab the window shows. Safari sometimes keeps exposing ANOTHER tab's page
@@ -283,6 +341,30 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     // (LLM plans are never cached: they are re-plans made from window text, and an injected plan would become
     // permanent once it "verified". Compiled plans need no cache.)
     if (v.achieved) return finish(null, "", v.answer);
+    // a question the window's TEXT can't answer, in an app that draws its content without accessibility (live: App
+    // Store's search results aren't in the tree at all): read the answer off one picture of THIS window, once per task.
+    // Read only — nothing is clicked from a picture — and the picture is deleted right after
+    // Also a search whose results aren't in the tree (live: Music showed Taylor Swift's results, but its tree held only
+    // the search box): the picture says whether results for the term are shown
+    const searched = !asksQuestion(task.goal) ? task.goal.match(/\bsearch(?:es|ed)?\s+(?:for\s+)?["“]?(.+?)["”]?\s*[.?!]?$/i)?.[1] : undefined;
+    if ((asksQuestion(task.goal) || searched) && !pictureRead && task.counts.actions > 0 && helper.readPicture && driver.windowPicture && !signal.aborted) {
+      pictureRead = true;
+      const png = await driver.windowPicture(agent, win).catch(() => undefined);
+      if (png) {
+        // "found" must mean results are SHOWN: live, asked "does it show results?", the reader answered "No. … no search
+        // results are displayed" with found=true, and the task was reported done
+        const question = searched ? `Name the first few search results shown for "${searched}" (results, not the term typed in a search box). If no results are shown, it is not found.` : task.goal;
+        const pr = await helper.readPicture(question, png).catch(() => undefined);
+        try { rmSync(png, { force: true }); } catch { /* gone */ }
+        if (pr) {
+          task.cost.helperUsd += pr.costUsd;
+          noteLlm("read the answer from a picture of the window");
+          log.write({ type: "helper", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, what: "verify", detail: `picture of the window → ${pr.found ? `found: ${pr.answer}` : "not shown"}`, costUsd: pr.costUsd, ms: pr.ms });
+          // and a reader that says "no" in its answer did not find it, whatever its flag says
+          if (pr.found && !/^\s*(no|none|not|nothing|there (are|is) no)\b/i.test(pr.answer)) return finish(null, "", `${pr.answer} (read from a picture of the ${task.app} window)`);
+        }
+      }
+    }
     notDone++;
     notDoneReason = v.reason;
     prev.push(`(checked: the screen does not show the goal achieved yet: ${v.reason})`);
@@ -331,6 +413,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       obs = await driver.observe(agent, win, slowOpts);
     }
     if (obs.elements.length === 0) {
+      // the screen locked during the task: say that, not a puzzle about one app's window
+      if (await screenLocked()) return finish("window_lost", LOCKED_MESSAGE);
       return finish("window_lost", `could not read the ${task.app} window (${obs.degraded ?? "empty"}). Is it closed, minimised, or in full screen?`);
     }
     if (BROWSERS.test(task.app) && opened) obs = await freshPage(obs); // only pages the agent opened (never reload the user's page)
@@ -487,13 +571,23 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
           await guardedClick(clear.token, clear.label ?? "", clear.role, obs.elements);
           await sleep(300);
           field = (await driver.observe(agent, win)).elements.find(isField) ?? field; // the cleared field is a new element
-        } else if ((field.value ?? "").trim()) await driver.setValue(agent, win, field.token, "").catch(() => undefined);
+        }
+        // emptied either way: a clear button doesn't always clear, and a leftover term turns "Tokyo" into "Tokyo <old
+        // text>", which matches no city (live)
+        await driver.setValue(agent, win, field.token!, "").catch(() => undefined);
         // put the cursor in the field first: text typed into an unfocused search field goes nowhere (reported as ok)
         await guardedClick(field.token!, field.label ?? "", field.role, obs.elements);
         await sleep(300);
         const o1 = await driver.observe(agent, win);
         field = o1.elements.find(isField) ?? field;
-        await typeInto(field.token!, city);
+        await typeInto(field.token!, city, false, field.role);
+        // read back: anything but the city alone gets one clean retry
+        const typedField = (await driver.observe(agent, win)).elements.find(isField);
+        if (typedField?.token && typedField.value !== undefined && norm(typedField.value) !== norm(city)) {
+          await driver.setValue(agent, win, typedField.token, "").catch(() => undefined);
+          await typeInto(typedField.token, city, false, typedField.role);
+          field = typedField;
+        }
         const noEnter = enterForbidden(o1.elements, field.token, task.goal);
         if (!noEnter && !signal.aborted) await driver.pressKey(agent, win, "return", field.token);
         task.counts.actions += noEnter ? 1 : 2;
@@ -539,7 +633,12 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       const codeDec = codeDecision(fstep.action);
       if (!fileOps) {
         const dir = finderFolder(obs);
-        const why = dir ? safeRoot(dir) : "could not read the folder from Finder's path bar (View › Show Path Bar)";
+        // the command names a folder: only that folder, whatever Finder happens to show (live, a lost path made the
+        // agent sort the folder an earlier task had left open)
+        const named = folderIn(task.goal);
+        const why = !dir ? "could not read the folder from Finder's path bar (View › Show Path Bar)"
+          : named && !sameFolder(named, dir) ? `Finder shows ${dir}, not ${named}, the folder the command names`
+          : safeRoot(dir);
         if (!dir || why) {
           log.write({ type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: codeDec, acted: `refused: ${why}`, results: [], ms: { observe: obs.ms, decide: 0, act: 0 } });
           return finish("driver_refused", `file organising refused: ${why}`);
@@ -633,7 +732,9 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       const wanted = next?.action === "click" && next.target ? [next.target] : !planActive() ? goalValues(task.goal).targets : [];
       // on screen = a control whose label STARTS with it (a mention inside some message text doesn't count)
       // (a text field counts by its LABEL only: a search box that contains the name doesn't mean the name is shown)
-      const shown = (w: string) => obs.elements.some((e) => e.token && low(TEXT_INPUT.has(e.role) ? firstLabel.get(fieldKey(e)) ?? e.label ?? "" : `${e.label || e.value || ""}`).startsWith(low(w)));
+      // ...or exactly one of the agent's own items: an item can be named by the agent itself ("text field (no label)"),
+      // a name no window control carries, and searching the app for it TYPED that name into the search box
+      const shown = (w: string) => p.items.some((i) => low(i.text) === low(w)) || obs.elements.some((e) => e.token && low(TEXT_INPUT.has(e.role) ? firstLabel.get(fieldKey(e)) ?? e.label ?? "" : `${e.label || e.value || ""}`).startsWith(low(w)));
       const missing = wanted.find((w) => low(w).length >= 2 && (!shown(w) || notReached.has(low(w))) && !searchedFor.has(low(w)));
       const isFind = (e: AxElement) => !!e.token && (e.role === "AXSearchField" || (TEXT_INPUT.has(e.role) && FIND_FIELD.test(e.label ?? "")));
       let search = missing ? obs.elements.find(isFind) : undefined;
@@ -692,7 +793,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         await guardedClick(search.token, search.label ?? "", search.role, obs.elements);
         // a search field may be emptied: what it held was something to look for, not the user's writing
         if ((search.value ?? "").trim() && !/^search$/i.test((search.value ?? "").trim())) await driver.setValue(agent, win, search.token, "").catch(() => undefined);
-        await typeInto(search.token, missing);
+        await typeInto(search.token, missing, false, search.role);
         task.counts.actions += 2;
         let acted = `searched for "${missing}" (it was not on screen) in '${search.label ?? "search"}'`;
         // a search isn't done until a result is opened: the biggest element that starts with the name (results are often
@@ -729,7 +830,13 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     // still goes through every guard.
     const coded = planActive() && planSource === "compiled" && plan![planPos]?.action === "click" ? plan![planPos]!.target : undefined;
     const exact = coded ? p.items.filter((i) => i.text === coded) : [];
+    // ...and a compiled TYPE step with its text but no named field goes into the one new, unlabeled, empty field a coded
+    // click just brought up (Reminders' new row). Live, jev called it "done" there instead (the title was already in the
+    // list from earlier), so nothing was typed. The typing still goes through every guard below.
+    const codedType = planActive() && planSource === "compiled" && plan![planPos]?.action === "type" && !plan![planPos]!.target && plan![planPos]!.text !== undefined;
+    const blank = codedType ? p.items.filter((i) => isTextInput(i) && i.state === "empty" && /\(no label\)$/.test(i.text)) : [];
     if (exact.length === 1 && exact[0]!.token && !isTextInput(exact[0])) dec = codeDecision("plan", "click", exact[0]!.i);
+    else if (blank.length === 1 && blank[0]!.token) dec = codeDecision("plan", "type_text", blank[0]!.i);
     else {
       try {
         dec = await brain.classify(facts, p.items);
@@ -831,6 +938,23 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         if (blockedBy(r)) { desc = `blocked: ${blockedBy(r)}`; break; }
         results = [await retryStale(r, (t) => guardedClick(t, chosen.text, chosen.role, []))];
         desc = `click '${chosen.text}'`;
+        if (/^search\b/i.test(chosen.text.trim())) searchOpenedAt = step; // the field it brings up is a search box
+        // a "Search" / "Go" button with the goal's term already in a search box: the term still has to be submitted (live,
+        // App Store kept the term from an earlier run, and pressing its Search button only showed the search page)
+        if (/^(search|go|find)$/i.test(chosen.text.trim()) && !signal.aborted) {
+          const box = obs.elements.find((e) => e.token && SINGLE_LINE.has(e.role) && (e.value ?? "").trim().length >= 2 &&
+            !PLACEHOLDER.test(e.value!.trim()) && norm(task.goal).includes(norm(e.value!)));
+          const key = `${box?.role}|${norm(box?.value ?? "")}`;
+          if (box?.token && !submittedSearch.has(key) && !enterForbidden(obs.elements, box.token, task.goal)) {
+            submittedSearch.add(key);
+            // typed again first: a term SET into the box (or left from before) fires no filtering (live: Font Book)
+            const term = box.value!.trim();
+            await driver.setValue(agent, win, box.token, "").catch(() => undefined);
+            results.push(await typeInto(box.token, term, false, box.role, box));
+            results.push(await submitField(box.token, box.actions));
+            desc += `, then Enter in the search box ("${box.value!.trim().slice(0, 40)}")`;
+          }
+        }
         break;
       }
       case "type_text": {
@@ -840,13 +964,18 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         if (secret) return finish("not_achieved", secret);
         const chosenEl = obs.elements.find((e) => e.token === chosen.token);
         const id = fieldId(obs, chosen.token, chosen.role);
-        const before = chosen.value ?? "";
         const purpose = firstLabel.get(fieldKey(chosenEl)) || chosen.text; // what the field is for, from its first label
+        // a single-line field whose "value" is its own placeholder (Weather's box holds "Search") holds nothing. Narrow on
+        // purpose: an app may report a note's TEXT as its label too (Notes), and a filled-in name could equal its label,
+        // so only placeholder-like words count, never in a text area (the engine safety test caught the wide version)
+        const placeholder = chosen.role !== "AXTextArea" && (chosen.value ?? "").trim().length <= 40 &&
+          PLACEHOLDER.test((chosen.value ?? "").trim()) && [chosen.text, purpose].some((l) => norm(l) === norm(chosen.value ?? ""));
+        const before = placeholder ? "" : chosen.value ?? "";
         // SAFETY: never add to text the agent did not write (e.g. the body of one of the user's existing notes): its own
         // text is a field still holding exactly what the agent left there; the goal may name the text to edit
         const own = owns(id, before);
         const mayEdit = editAllowed(task.goal, `${purpose}\n${before}`);
-        if (chosen.role === "AXTextArea" && chosen.state === "filled" && !own && !mayEdit) {
+        if (chosen.role === "AXTextArea" && chosen.state === "filled" && !placeholder && !own && !mayEdit) {
           desc = `blocked: '${chosen.text.slice(0, 30)}' already contains someone else's text (create a new item first)`;
           if (usePlan && safetyReplans < 1) {
             safetyReplans++;
@@ -882,8 +1011,26 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         if (!text) { desc = "blocked: nothing to type"; break; }
         const typed = text;
         // never type the same text twice: if the field already holds it, that step is done
-        if (norm(chosen.value ?? (chosen.role === "AXTextArea" ? chosen.text : "")).includes(norm(typed))) {
-          desc = `skipped: '${chosen.text.slice(0, 30)}' already contains "${typed.slice(0, 40)}"`;
+        // a search box: Enter runs the search (see below, after typing)
+        // (also: a single-line field the agent brought up by pressing "Search" a moment ago — SwiftUI fields show their
+        // placeholder as their label AND value, live: Podcasts' "Apple Podcasts")
+        const openedBySearch = step - searchOpenedAt <= 2 && chosen.role !== "AXTextArea";
+        const searchBox = openedBySearch || chosen.role === "AXSearchField" || SEARCH_BOX.test(purpose) || SEARCH_BOX.test(chosen.text) ||
+          (SEARCH_GOAL.test(task.goal) && /\(no label\)$/.test(purpose) && chosen.role !== "AXTextArea");
+        const submitSearch = async (): Promise<string> => {
+          if (!searchBox || messageField || plan?.[planPos + 1]?.action === "press_enter" || signal.aborted || submittedSearch.has(`${id}|${typed}`)) return "";
+          if (enterForbidden(obs.elements, chosen.token, task.goal)) return "";
+          submittedSearch.add(`${id}|${typed}`);
+          results.push(await submitField(chosen.token!, chosen.actions));
+          return ", then Enter to search";
+        };
+        // a search box holding the term from BEFORE this task is typed again once (below): a leftover term may never have
+        // been searched or filtered on (live: Font Book's box held "Helvetica" over an unfiltered list)
+        const leftoverSearch = searchBox && !typedInto.has(id) && chosen.role !== "AXTextArea";
+        if (!leftoverSearch && norm(chosen.value ?? (chosen.role === "AXTextArea" ? chosen.text : "")).includes(norm(typed))) {
+          // ...but a search box that already holds the term may never have been searched (live: App Store kept the term
+          // from an earlier run and the agent called it done without searching): submit it once
+          desc = `skipped: '${chosen.text.slice(0, 30)}' already contains "${typed.slice(0, 40)}"${await submitSearch()}`;
           if (plan) planPos = Math.min(planPos + 1, plan.length);
           holdPlan = true;
           break;
@@ -906,9 +1053,13 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         // single-line fields (search boxes, address bars) are REPLACED, not appended to; text areas are appended to.
         // Only old contents that may go: a search field's, the agent's own, or a field the goal says to change (never
         // a form's name or email the user filled in)
-        if (chosen.state === "filled" && chosen.role !== "AXTextArea") {
-          const searchLike = chosen.role === "AXSearchField" || SEARCH_FIELD.test(purpose);
+        const searchLike = searchBox || SEARCH_FIELD.test(purpose) || SEARCH_FIELD.test(chosen.text);
+        if (chosen.state === "filled" && !placeholder && chosen.role !== "AXTextArea") {
           if (!searchLike && !own && !mayEdit) { desc = `blocked: '${chosen.text.slice(0, 30)}' already holds "${before.slice(0, 30)}", which this agent did not write (not clearing it)`; break; }
+          results.push(await driver.setValue(agent, win, chosen.token, ""));
+        } else if (searchLike && chosen.role !== "AXTextArea") {
+          // a search box that doesn't report what it holds (Weather's): empty it anyway, or the new term lands next to an
+          // old one (live: "Tokyo" was typed in front of a whole leftover sentence, and that became the "answer")
           results.push(await driver.setValue(agent, win, chosen.token, ""));
         }
         // focus the field first: when an app doesn't take text through accessibility, it arrives as key presses, which
@@ -916,7 +1067,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         await guardedClick(chosen.token, chosen.text, chosen.role, obs.elements).catch(() => undefined);
         await sleep(150);
         if (signal.aborted) return finish("stopped", "stopped by the user");
-        let r = await retryStale(await typeInto(chosen.token, typed), (t) => typeInto(t, typed));
+        const asSearch = searchBox ? chosenEl : undefined;
+        let r = await retryStale(await typeInto(chosen.token, typed, false, chosen.role, asSearch), (t) => typeInto(t, typed, false, chosen.role, asSearch));
         if (refusedInBackground(r) && allowForeground) {
           results.push(r);
           r = await typeInto(chosen.token, typed, true);
@@ -966,6 +1118,11 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
           lastTyped = { id: chosen.id, label: chosen.text, text: typed, foreground: r.channel === "foreground" };
         }
         desc = `type "${typed.length > 60 ? typed.slice(0, 57) + "..." : typed}" into '${chosen.text}'${r.channel === "foreground" ? " (foreground)" : ""}`;
+        // a search box runs its search on Enter, not by pressing some "Search" control (live, App Store kept clicking its
+        // Search TAB with the term typed and never searched). A search box: a search field, one labelled as one, or an
+        // unlabeled single-line field when the goal is a search. Not when the plan's next step is Enter anyway; the
+        // Enter safety rule still applies (submitSearch)
+        if (r.ok || uncertain(r)) desc += await submitSearch();
         break;
       }
       case "press_enter":

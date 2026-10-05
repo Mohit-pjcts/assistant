@@ -240,6 +240,18 @@ export class CliDriver implements Driver {
   }
 
   /** put the text on the clipboard (checked), Cmd+V into the field, then put the user's clipboard back */
+  async windowPicture(_agent: AgentName, w: WindowRef): Promise<string | undefined> {
+    const { mkdirSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = join(tmpdir(), "stage-pictures");
+    mkdirSync(dir, { recursive: true });
+    const png = join(dir, `win-${w.windowId}-${Date.now()}.png`);
+    // the window only (never the screen), no accessibility walk: just the picture
+    const rc = await cua("get_window_state", { pid: w.pid, window_id: w.windowId, include_accessibility_tree: false, screenshot_out_file: png, max_image_dimension: 1280 }, 15000);
+    return rc.json && existsSync(png) ? png : undefined;
+  }
+
   async paste(agent: AgentName, w: WindowRef, token: string, text: string): Promise<ActionResult> {
     const t0 = performance.now();
     const before = await cua("clipboard_read", { include_text: true, session: agent });

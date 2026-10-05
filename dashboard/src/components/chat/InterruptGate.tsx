@@ -64,12 +64,6 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
     "The assistant wants to create this Gmail filter — a STANDING rule that will keep acting on every future matching email:",
   delete_gmail_filter: "The assistant wants to delete this Gmail filter:",
   run_shortcut: "The assistant wants to run this Shortcut:",
-  // stage.py (Stage, from HacKU 2026): Backstage's background agents, and
-  // Onstage's screen explainer.
-  backstage:
-    "The assistant wants Backstage's agents to do this in your real apps, in background windows:",
-  onstage:
-    "The assistant wants Onstage to take ONE screenshot of your screen and send it to Claude to answer:",
   calendar_create_event: "The assistant wants to create this Apple Calendar event:",
   calendar_update_event: "The assistant wants to update this Apple Calendar event:",
   send_imessage: "The assistant wants to send this iMessage:",
@@ -78,6 +72,8 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   // PLAN.md Phase 25: one confirmation covering an entire multi-step,
   // cross-specialist plan, not a single action — see WorkflowPlanGateBody.
   propose_workflow: "The assistant wants to run this multi-step workflow:",
+  // backstage/onstage (stage.py) are deliberately absent here too — ungated
+  // at the user's own explicit request (STEPS.md 156), so they never gate.
   // run_shortcut_on_phone is deliberately absent here — the user chose to
   // leave phone_tools.py's run_shortcut_on_phone ungated, so it never
   // gates and this entry would be dead/misleading code.
@@ -96,8 +92,6 @@ const ACTION_SOURCE: Record<string, string> = {
   create_gmail_filter: "Gmail",
   delete_gmail_filter: "Gmail",
   run_shortcut: "Mac Control",
-  backstage: "Backstage",
-  onstage: "Onstage",
   calendar_create_event: "Apple Calendar",
   calendar_update_event: "Apple Calendar",
   send_imessage: "Messages",
@@ -345,26 +339,6 @@ function RunShortcutGateBody({ payload }: { payload: InterruptPayload }) {
   return <Field label="Shortcut" value={str(payload.name, "(unnamed)")} />;
 }
 
-// stage.py's backstage / onstage — the exact command Backstage's agents get,
-// and the exact question Onstage's screenshot is for, verbatim.
-function BackstageGateBody({ payload }: { payload: InterruptPayload }) {
-  return (
-    <div>
-      <span className="text-sm font-medium">Command:</span>
-      <VerbatimBlock testId="interrupt-backstage-command">{str(payload.command)}</VerbatimBlock>
-    </div>
-  );
-}
-
-function OnstageGateBody({ payload }: { payload: InterruptPayload }) {
-  return (
-    <div>
-      <span className="text-sm font-medium">Question:</span>
-      <VerbatimBlock testId="interrupt-onstage-question">{str(payload.question)}</VerbatimBlock>
-    </div>
-  );
-}
-
 // supervisor.py's request_gated_action_confirmation — an UPFRONT
 // confirmation carries only `action` + the supervisor's own `summary`, not
 // the action's real fields (those don't exist yet: the specialist builds
@@ -487,8 +461,6 @@ const ACTION_BODIES: Record<string, (props: { payload: InterruptPayload }) => Re
     create_gmail_filter: CreateFilterGateBody,
     delete_gmail_filter: DeleteFilterGateBody,
     run_shortcut: RunShortcutGateBody,
-    backstage: BackstageGateBody,
-    onstage: OnstageGateBody,
     calendar_create_event: AppleCalendarCreateEventGateBody,
     calendar_update_event: AppleCalendarUpdateEventGateBody,
     send_imessage: IMessageGateBody,

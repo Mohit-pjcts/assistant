@@ -126,8 +126,16 @@ test("a filled form field is not blanked; a search field is replaced", async () 
   expect(form.clicks).toEqual([]);
   const search = new FakeApp([el(0, "AXWindow", "Mail"), el(1, "AXSearchField", "Search", { value: "old query", frame: { x: 0, y: 0, w: 200, h: 20 } })]);
   await runTask(ctxOf(search, new Scripted((items) => decide("type_text", by(items, "Search"), "invoice")), new StubHelper([], { achieved: () => true }), undefined, 3), newTask("search my mail for invoice"));
+  // emptied, then the term TYPED (a search box filters on key presses, not on a value set through accessibility) and
+  // read back: it landed whole, so nothing is set over it
   expect(search.sets[0]).toEqual(["t1", ""]);
   expect(search.typed[0]).toBe("invoice");
+  expect(search.sets).not.toContainEqual(["t1", "invoice"]);
+  // keys dropped on the way (SwiftUI: "Tokyo" became "oy"): the read-back sees it and the whole term is set
+  const lossy = new FakeApp([el(0, "AXWindow", "Weather"), el(1, "AXSearchField", "Search", { frame: { x: 0, y: 0, w: 200, h: 20 } })]);
+  lossy.typeText = async (_a, _w, t, text) => { lossy.typed.push(text); const e = lossy.els.find((x) => x.token === t); if (e) e.value = text.slice(2); return { ok: true, channel: "synthetic", ms: 1 } as any; };
+  await runTask(ctxOf(lossy, new Scripted((items) => decide("type_text", by(items, "Search"), "Tokyo")), new StubHelper([], { achieved: () => true }), undefined, 3), newTask("search for Tokyo"));
+  expect(lossy.sets).toContainEqual(["t1", "Tokyo"]);
 });
 
 test("an empty plan is not 'finished': jev decides step by step", async () => {
