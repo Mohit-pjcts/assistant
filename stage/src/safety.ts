@@ -3,6 +3,7 @@
 // and the window around it, the same in every app: text in the window (a prompt injection) can't talk its way past them.
 import type { AxElement } from "./contracts.ts";
 import { negatedAt, negationAfter, sendIntent, unquoted } from "./compile.ts";
+import { TEXT_INPUT, inWebPage } from "./perceive.ts";
 
 /** fields for secrets: the agent never types into them, the user does that part */
 const SECRET_FIELD = /pass(word|code|phrase)|\bpin\b|card ?number|credit card|\bcvv\b|\bcvc\b|security code|expiry|social security|\bssn\b|passport|\bhkid\b|one[- ]time code|\botp\b/i;
@@ -52,6 +53,25 @@ const stem = (w: string) => (w === "everything" || w === "every" ? "all" : w.len
 
 export function typingForbidden(label: string): string | null {
   return SECRET_FIELD.test(label) ? `'${label.slice(0, 40)}' asks for a secret (password, card or ID). Agents never type those: please do this part yourself.` : null;
+}
+
+/**
+ * A browser's own address / search bar, by its label: "Address and search bar" (Brave, Chrome, Edge, Arc), "Smart Search
+ * Field" (Safari), "Search or enter website name", "Search with Google or enter address" (Firefox), "Address bar", "URL".
+ * "Search" alone is not one: it is the label of a page's own search box.
+ */
+const ADDRESS_BAR = /^(?:address(?:\s+and\s+search)?(?:\s+(?:bar|field))?|(?:location|url)(?:\s+(?:bar|field))?|smart search field|search (?:\S+ )*?or (?:enter|type) (?:a |an )?(?:website name|web address|address|url))$/i;
+
+/**
+ * Never type into a browser's address bar, nor press Enter in it. Stage opens a site with open_url; text typed there is
+ * navigated to or Googled, and a message typed by mistake (live: "hi" went into Brave's address bar when Instagram's
+ * message box was not exposed yet) would go to a search engine. Only the window's own bar counts: a text field inside
+ * the web page (below its AXWebArea) is the page's own, even when it is labelled "Address" or "Search". Fails closed.
+ * Returns why not, or null when `e` is not an address bar.
+ */
+export function addressBarForbidden(els: AxElement[], e: AxElement): string | null {
+  if (!TEXT_INPUT.has(e.role) || !ADDRESS_BAR.test((e.label ?? "").trim()) || inWebPage(els, e)) return null;
+  return "websites open with open_url; the address bar is never typed into";
 }
 
 /**

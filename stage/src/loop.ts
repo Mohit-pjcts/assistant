@@ -12,8 +12,8 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { nowIso } from "./logger.ts";
 import { asksQuestion, FIND_FIELD, goalValues, MESSAGE_FIELD, openOnly, SEARCH_FIELD, sendIntent } from "./compile.ts";
-import { perceive, screenFromMarkdown, screenText, signature, TEXT_INPUT } from "./perceive.ts";
-import { clickBlocked, editAllowed, enterForbidden, typingForbidden } from "./safety.ts";
+import { PLACEHOLDER, perceive, screenFromMarkdown, screenText, showsPrompt, signature, TEXT_INPUT } from "./perceive.ts";
+import { addressBarForbidden, clickBlocked, editAllowed, enterForbidden, typingForbidden } from "./safety.ts";
 
 export const MAX_STEPS = 25;
 
@@ -59,8 +59,6 @@ const BROWSERS = /safari|chrome|brave|arc|edge|firefox|vivaldi|opera/i;
 const SEARCH_BOX = /\b(search|find|filter)\b/i;
 const SINGLE_LINE = new Set(["AXTextField", "AXSearchField", "AXComboBox"]);
 const SEARCH_GOAL = /\b(search(es|ing)?|look(s|ing)? up|find|google)\b/i;
-// what a field shows when it is EMPTY: its prompt, not something anyone wrote
-const PLACEHOLDER = /^(search|find|filter|type here|enter|add|new)\b/i;
 /** apps that open a link of their own (a folder, a maps:// route, a stocks:// symbol) */
 const URL_APPS = /^(Finder|Maps|Stocks)$/;
 
@@ -222,6 +220,16 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   const noteLlm = (what: string) => task.llmCalls.push(what);
   let escalations = 0;
   let curObs: { elements: unknown[] } | undefined;
+  /**
+   * Why a browser's own address bar may not be used, or null (it is not one, or the app is no browser). The element is
+   * found by token among `els` (what the agent last read, unless given). Sites open with open_url: nothing is ever typed
+   * there, and no Enter pressed in it, whoever chose it (jev, a plan, the search for a missing contact, code).
+   */
+  const addressBarOf = (token: string | undefined, els: AxElement[] = (curObs?.elements ?? []) as AxElement[]): string | null => {
+    if (!token || !BROWSERS.test(task.app)) return null;
+    const e = els.find((x) => x.token === token);
+    return e ? addressBarForbidden(els, e) : null;
+  };
   /** jev is stuck: ask the LLM for a plan from the CURRENT screen, once or twice per task. false = no LLM available */
   const escalate = async (p: { screen: string[]; items: Item[] }, reason: string): Promise<boolean> => {
     if (!usePlan || llmHelper || !helper.canEscalate || escalations >= 2) return false;
@@ -245,6 +253,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   /** submit a search field: a real Return first (live, App Store ignored the field's accessibility "confirm" and only a
    * key press ran the search), the accessibility confirm when keys are refused in the background */
   const submitField = async (token: string, actions?: string[]): Promise<ActionResult> => {
+    const bar = addressBarOf(token);
+    if (bar) return refused(bar);
     const r = await driver.pressKey(agent, win, "return", token);
     if (r.ok || !actions?.includes("AXConfirm")) return r;
     return driver.confirm(agent, win, token);
@@ -252,6 +262,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
 
   const typeInto = async (token: string, text: string, foreground?: boolean, role?: string, searchBox?: AxElement): Promise<ActionResult> => {
     if (signal.aborted) return refused("stopped by the user");
+    const bar = addressBarOf(token);
+    if (bar) return refused(bar);
     // a SEARCH box filters as keys arrive, and a value set through accessibility fires nothing (live: Font Book's box
     // held "Helvetica" while the list stayed unfiltered; typed, 147 rows became the Helvetica family). So type it for
     // real, read it back, and set the whole text only if keys were dropped (live: Weather's "Tokyo" became "oy")
@@ -736,8 +748,10 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       // a name no window control carries, and searching the app for it TYPED that name into the search box
       const shown = (w: string) => p.items.some((i) => low(i.text) === low(w)) || obs.elements.some((e) => e.token && low(TEXT_INPUT.has(e.role) ? firstLabel.get(fieldKey(e)) ?? e.label ?? "" : `${e.label || e.value || ""}`).startsWith(low(w)));
       const missing = wanted.find((w) => low(w).length >= 2 && (!shown(w) || notReached.has(low(w))) && !searchedFor.has(low(w)));
-      const isFind = (e: AxElement) => !!e.token && (e.role === "AXSearchField" || (TEXT_INPUT.has(e.role) && FIND_FIELD.test(e.label ?? "")));
-      let search = missing ? obs.elements.find(isFind) : undefined;
+      // (not a browser's address bar, whose label says "search" too: "Address and search bar". Live, a missing name would
+      // have been typed into it)
+      const isFind = (els: AxElement[]) => (e: AxElement) => !!e.token && !addressBarOf(e.token, els) && (e.role === "AXSearchField" || (TEXT_INPUT.has(e.role) && FIND_FIELD.test(e.label ?? "")));
+      let search = missing ? obs.elements.find(isFind(obs.elements)) : undefined;
       // many apps show no search FIELD until a Search control is pressed (or a New chat / New message sheet opens).
       // Try each way in until one gives a field the agent can type into (WhatsApp's "Search" focuses a field that
       // isn't exposed to accessibility at all; its New Chat sheet has a real one)
@@ -752,7 +766,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
           task.counts.actions++;
           await sleep(600);
           o2 = await driver.observe(agent, win);
-          search = o2.elements.find(isFind) ?? o2.elements.find((e) => !!e.token && TEXT_INPUT.has(e.role) && !MESSAGE_FIELD.test(e.label ?? ""));
+          search = o2.elements.find(isFind(o2.elements)) ?? o2.elements.find((e) => !!e.token && TEXT_INPUT.has(e.role) && !MESSAGE_FIELD.test(e.label ?? "") && !addressBarOf(e.token, o2.elements));
           prev.push(`pressed '${open.label}' to get a search field${search ? "" : " (no field appeared)"}`);
           if (search) break;
         }
@@ -942,8 +956,10 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         // a "Search" / "Go" button with the goal's term already in a search box: the term still has to be submitted (live,
         // App Store kept the term from an earlier run, and pressing its Search button only showed the search page)
         if (/^(search|go|find)$/i.test(chosen.text.trim()) && !signal.aborted) {
+          // (never a browser's address bar, which holds the page's address and so often the goal's own words; and never a
+          // field that only shows its prompt)
           const box = obs.elements.find((e) => e.token && SINGLE_LINE.has(e.role) && (e.value ?? "").trim().length >= 2 &&
-            !PLACEHOLDER.test(e.value!.trim()) && norm(task.goal).includes(norm(e.value!)));
+            !PLACEHOLDER.test(e.value!.trim()) && !showsPrompt(obs.elements, e) && !addressBarOf(e.token, obs.elements) && norm(task.goal).includes(norm(e.value!)));
           const key = `${box?.role}|${norm(box?.value ?? "")}`;
           if (box?.token && !submittedSearch.has(key) && !enterForbidden(obs.elements, box.token, task.goal)) {
             submittedSearch.add(key);
@@ -963,13 +979,18 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         const secret = typingForbidden(chosen.text);
         if (secret) return finish("not_achieved", secret);
         const chosenEl = obs.elements.find((e) => e.token === chosen.token);
+        // SAFETY: never the browser's own address bar (sites open with open_url): what is typed there is navigated to or Googled
+        const bar = addressBarOf(chosen.token, obs.elements);
+        if (bar) { desc = `blocked: ${bar}`; break; }
         const id = fieldId(obs, chosen.token, chosen.role);
         const purpose = firstLabel.get(fieldKey(chosenEl)) || chosen.text; // what the field is for, from its first label
-        // a single-line field whose "value" is its own placeholder (Weather's box holds "Search") holds nothing. Narrow on
-        // purpose: an app may report a note's TEXT as its label too (Notes), and a filled-in name could equal its label,
-        // so only placeholder-like words count, never in a text area (the engine safety test caught the wide version)
-        const placeholder = chosen.role !== "AXTextArea" && (chosen.value ?? "").trim().length <= 40 &&
-          PLACEHOLDER.test((chosen.value ?? "").trim()) && [chosen.text, purpose].some((l) => norm(l) === norm(chosen.value ?? ""));
+        // a field that shows only its own prompt holds nothing: perceive says so (`placeholder`: Instagram's message box is
+        // an AXTextArea "Message..." that holds "Message..."), and so does an older rule for a single-line field whose "value"
+        // is its placeholder words under its FIRST label (Weather's box holds "Search"). Narrow on purpose: an app may report
+        // a note's TEXT as its label too (Notes), so a text area counts only when perceive found it prompt-shaped (in a web
+        // page, or ending in "...") and a filled-in name could equal its label (the engine safety test caught the wide version)
+        const placeholder = chosen.placeholder === true || (chosen.role !== "AXTextArea" && (chosen.value ?? "").trim().length <= 40 &&
+          PLACEHOLDER.test((chosen.value ?? "").trim()) && [chosen.text, purpose].some((l) => norm(l) === norm(chosen.value ?? "")));
         const before = placeholder ? "" : chosen.value ?? "";
         // SAFETY: never add to text the agent did not write (e.g. the body of one of the user's existing notes): its own
         // text is a field still holding exactly what the agent left there; the goal may name the text to edit
@@ -1027,7 +1048,9 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         // a search box holding the term from BEFORE this task is typed again once (below): a leftover term may never have
         // been searched or filtered on (live: Font Book's box held "Helvetica" over an unfiltered list)
         const leftoverSearch = searchBox && !typedInto.has(id) && chosen.role !== "AXTextArea";
-        if (!leftoverSearch && norm(chosen.value ?? (chosen.role === "AXTextArea" ? chosen.text : "")).includes(norm(typed))) {
+        // what the field holds (nothing, when it only shows its prompt: typing "me" is not already in "Message...")
+        const holds = placeholder ? "" : chosen.value ?? (chosen.role === "AXTextArea" ? chosen.text : "");
+        if (!leftoverSearch && norm(holds).includes(norm(typed))) {
           // ...but a search box that already holds the term may never have been searched (live: App Store kept the term
           // from an earlier run and the agent called it done without searching): submit it once
           desc = `skipped: '${chosen.text.slice(0, 30)}' already contains "${typed.slice(0, 40)}"${await submitSearch()}`;
@@ -1088,7 +1111,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
             ? after.elements.find((e) => e.token && TEXT_INPUT.has(e.role) && fieldKey(e) && fieldKey(e) !== fieldKey(chosenEl) && shows(e) && !shows(held(e)))
             : undefined;
           if (elsewhere?.token) {
-            const prior = held(elsewhere)?.value ?? "";
+            const was = held(elsewhere);
+            const prior = was && !showsPrompt(obs.elements, was) ? was.value ?? "" : ""; // one that only showed its prompt held nothing
             await driver.setValue(agent, win, elsewhere.token, prior).catch(() => undefined);
             // a search box that ignores the value: its OWN clear button, never a form's "Clear"
             const clear = prior ? undefined : clearButtonOf(after.elements, elsewhere);
@@ -1128,6 +1152,10 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       case "press_enter":
       case "press_escape": {
         const k = dec.kind === "press_enter" ? "return" : "escape";
+        // SAFETY: never Enter in a browser's address bar (sites open with open_url): what it holds is navigated to or
+        // Googled (live: it held a private message the agent had typed there by mistake)
+        const barEnter = k === "return" && isTextInput(chosen) ? addressBarOf(chosen!.token, obs.elements) : null;
+        if (barEnter) { desc = `blocked: ${barEnter}`; break; }
         // read-back before sending: the field must hold exactly what was typed (a lost first keystroke must not be sent)
         if (k === "return" && lastTyped) {
           const f = p.items.find((i) => isTextInput(i) && (i.id === lastTyped!.id || i.text === lastTyped!.label));
@@ -1149,7 +1177,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         }
         // SAFETY: Enter in a message field sends it: only when the goal asks to send something, and only to the one the
         // goal names (the open content's title must be them: measured, a message aimed at "You" sat in another chat)
-        const enterIn = isTextInput(chosen) ? chosen : p.items.find((i) => isTextInput(i) && i.state === "filled");
+        const enterIn = isTextInput(chosen) ? chosen : p.items.find((i) => isTextInput(i) && i.state === "filled" && !addressBarOf(i.token, obs.elements));
         const whoTo = goalValues(task.goal).targets;
         if (k === "return" && enterIn && MESSAGE_FIELD.test(firstLabel.get(fieldKey(obs.elements.find((e) => e.token === enterIn.token))) || enterIn.text) && whoTo.length && !whoTo.some((t) => headed(obs, t))) {
           desc = `blocked: the conversation on screen is not with ${whoTo.join(" / ")}, not sending`;
@@ -1161,7 +1189,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
           break;
         }
         // Enter on a field that supports AXConfirm needs no keyboard at all (keys are refused when an app has 2 windows)
-        const field = isTextInput(chosen) ? chosen : p.items.find((i) => isTextInput(i) && i.state === "filled" && i.actions?.includes("AXConfirm"));
+        const field = isTextInput(chosen) ? chosen : p.items.find((i) => isTextInput(i) && i.state === "filled" && i.actions?.includes("AXConfirm") && !addressBarOf(i.token, obs.elements));
         // SAFETY: Return / AXConfirm press the default button: a dialog's "Delete" / "Replace", a web form's "Pay"
         const noEnter = k === "return" ? enterForbidden(obs.elements, field?.token ?? enterIn?.token, task.goal) : null;
         if (noEnter) { desc = `blocked: ${noEnter}`; break; }

@@ -79,8 +79,45 @@ export function windowElements(obs: Observation): AxElement[] {
   return obs.elements.filter((e) => e.role !== "AXWindow" && inWindow(e));
 }
 
-function stateOf(e: AxElement): Item["state"] {
-  if (TEXT_INPUT.has(e.role)) return e.value && e.value.trim() !== "" ? "filled" : "empty";
+/** what a single-line field shows when it is EMPTY: its prompt, not something anyone wrote */
+export const PLACEHOLDER = /^(search|find|filter|type here|enter|add|new)\b/i;
+
+/** a field's label or value compared as a prompt: case, spacing and one trailing "..." / "…" don't count */
+const promptKey = (s: string | undefined) => (s ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").replace(/\s*(?:\.{3}|…)\s*$/, "").trim();
+
+/** whether `e` sits inside a web page (some ancestor is its AXWebArea); a browser's own toolbar does not */
+export function inWebPage(els: AxElement[], e: AxElement, byIndex: Map<number, AxElement> = new Map(els.map((x) => [x.index, x] as const))): boolean {
+  for (let up = e.parent, hops = 0; up !== undefined && hops < 64; hops++) {
+    const parent = byIndex.get(up);
+    if (!parent) return false;
+    if (parent.role === "AXWebArea") return true;
+    up = parent.parent;
+  }
+  return false;
+}
+
+/**
+ * Whether a text field's "value" is just its own prompt, so it holds nothing. Web text boxes expose their placeholder as
+ * their value (live: Instagram's message box is an AXTextArea labelled "Message..." that holds "Message..."), so a value
+ * equal to the label (case, spacing and a trailing "..." / "…" aside, at most 60 characters) is the prompt, in ANY
+ * role. Some apps mirror a field's real CONTENT into its label instead (a note in Notes: the same equality, real text),
+ * so outside a web page only a prompt-shaped one counts: one ending in "..." / "…", or, in a single-line field, the
+ * placeholder words of PLACEHOLDER ("Search"). Never in a text area on its words alone.
+ */
+export function isPlaceholder(role: string, label: string | undefined, value: string | undefined, inWeb: boolean): boolean {
+  const v = (value ?? "").trim();
+  if (!v || v.length > 60 || promptKey(v) !== promptKey(label)) return false;
+  return inWeb || /(?:\.{3}|…)$/.test(v) || (role !== "AXTextArea" && PLACEHOLDER.test(v));
+}
+
+/** a text field of the window that shows only its own prompt (see isPlaceholder) */
+export function showsPrompt(els: AxElement[], e: AxElement, byIndex?: Map<number, AxElement>): boolean {
+  if (!TEXT_INPUT.has(e.role) || !e.value || promptKey(e.value) !== promptKey(e.label)) return false; // the cheap checks first
+  return isPlaceholder(e.role, e.label, e.value, inWebPage(els, e, byIndex));
+}
+
+function stateOf(e: AxElement, holdsNothing: boolean): Item["state"] {
+  if (TEXT_INPUT.has(e.role)) return !holdsNothing && e.value && e.value.trim() !== "" ? "filled" : "empty";
   if (e.role === "AXCheckBox" || e.role === "AXRadioButton") return e.value === "1" ? "selected" : "unselected";
   return "n/a";
 }
@@ -94,18 +131,23 @@ export function screenFromMarkdown(md: string, max = 600): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   let skipIndent = -1;
+  let webIndent = -1; // the indent of the web page the lines below belong to (a field in a page shows its prompt as its value)
   for (const raw of md.split("\n")) {
     const indent = raw.length - raw.trimStart().length;
     const line = raw.trim();
     if (!line.startsWith("- ")) continue;
     if (skipIndent >= 0 && indent > skipIndent) continue;
     skipIndent = -1;
+    if (webIndent >= 0 && indent <= webIndent) webIndent = -1;
     if (/\bAXMenuBar\b/.test(line)) { skipIndent = indent; continue; }
+    if (webIndent < 0 && /\bAXWebArea\b/.test(line)) webIndent = indent;
     const m = line.match(/^- (?:\[\d+\] )?AX(StaticText|Heading|TextField|TextArea|Cell|Link|Button|GenericElement)\b(?: \(([^)]*)\))?(?: = "(.*)")?/);
     if (!m) continue;
     const role = m[1]!;
     // SwiftUI apps (Maps, Weather, Stocks) put their information in generic elements: "29 min, 11:56 ETA · 35 km"
-    const texts = role === "StaticText" || role === "Heading" || role === "GenericElement" ? [m[3], m[2]] : role === "TextField" || role === "TextArea" ? [m[3]] : [];
+    // (a text field that shows only its own prompt holds nothing: its "value" is not text on the screen)
+    const texts = role === "StaticText" || role === "Heading" || role === "GenericElement" ? [m[3], m[2]]
+      : role === "TextField" || role === "TextArea" ? [isPlaceholder(`AX${role}`, m[2], m[3], webIndent >= 0 && indent > webIndent) ? undefined : m[3]] : [];
     for (const s of texts) {
       const t = (s ?? "").replace(BIDI, "").replace(/\s+/g, " ").trim();
       if (!t || seen.has(t) || /^_NS:/.test(t)) continue;
@@ -122,7 +164,8 @@ export function screenText(els: AxElement[], max = 600): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const e of els) {
-    for (const s of e.role === "AXStaticText" || e.role === "AXHeading" || e.role === "AXGenericElement" ? [e.value, e.label] : TEXT_INPUT.has(e.role) ? [e.value] : []) {
+    // a text field that shows only its own prompt holds nothing: its "value" is not text on the screen
+    for (const s of e.role === "AXStaticText" || e.role === "AXHeading" || e.role === "AXGenericElement" ? [e.value, e.label] : TEXT_INPUT.has(e.role) && !showsPrompt(els, e) ? [e.value] : []) {
       const t = (s ?? "").replace(/\s+/g, " ").trim();
       if (!t || seen.has(t) || /^_NS:/.test(t)) continue;
       seen.add(t);
@@ -164,15 +207,21 @@ export function perceive(obs: Observation, goal = "", cap = CAP, focus = ""): Pe
   });
   const kept = [...cands].sort((a, b) => b.score - a.score || a.order - b.order).slice(0, cap);
   kept.sort((a, b) => a.order - b.order); // present in reading order
-  const items: Item[] = kept.map((c, i) => ({
-    i, id: `${c.e.role}:${c.label}`, text: c.label, role: c.e.role, token: c.e.token, value: c.e.value, state: stateOf(c.e), actions: c.e.actions,
-  }));
+  const byIndex = new Map(els.map((x) => [x.index, x] as const));
+  const items: Item[] = kept.map((c, i) => {
+    // a field that shows only its own prompt holds nothing: empty, whatever its "value" says (see isPlaceholder)
+    const holdsNothing = showsPrompt(els, c.e, byIndex);
+    return {
+      i, id: `${c.e.role}:${c.label}`, text: c.label, role: c.e.role, token: c.e.token, value: holdsNothing ? "" : c.e.value, state: stateOf(c.e, holdsNothing), actions: c.e.actions,
+      ...(holdsNothing ? { placeholder: true } : {}),
+    };
+  });
   let screen = obs.markdown ? screenFromMarkdown(obs.markdown) : screenText(els);
   // multi-line field contents (a document, a note) don't survive the markdown rendering: add them in full
   const seenLines = new Set(screen);
   const extra: string[] = [];
   for (const e of els) {
-    if (!TEXT_INPUT.has(e.role) || !e.value) continue;
+    if (!TEXT_INPUT.has(e.role) || !e.value || showsPrompt(els, e, byIndex)) continue;
     for (const line of e.value.split(/\n+/)) {
       const t = line.replace(BIDI, "").trim();
       if (t && !seenLines.has(t)) { seenLines.add(t); extra.push(t.length > 160 ? t.slice(0, 157) + "..." : t); }

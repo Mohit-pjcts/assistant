@@ -2,13 +2,13 @@
 // or act wrongly on this Mac, pinned down offline.
 import { expect, test } from "bun:test";
 import { homedir } from "node:os";
-import type { AxElement } from "../src/contracts.ts";
-import { CLAUSE_JOIN, calcChain, calculatorPlan, compilePlan, explicitText, remindersPlan, unquoted, weatherPlan, webPlan, withoutAppSuffix, writePlan } from "../src/compile.ts";
+import type { AxElement, Observation } from "../src/contracts.ts";
+import { CLAUSE_JOIN, calcChain, calculatorPlan, compilePlan, explicitText, goalValues, remindersPlan, unquoted, weatherPlan, webPlan, withoutAppSuffix, writePlan } from "../src/compile.ts";
 import { folderIn, sameFolder } from "../src/fsops.ts";
 import { overlapShare } from "../src/loop.ts";
 import { mergeSameApp, splitAtAppBoundaries } from "../src/manager.ts";
 import { groundedIn } from "../src/jevhelper.ts";
-import { namesOfRows, pressableText } from "../src/perceive.ts";
+import { isPlaceholder, namesOfRows, perceive, pressableText } from "../src/perceive.ts";
 import { clickForbidden } from "../src/safety.ts";
 
 const el = (index: number, role: string, extra: Partial<AxElement> = {}): AxElement => ({ index, role, depth: 0, actions: [], ...extra });
@@ -308,4 +308,209 @@ test("a message's own 'Tell me …' stays: only a lowercase 'and tell me' / 'and
     "The University of Hong Kong was founded in 1911. That is 115 years before 2026.",
     "I'll call Mum's phone",
   ]) expect([text, explicitText(`create a note that says: ${text}`)]).toEqual([text, text]);
+});
+
+// Oni's Instagram DM task (a real user task through the real supervisor): three bugs found in the run logs.
+
+const pageObs = (els: AxElement[], markdown?: string): Observation => ({ agent: "t", window: { pid: 1, windowId: 1, app: "Brave Browser", title: "Instagram" }, elements: els, truncated: false, ms: 1, markdown });
+
+test("a text box that shows its prompt as its value holds nothing (live: Instagram's message box, an AXTextArea 'Message...' holding 'Message...', was read as someone else's text)", () => {
+  const field = (p: ReturnType<typeof perceive>, label: string) => p.items.find((i) => i.text === label)!;
+  // in a web page, whatever the role and the words: the accessible name is never the box's content
+  const page = perceive(pageObs([
+    el(0, "AXWindow", { label: "Instagram" }),
+    el(1, "AXWebArea", { parent: 0, label: "Instagram" }),
+    el(2, "AXTextArea", { parent: 1, token: "msg", label: "Message...", value: "Message...", actions: ["AXPress"] }),
+    el(3, "AXTextField", { parent: 1, token: "srch", label: "Search", value: "Search", actions: ["AXPress"] }),
+    el(4, "AXTextArea", { parent: 1, token: "ask", label: "Ask anything", value: "Ask anything", actions: ["AXPress"] }),
+  ]));
+  for (const label of ["Message...", "Search", "Ask anything"]) expect([label, field(page, label).state, field(page, label).value, field(page, label).placeholder]).toEqual([label, "empty", "", true]);
+  expect(page.screen.join("\n")).not.toContain("Message..."); // and it is not text on the screen either
+  expect(page.screen.join("\n")).not.toContain("Ask anything");
+  // outside a page the shape has to look like a prompt: it ends in "..." / "…" (any role), or is a single-line field's placeholder word
+  const native = perceive(pageObs([
+    el(0, "AXWindow", { label: "App" }),
+    el(1, "AXTextArea", { parent: 0, token: "a", label: "Message...", value: "Message...", actions: [] }),
+    el(2, "AXTextArea", { parent: 0, token: "b", label: "Add a comment…", value: " add a comment... ", actions: [] }),
+    el(3, "AXSearchField", { parent: 0, token: "c", label: "Search", value: "Search", actions: [] }),
+  ]));
+  expect(native.items.map((i) => [i.text, i.state])).toEqual([["Message...", "empty"], ["Add a comment…", "empty"], ["Search", "empty"]]);
+  // the text of a native note can be mirrored into its label (Notes): that is real content and stays protected
+  const note = perceive(pageObs([el(0, "AXWindow", { label: "Notes" }), el(1, "AXTextArea", { parent: 0, token: "n", label: "My private note", value: "My private note", actions: [] })]));
+  expect([note.items[0]!.state, note.items[0]!.value, note.items[0]!.placeholder]).toEqual(["filled", "My private note", undefined]);
+});
+
+test("a text box with real content is not a prompt: a value that differs from its label, or long text equal to it", () => {
+  const web = (label: string, value: string) => perceive(pageObs([
+    el(0, "AXWindow", { label: "Instagram" }),
+    el(1, "AXWebArea", { parent: 0, label: "Instagram" }),
+    el(2, "AXTextArea", { parent: 1, token: "msg", label, value, actions: [] }),
+  ])).items[0]!;
+  expect([web("Message...", "see you at five").state, web("Message...", "see you at five").value]).toEqual(["filled", "see you at five"]);
+  expect(web("x".repeat(60), "x".repeat(60)).state).toBe("empty"); // up to 60 characters it can be a prompt
+  expect(web("x".repeat(61), "x".repeat(61)).state).toBe("filled"); // longer is real text
+  expect(web("Message...", "").state).toBe("empty");
+  // the comparison ignores case, spacing and one trailing "..." / "…"
+  expect(isPlaceholder("AXTextArea", "Message...", "message", true)).toBe(true);
+  expect(isPlaceholder("AXTextArea", "Message…", "  Message...  ", false)).toBe(true);
+  expect(isPlaceholder("AXTextArea", "Message...", "Message to Sam", true)).toBe(false);
+  expect(isPlaceholder("AXTextArea", "Ask anything", "Ask anything", false)).toBe(false); // outside a page, no "..." and a text area: not on its words alone
+  expect(isPlaceholder("AXTextField", "Search", "Search", false)).toBe(true); // the placeholder words of a single-line field, as before
+});
+
+test("the screen text from Cua's markdown leaves a page box's prompt out, and keeps what is really typed", () => {
+  const md = [
+    '- [0] AXWindow "Instagram"',
+    '  - [1] AXWebArea "Instagram"',
+    '    - [2] AXTextArea (Message...) = "Message..."',
+    '    - [3] AXTextArea (Ask anything) = "Ask anything"',
+    '    - [4] AXTextArea (Comment) = "great photo"',
+    '    - AXStaticText = "Rishabh Jain"',
+    '  - [5] AXTextField (My note) = "My note"',
+  ].join("\n");
+  const screen = perceive(pageObs([el(0, "AXWindow", { label: "Instagram" })], md)).screen;
+  expect(screen).toEqual(["window title: Instagram", "great photo", "Rishabh Jain", "My note"]); // "My note" is outside the page: real content
+});
+
+test("targets are people or conversations, never an app's sections, an app or an address (live: 'Direct Messages' was taken for the person to message)", () => {
+  const targets = (g: string) => goalValues(g).targets;
+  // Oni's goals as they went to Backstage
+  expect(targets("Open instagram.com, go to Direct Messages, open the conversation with Rishabh, and send a message that says: hi")).toEqual(["Rishabh"]);
+  expect(targets("Go to https://www.instagram.com/direct/inbox/, click on the conversation with Rishabh Jain to open it, click into the message text box at the bottom, type, and send a message that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("Go to Instagram Direct Messages, then message Rishabh Jain")).toEqual(["Rishabh Jain"]);
+  // places in an app and apps, singular or plural, any case
+  for (const place of ["Direct Messages", "Direct Message", "Messages", "DMs", "DM", "Inbox", "Chats", "Chat", "Requests", "Notifications", "Home", "Search", "Settings", "Explore", "Feed", "Channels", "Contacts", "People", "Friends", "Groups"]) {
+    expect([place, targets(`go to ${place}`)]).toEqual([place, []]);
+    expect([`"${place.toLowerCase()}"`, targets(`go to "${place.toLowerCase()}"`)]).toEqual([`"${place.toLowerCase()}"`, []]);
+  }
+  for (const app of ["Instagram", "WhatsApp", "Messenger", "Discord", "Slack", "Telegram", "Signal", "Facebook", "Twitter", "X", "LinkedIn", "Gmail", "Mail", "Messages"]) {
+    expect([app, targets(`go to ${app}`)]).toEqual([app, []]);
+    expect([app, targets(`go to ${app} and message Sam`)]).toEqual([app, ["Sam"]]);
+  }
+  // anything URL-like
+  for (const url of ["https://www.instagram.com/direct/inbox/", "instagram.com", "www.instagram.com", "instagram.com/direct/inbox"]) expect([url, targets(`go to "${url}" then message Priya`)]).toEqual([url, ["Priya"]]);
+  // people, and the shapes that always worked
+  expect(targets('Open WhatsApp, message Sohan "hi"')).toEqual(["Sohan"]);
+  expect(targets("reply to Sam's text")).toEqual(["Sam"]);
+  expect(targets("open the chat with Mum")).toEqual(["Mum"]);
+  expect(targets("message +852 9123 4567")).toEqual(["+852 9123 4567"]);
+  // clicking a conversation reaches its person; clicking a button named like one does not
+  expect(targets("click on the chat called Team Alpha")).toEqual(["Team Alpha"]);
+  expect(targets("go to Settings and click Sign In")).toEqual([]);
+  expect(targets("click Calculate")).toEqual([]);
+});
+
+test("sending something to a person makes the person a target, in either order ('send a message to X', 'send X a message'), so the right-conversation check runs", () => {
+  const targets = (g: string) => goalValues(g).targets;
+  // the three Oni writes most
+  expect(targets("send a message to Rishabh that says: hi")).toEqual(["Rishabh"]);
+  expect(targets("send Rishabh Jain a message that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("send it to Mum")).toEqual(["Mum"]);
+  // the thing, then "to": each kind of message, with the small words people put around it
+  for (const g of [
+    "send a text to Mum", "send a DM to Mum", "send a note to Mum", "send a reply to Mum", "send the message to Mum", "send a quick message to Mum",
+    "send a short text message to Mum", "send a direct message to Mum", "write a message to Mum", "write a text to Mum", "drop a message to Mum",
+    "drop a line to Mum", "drop a note to Mum", "send this to Mum", "send that to Mum", "send them to Mum", "send a message to the chat with Mum",
+  ]) expect([g, targets(g)]).toEqual([g, ["Mum"]]);
+  // the person, then the thing
+  for (const g of [
+    "send Mum a message", "send Mum a text", "send Mum a DM", "send Mum a note", "send Mum a reply", "send Mum the message that says: hi", "send Mum a quick text",
+    "write Mum a message", "write Mum a text", "drop Mum a message", "drop Mum a line", "send Mum a message on Instagram that says: hi",
+  ]) expect([g, targets(g)]).toEqual([g, ["Mum"]]);
+  // a goal that opens with the verb has its capital on the verb, which used to be taken in with the name
+  expect(targets("Send Rishabh Jain a message that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("Write Mum a message")).toEqual(["Mum"]);
+  expect(targets("Go to Direct Messages. Send Rishabh Jain a message that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("Open instagram.com Then: Send Rishabh Jain a message that says: hi")).toEqual(["Rishabh Jain"]);
+  // quoted, a number, a group
+  expect(targets('send a message to "Rishabh Jain" that says: hi')).toEqual(["Rishabh Jain"]);
+  expect(targets('send "Rishabh Jain" a message')).toEqual(["Rishabh Jain"]);
+  expect(targets("send a message to +852 9123 4567 that says: hi")).toEqual(["+852 9123 4567"]);
+  expect(targets("send a message to the group called Team Alpha")).toEqual(["Team Alpha"]);
+  // the same filtering as every other target: an app, a place in an app or an address is not who to send to
+  for (const place of ["Instagram", "WhatsApp", "Direct Messages", "Inbox", "instagram.com", "https://www.instagram.com/direct/inbox/"]) {
+    expect([place, targets(`send a message to ${place}`)]).toEqual([place, []]);
+    expect([place, targets(`send ${place} a message`)]).toEqual([place, []]);
+  }
+  expect(targets("send feedback to Instagram")).toEqual([]);
+  expect(targets("send it to Instagram")).toEqual([]);
+  // nothing that is sent to a person: no target
+  expect(targets("send the file")).toEqual([]);
+  expect(targets("send a message")).toEqual([]);
+  expect(targets("Send Feedback")).toEqual([]);
+  // "write a note to Mum" is a note in the Notes app, not a message to anyone
+  expect(targets("write a note to Mum")).toEqual([]);
+  expect(targets("In Notes, write a note to Mum that says: hi")).toEqual([]);
+  // a name inside a longer word is not the person ("Sam" in "Samuel")
+  expect(targets("send a message to Samuel that says: hi Sam")).toEqual(["Samuel"]);
+});
+
+test("a name in the text a goal hands over to type is never a target (it is in the message, not who it goes to)", () => {
+  const targets = (g: string) => goalValues(g).targets;
+  expect(targets("send a message to Rishabh that says: call Mum")).toEqual(["Rishabh"]); // "call Mum" used to make Mum a target too
+  expect(targets("send a message to Rishabh that says: send it to Mum")).toEqual(["Rishabh"]);
+  expect(targets("send a message to Rishabh that says: send Mum a message")).toEqual(["Rishabh"]);
+  expect(targets('send a message to Rishabh that says: "open the chat with Priya"')).toEqual(["Rishabh"]);
+  expect(targets("send a message to Rishabh Jain saying: text Mum when you land")).toEqual(["Rishabh Jain"]);
+  // nobody to send it to but the name inside the text: no target at all
+  expect(targets("send a message that says: call Mum")).toEqual([]);
+  expect(targets("send a message that says: send Mum a message")).toEqual([]);
+  // the text ends at the clause join, so a later mention of the same name is the goal again and still counts
+  expect(targets("send a message that says: call Mum Then: open the chat with Mum")).toEqual(["Mum"]);
+  // a person right before the clause join is the person ("Then" is not part of the name)
+  expect(targets("open the chat with Rishabh Jain Then: send a message that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("message Sohan Then: tell me what she said")).toEqual(["Sohan"]);
+  expect(targets("send a message to Rishabh Then: read the reply")).toEqual(["Rishabh"]);
+  expect(goalValues("send Rishabh Jain a message that says: hi Then: read the reply").names).toEqual(["Rishabh Jain"]);
+});
+
+test("a sentence that starts with a capitalised verb of reaching still gives the person ('Message Sohan …', 'Call Mum', 'Chat with Ana …'), so the right-conversation check runs", () => {
+  const targets = (g: string) => goalValues(g).targets;
+  // the capital belongs to the sentence, not to the name: the verb used to be taken in with it ("Message Sohan" was one name)
+  expect(targets("Message Sohan hi")).toEqual(["Sohan"]);
+  expect(targets('Message Sohan "hi"')).toEqual(["Sohan"]);
+  expect(targets("Text Mum that I'm running late")).toEqual(["Mum"]);
+  expect(targets("DM Rishabh that the meeting moved")).toEqual(["Rishabh"]);
+  expect(targets("Call Mum")).toEqual(["Mum"]);
+  expect(targets("Ring Mum")).toEqual(["Mum"]);
+  expect(targets("Answer Sam's message")).toEqual(["Sam"]);
+  expect(targets("Message Rishabh Jain on Instagram that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("Text +852 9123 4567 hi")).toEqual(["+852 9123 4567"]);
+  // the forms with a small word between the verb and the name were never glued, and stay as they were
+  expect(targets("Reply to Sam saying thanks")).toEqual(["Sam"]);
+  expect(targets("Chat with Ana about the trip")).toEqual(["Ana"]);
+  expect(targets("Open the chat with Rishabh Jain and say hi")).toEqual(["Rishabh Jain"]);
+  // any sentence of the goal, not just the first: after a full stop, after the clause join
+  expect(targets("Go to Instagram. Message Rishabh Jain that says: hi")).toEqual(["Rishabh Jain"]);
+  expect(targets("Open WhatsApp Then: Text Mum hi")).toEqual(["Mum"]);
+  // the same filtering: a place or an app after the verb is not a person, and an app opened by its name is not either
+  expect(targets("Message Requests")).toEqual([]);
+  expect(targets("Text Messages")).toEqual([]);
+  expect(targets("Message Instagram")).toEqual([]);
+  expect(targets("Open Text Edit and type hi")).toEqual([]);
+  // a verb with nothing after it is not a name
+  expect(targets("Message")).toEqual([]);
+});
+
+test("a conversation picked by the person's name, with the noun after it ('click directly on the 'Rishabh Jain' conversation'), gives the person", () => {
+  const targets = (g: string) => goalValues(g).targets;
+  // the real goal Oni sent (run log 18:07): the person and nothing else, not the 'Message...' box
+  expect(targets("On the open Instagram Direct Messages page, click directly on the 'Rishabh Jain' conversation in the left sidebar to open it, then click into the 'Message...' text box at the bottom of that conversation (clearing it first if it has any leftover text), and send a message that says: hi")).toEqual(["Rishabh Jain"]);
+  // each verb that picks a conversation, with and without quotes, each noun
+  for (const g of [
+    "click directly on the 'Rishabh Jain' conversation", "click on the 'Rishabh Jain' chat", 'click directly on the "Rishabh Jain" thread', "click on the Rishabh Jain conversation",
+    "Click the Rishabh Jain chat", "click just on the 'Rishabh Jain' thread", "tap the 'Rishabh Jain' chat", "choose the Rishabh Jain conversation", "pick the 'Rishabh Jain' thread",
+    "click on 'Rishabh Jain' conversation", "open the 'Rishabh Jain' conversation", "open the Rishabh Jain chat", "select the 'Rishabh Jain' chat", "select the Rishabh Jain conversation",
+  ]) expect([g, targets(g)]).toEqual([g, ["Rishabh Jain"]]);
+  expect(targets("click on the 'Team Alpha' thread, then send a message that says: hi")).toEqual(["Team Alpha"]);
+  // without the noun it is a control, as before: "click 'Rishabh Jain'" is a button
+  expect(targets("click 'Rishabh Jain'")).toEqual([]);
+  expect(targets("click the 'Send' button")).toEqual([]);
+  expect(targets("click into the 'Message...' text box at the bottom of that conversation")).toEqual([]);
+  // the same filtering: a section or an app is not a person
+  expect(targets("click on the 'Instagram' chat")).toEqual([]);
+  expect(targets("click on the Direct Messages conversation")).toEqual([]);
+  expect(targets("click the 'Requests' thread")).toEqual([]);
+  // the noun has to be that word on its own ("chatbot", "threads")
+  expect(targets("click on the 'Rishabh Jain' chatbot")).toEqual([]);
 });

@@ -193,3 +193,143 @@ test("blocked actions on different screens don't add up to a stall", async () =>
   expect(app.clicks).toEqual([]);
   expect(task.exception?.code).toBe("step_limit");
 });
+
+// ---------- Oni's Instagram DM task (a real user task, through the real supervisor): what its run logs showed ----------
+
+const WINDOW = { x: 0, y: 0, w: 1200, h: 800 };
+/** an Instagram thread in a browser: the open conversation's title, and the message box a web page exposes with its prompt as its value */
+const instagram = (conversation = "Rishabh Jain", box: Partial<AxElement> = {}) => {
+  const app = new FakeApp([
+    el(0, "AXWindow", "Brave Browser", { frame: WINDOW }),
+    el(1, "AXWebArea", "Instagram"),
+    el(2, "AXStaticText", conversation, { parent: 1, frame: { x: 600, y: 40, w: 160, h: 24 } }),
+    el(3, "AXTextArea", "Message...", { parent: 1, value: "Message...", frame: { x: 400, y: 700, w: 500, h: 40 }, ...box }),
+  ]);
+  // a web text box: what is typed replaces its prompt
+  app.typeText = async (_a, _w, t, text) => { app.typed.push(text); const e = app.els.find((x) => x.token === t); if (e) e.value = text; return OK; };
+  return app;
+};
+const SEND_HI = "open the conversation with Rishabh and send a message that says: hi";
+/** a run's context whose log also collects each step's description (what the agent did, or why it was blocked) */
+const withSteps = (ctx: ReturnType<typeof ctxOf>) => {
+  const acted: string[] = [];
+  return { ctx: { ...ctx, log: { write(l: any) { if (l.type === "step") acted.push(l.acted); } } }, acted };
+};
+
+test("Instagram's message box shows 'Message...' as its value, so it is empty: the agent types into it and sends (live: every run was blocked as 'already contains someone else's text')", async () => {
+  const app = instagram();
+  const brain = new Scripted((items, n) => n === 0 ? decide("type_text", by(items, "Message..."), "hi") : n === 1 ? decide("press_enter", by(items, "Message...")) : decide("done"));
+  const { ctx, acted } = withSteps(ctxOf(app, brain, new StubHelper([], { achieved: () => true }), undefined, 8));
+  const task = await runTask(ctx, newTask(SEND_HI, "Brave Browser"));
+  expect(app.typed).toEqual(["hi"]); // not "Message...hi"
+  expect(app.keys).toEqual(["return"]); // and sent
+  expect(app.sets).toEqual([]); // nothing to clear
+  expect(acted.filter((a) => a.startsWith("blocked"))).toEqual([]); // nothing was blocked on the way
+  expect(task.status).toBe("done");
+});
+
+test("a text box with real content in it is still protected: a value that differs from its label, or long text equal to it", async () => {
+  const SEND = "send a message that says: hi";
+  const attempt = async (app: FakeApp, label: string) => {
+    const { ctx, acted } = withSteps(ctxOf(app, new Scripted((items) => decide("type_text", by(items, label), "hi")), new StubHelper(), undefined, 4));
+    const task = await runTask(ctx, newTask(SEND, "Brave Browser"));
+    return { task, blocked: acted.filter((a) => a.includes("already contains someone else's text")) };
+  };
+  const real = instagram("Rishabh Jain", { value: "see you at five" });
+  const a = await attempt(real, "Message...");
+  expect([real.typed, a.blocked.length > 0, a.task.status]).toEqual([[], true, "failed"]);
+  const long = "x".repeat(70);
+  const text = instagram("Rishabh Jain", { label: long, value: long });
+  const b = await attempt(text, long);
+  expect([text.typed, b.blocked.length > 0, b.task.status]).toEqual([[], true, "failed"]);
+});
+
+test("the conversation check still stops a message aimed at someone else's chat, now that the box is empty", async () => {
+  const app = instagram("Maria"); // the open conversation is not Rishabh's
+  const task = await runTask(ctxOf(app, new Scripted((items) => decide("type_text", by(items, "Message..."), "hi")), new StubHelper(), undefined, 4), newTask(SEND_HI, "Brave Browser"));
+  expect(app.typed).toEqual([]);
+  expect(task.exception?.reason).toContain("not with Rishabh");
+});
+
+/** the goal Oni sent in the 18:07 run, which names the conversation only as "the 'Rishabh Jain' conversation" */
+const PICKED_BY_NAME = "On the open Instagram Direct Messages page, click directly on the 'Rishabh Jain' conversation in the left sidebar to open it, then click into the 'Message...' text box at the bottom of that conversation (clearing it first if it has any leftover text), and send a message that says: hi";
+test("the conversation check runs however the goal names the recipient, not only 'the conversation with X' (live gap: with no target, a message went to whatever chat was open)", async () => {
+  for (const goal of [
+    "send a message to Rishabh Jain that says: hi", "Send Rishabh Jain a message that says: hi", "send it to Rishabh Jain", // send phrasings
+    "Message Rishabh Jain that says: hi", // a capitalised verb opens the goal
+    PICKED_BY_NAME, // the conversation is picked by its name
+  ]) {
+    const wrong = instagram("Maria"); // the open conversation is not Rishabh Jain's
+    const stopped = await runTask(ctxOf(wrong, new Scripted((items) => decide("type_text", by(items, "Message..."), "hi")), new StubHelper(), undefined, 4), newTask(goal, "Brave Browser"));
+    expect([goal, wrong.typed]).toEqual([goal, []]);
+    expect([goal, stopped.exception?.reason]).toEqual([goal, expect.stringContaining("not with Rishabh Jain")]);
+    // and in his conversation it is typed and sent
+    const right = instagram("Rishabh Jain");
+    const brain = new Scripted((items, n) => n === 0 ? decide("type_text", by(items, "Message..."), "hi") : n === 1 ? decide("press_enter", by(items, "Message...")) : decide("done"));
+    const sent = await runTask(ctxOf(right, brain, new StubHelper([], { achieved: () => true }), undefined, 8), newTask(goal, "Brave Browser"));
+    expect([goal, right.typed, right.keys, sent.status]).toEqual([goal, ["hi"], ["return"], "done"]);
+  }
+});
+
+/** a browser: its own address bar in the toolbar, and a web page below */
+const browser = (label: string, page: AxElement[] = []) => new FakeApp([
+  el(0, "AXWindow", "Brave Browser", { frame: WINDOW }),
+  el(1, "AXTextField", label, { value: "instagram.com", frame: { x: 200, y: 10, w: 600, h: 24 } }),
+  el(2, "AXWebArea", "Instagram"),
+  ...page,
+]);
+const BARS: [string, string][] = [
+  ["Brave Browser", "Address and search bar"], ["Google Chrome", "Address and Search Bar"], ["Safari", "Smart Search Field"],
+  ["Safari", "Search or enter website name"], ["Brave Browser", "Address bar"], ["Google Chrome", "URL"],
+];
+
+test("never type into a browser's address bar (live: 'hi' went into Brave's, and a later run left 'Send message' there for Enter to Google)", async () => {
+  for (const [app, label] of BARS) {
+    const page = browser(label);
+    const task = await runTask(ctxOf(page, new Scripted((items) => decide("type_text", by(items, label), "hi")), new StubHelper(), undefined, 4), newTask("type hi", app));
+    expect([label, page.typed, page.sets, page.clicks]).toEqual([label, [], [], []]);
+    expect([label, task.exception?.code, task.exception?.reason]).toEqual([label, "stalled", "blocked: websites open with open_url; the address bar is never typed into"]);
+  }
+});
+
+test("never press Enter in a browser's address bar, whether the agent chose it or Enter would fall back to the first filled field", async () => {
+  for (const [app, label] of BARS) {
+    const page = browser(label);
+    const task = await runTask(ctxOf(page, new Scripted((items) => decide("press_enter", by(items, label))), new StubHelper(), undefined, 4), newTask("type hi", app));
+    expect([label, page.keys]).toEqual([label, []]);
+    expect(task.exception?.reason).toContain("the address bar is never typed into");
+  }
+  // no field chosen: Enter goes to no field of the browser's own (the bar is the only filled one, and is skipped)
+  const quiet = browser("Address and search bar");
+  await runTask(ctxOf(quiet, new Scripted(() => decide("press_enter")), new StubHelper(), undefined, 3), newTask("type hi", "Brave Browser"));
+  expect(quiet.keys.every((k) => !k.startsWith("confirm"))).toBe(true);
+});
+
+test("the page's own fields are not the address bar: a search box, or a form field labelled 'Address' or 'URL', is typed into", async () => {
+  const page = browser("Address and search bar", [
+    el(3, "AXTextArea", "Search", { parent: 2, frame: { x: 100, y: 100, w: 300, h: 30 } }),
+    el(4, "AXTextField", "Address", { parent: 2, frame: { x: 100, y: 200, w: 300, h: 30 } }),
+    el(5, "AXTextField", "URL", { parent: 2, frame: { x: 100, y: 300, w: 300, h: 30 } }),
+  ]);
+  const brain = new Scripted((items, n) => decide("type_text", by(items, ["Search", "Address", "URL"][n]!), ["hello", "12 Main Street", "example.com"][n]));
+  await runTask(ctxOf(page, brain, new StubHelper(), undefined, 12), newTask("fill in the form: hello, 12 Main Street, example.com", "Brave Browser"));
+  expect(page.typed).toEqual(["hello", "12 Main Street", "example.com"]);
+  // and the same label outside a browser is not special either (a native single-line field has its text SET, not typed)
+  const notes = new FakeApp([el(0, "AXWindow", "Notes", { frame: WINDOW }), el(1, "AXTextField", "Address bar", { frame: { x: 10, y: 10, w: 300, h: 24 } })]);
+  await runTask(ctxOf(notes, new Scripted((items) => decide("type_text", by(items, "Address bar"), "hello")), new StubHelper(), undefined, 3), newTask("type hello", "Notes"));
+  expect(notes.sets).toContainEqual(["t1", "hello"]);
+});
+
+test("the search for a name that is not on screen never uses the address bar, whose label says 'search' too (it would be blanked, then typed into)", async () => {
+  // Rishabh is not on screen and the only 'search' field is the browser's own address bar
+  const bar = browser("Address and search bar");
+  await runTask(ctxOf(bar, new Scripted(() => decide("scroll_down")), new StubHelper(), undefined, 3), newTask(SEND_HI, "Brave Browser"));
+  expect([bar.typed, bar.sets, bar.keys]).toEqual([[], [], []]);
+});
+
+test("pressing the page's Search link does not retype the address bar's text (it holds the goal's own 'instagram.com') and press Enter in it", async () => {
+  const page = browser("Address and search bar", [el(3, "AXButton", "Search", { parent: 2, frame: { x: 20, y: 200, w: 80, h: 30 } })]);
+  await runTask(ctxOf(page, new Scripted((items) => decide("click", by(items, "Search"))), new StubHelper(), undefined, 3), newTask("open instagram.com and search for Rishabh", "Brave Browser"));
+  expect(page.clicks).toContain("Search");
+  expect([page.typed, page.sets, page.keys]).toEqual([[], [], []]);
+});

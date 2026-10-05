@@ -103,29 +103,96 @@ export function explicitText(goal: string): string | null {
   return null;
 }
 
+/**
+ * Places and apps a goal goes TO, which are never who to reach: sections of an app ("go to Direct Messages", "the Inbox",
+ * "Settings"), the apps and sites themselves ("go to Instagram"), and addresses. Live, "Direct Messages" was taken for
+ * the person to message, and no conversation on screen was ever "with" it, so the message was never sent. A name made
+ * only of such words is not a person (singular or plural, any case); "Rishabh Jain" is.
+ */
+const NOT_A_PERSON = new RegExp(`^(?:(?:the|app|page|tab|section|screen|site|website|${[
+  "direct messages?", "messages?", "dms?", "inbox(?:es)?", "chats?", "requests?", "notifications?", "home", "search", "settings?", "explore", "feeds?", "channels?", "contacts?", "people", "persons?", "friends?", "groups?", // places in an app
+  "instagram", "whatsapp", "messenger", "facebook", "twitter", "linkedin", "discord", "slack", "telegram", "signal", "gmail", "mail", "imessage", "snapchat", "wechat", "skype", "viber", "tiktok", "reddit", "youtube", "x", // apps and sites
+].join("|")})(?:['’]s)?(?:\\s+|$))+$`, "i");
+const URL_LIKE = /:\/\/|\/|^www\.|\b[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:com|net|org|io|co|app|edu|gov|ai|me|tv|dev|gg|ly|us|uk|hk|cn|jp|de|fr|info|biz|xyz)\b/iu;
+
+/**
+ * What a goal says when it sends something to a person, in the two orders Oni writes it, so the person is a target too:
+ * the thing, then "to" ("send a message to Rishabh", "send a quick text to Mum", "send it to Mum", "write a message to
+ * Sam", "drop a line to Sam") and the person, then the thing ("send Rishabh Jain a message", "write Mum a message",
+ * "drop Mum a line"). Without a target the check that the open conversation is the right one never runs, and the message
+ * goes to whichever chat happens to be open. "write a note to Mum" is left out on purpose: that is a note in the Notes
+ * app, where the guard would only get in the way and the search for "Mum" could open an unrelated note.
+ */
+const SENT_DET = "(?:an?|the|my|this|that)";
+const SENT_KIND = "(?:(?:quick|short|brief|new|nice|friendly|polite|simple|follow-?up|private|direct|text|chat|instant)\\s+)*"; // "a quick text message"
+const SENT_NOUN = "(?:message|text|dm|note|line|reply|msg)";
+const SEND_TO = new RegExp(
+  `\\b(?:(?:send|drop)\\s+${SENT_DET}\\s+${SENT_KIND}${SENT_NOUN}|send\\s+(?:it|this|that|them)|write\\s+${SENT_DET}\\s+${SENT_KIND}(?:message|text|dm|msg))` +
+  `\\s+to\\s+(?:the\\s+)?(?:(?:chat|conversation|thread|group)\\s+(?:with\\s+|called\\s+|named\\s+)?)?["“'‘]?$`, "i");
+/** "send", "write" or "drop" right before the person; SENT_AFTER is what must follow the name for it to be one ("a message") */
+const SEND_VERB = /\b(?:send|write|drop)\s+["“'‘]?$/i;
+const SENT_AFTER = new RegExp(`^["”’']?\\s+${SENT_DET}\\s+${SENT_KIND}${SENT_NOUN}\\b`, "i");
+/**
+ * A conversation picked by the person's name, with the noun AFTER it ("click directly on the 'Rishabh Jain' conversation",
+ * "tap the Mum chat"). PICK_VERB is what must come right before the name, CONVERSATION_AFTER what must follow it: with no
+ * noun, "click Sign In" is a button, not a person.
+ */
+const PICK_VERB = /\b(?:click|tap|choose|pick|open|select)\s+(?:(?:directly|just|simply)\s+)?(?:on\s+)?(?:the\s+)?["“'‘]?$/i;
+const CONVERSATION_AFTER = /^["”’']?\s+(?:conversation|chat|thread)\b/i;
+/**
+ * The verbs that take the person straight after them. Capitalised at the start of a sentence ("Message Sohan hi", "Call
+ * Mum", "Send Rishabh Jain a message"), the verb and the name are one capitalised run, so the verb is taken off it.
+ * "email" is left out on purpose: a compose window has no conversation to check, so the check would only block its body.
+ * "open", "select" and "go to" are left out too: "Open Calculator" would make the app a person to reach.
+ */
+const PERSON_VERB = /^(?:send|write|drop|message|text|dm|call|ring|answer)\s+(?=\S)/i;
+
 /** the concrete values a goal gives: quoted text, names (capitalised words that aren't the first word or the app it
  *  is told to use), and the TARGETS among them: what a verb of reaching asks to get to ("message Sohan", "reply to
- *  Sohan's text", "open the chat with Mum"). "Open WhatsApp, message Sohan "hi"" -> quoted ["hi"], names ["Sohan"],
- *  targets ["Sohan"]. */
+ *  Sohan's text", "open the chat with Mum", "click on the conversation with Rishabh Jain", "click on the 'Rishabh Jain'
+ *  conversation", "send a message to Sohan", "send Sohan a message", "send it to Mum", and the same with a capital verb
+ *  that opens a sentence: "Message Sohan hi"), never a place or an app ("go to Direct Messages", "go to Instagram") or an
+ *  address, and never a name inside the text the goal hands over to type ("… that says: call Mum"). "Open WhatsApp,
+ *  message Sohan "hi"" -> quoted ["hi"], names ["Sohan"], targets ["Sohan"]. */
 export function goalValues(goal: string): { quoted: string[]; names: string[]; targets: string[] } {
   const QUOTE = /["“]([^"”]{1,300})["”]|(?<=^|[\s:(,])['‘]([^'’]{2,300})['’](?=$|[\s,.!?:;)])/g;
   const quoted = [...goal.matchAll(QUOTE)].map((q) => (q[1] ?? q[2])!.trim()).filter(Boolean);
-  const rest = goal.replace(QUOTE, " , ");
+  // a clause join is a sentence break: left in, its capital "Then" joins the name before it ("message Sohan Then: …" gave
+  // the name "Sohan Then", which no conversation is ever headed with)
+  const rest = goal.replace(QUOTE, " , ").split(CLAUSE_JOIN).join(" . ");
   const names: string[] = [];
   for (const m of rest.matchAll(/\b([A-Z][\p{L}\p{N}'’&-]*(?:\s+[A-Z][\p{L}\p{N}'’&-]*){0,2})/gu)) {
     const before = rest.slice(0, m.index).trimEnd();
-    if (!before || /[.!?:;]$/.test(before)) continue; // the first word of a sentence
-    if (/\b(open|in|on|using|via|launch|start|use)$/i.test(before)) continue; // the app to use ("open WhatsApp", "in Discord")
-    const n = m[1]!.replace(/[’']s$/, "");
+    let run = m[1]!;
+    if (!before || /[.!?:;]$/.test(before)) {
+      // the first word of a sentence is capitalised whatever it is, so a sentence that opens with the verb ("Send Rishabh
+      // Jain a message", "Call Mum") has the verb and the name in ONE capitalised run: drop the verb, keep the name
+      run = run.replace(PERSON_VERB, "");
+      if (run === m[1]) continue;
+    } else if (/\b(open|in|on|using|via|launch|start|use)$/i.test(before)) continue; // the app to use ("open WhatsApp", "in Discord")
+    const n = run.replace(/[’']s$/, "");
     if (!names.includes(n) && !quoted.some((q) => q.toLowerCase() === n.toLowerCase())) names.push(n);
   }
   const REACH = /\b(?:message|text|dm|email|call|ring|reply(?:ing)? to|respond(?:ing)? to|answer|chat with|write to|talk to|open|go to|switch to|select|join)\s+(?:the\s+)?(?:(?:chat|conversation|thread|group)\s+(?:with\s+|called\s+|named\s+)?)?(?:(?:last|latest|newest|most recent)\s+)?(?:(?:message|text)\s+from\s+)?["“'‘]?$/i;
+  // clicking a CONVERSATION reaches its person too ("click on the conversation with Rishabh Jain"); a bare "click X" does
+  // not (X is a button's label)
+  const REACH_CLICK = /\b(?:click|tap|choose|pick)(?:\s+on)?\s+(?:the\s+)?(?:chat|conversation|thread|group|dm)\s+(?:with\s+|called\s+|named\s+)["“'‘]?$/i;
   // phone numbers are names too ("message +852 9123 4567")
   for (const m of rest.matchAll(/\+?\d[\d ()-]{6,}\d/g)) if (!names.includes(m[0].trim())) names.push(m[0].trim());
+  // every place a value appears is looked at, not just the first: it may first show up in the text the goal hands over to
+  // type ("… that says: call Mum Then: open the chat with Mum"), which never counts, and a later mention is the target
+  const typed = markedTexts(goal);
   const targets = [...quoted, ...names].filter((v) => {
-    const at = goal.indexOf(v);
-    return at > 0 && REACH.test(goal.slice(0, at));
-  });
+    for (let at = goal.indexOf(v); at >= 0; at = goal.indexOf(v, at + 1)) {
+      if (at === 0 || typed.some((t) => at >= t.start && at < t.end)) continue;
+      if (/[\p{L}\p{N}]/u.test(goal[at + v.length] ?? "")) continue; // inside a longer word ("Sam" in "Samuel")
+      const before = goal.slice(0, at);
+      const after = goal.slice(at + v.length);
+      if (REACH.test(before) || REACH_CLICK.test(before) || SEND_TO.test(before)) return true;
+      if ((SEND_VERB.test(before) && SENT_AFTER.test(after)) || (PICK_VERB.test(before) && CONVERSATION_AFTER.test(after))) return true;
+    }
+    return false;
+  }).filter((v) => !URL_LIKE.test(v) && !NOT_A_PERSON.test(v.trim()));
   return { quoted, names, targets };
 }
 

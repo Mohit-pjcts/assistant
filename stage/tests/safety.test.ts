@@ -2,9 +2,10 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AxElement } from "../src/contracts.ts";
 import { sendIntent, unquoted } from "../src/compile.ts";
 import { fromThisComputer } from "../src/localonly.ts";
-import { clickForbidden, editAllowed, sendForbidden, typingForbidden } from "../src/safety.ts";
+import { addressBarForbidden, clickForbidden, editAllowed, sendForbidden, typingForbidden } from "../src/safety.ts";
 import { FileOps, safeRoot } from "../src/fsops.ts";
 
 const req = (headers: Record<string, string>, method = "POST") => new Request("http://127.0.0.1:3000/api/run", { method, headers });
@@ -201,4 +202,29 @@ test("two places in one app stay two tasks, run one after the other; a 10th task
   const ten = Array.from({ length: 10 }, (_, i) => ({ app: `App${i}`, agent: `agent${i % 9}` }));
   expect(waitsFor(ten, 9)).toBe(0);
   expect(waitsFor(ten, 5)).toBe(-1);
+});
+
+test("a browser's own address bar is recognised by its label, and never a field of the page itself", () => {
+  const field = (label: string, inPage: boolean, role = "AXTextField"): { els: AxElement[]; e: AxElement } => {
+    const e: AxElement = { index: 2, parent: inPage ? 1 : 0, depth: 2, role, label, token: "f", actions: [] };
+    return { els: [{ index: 0, depth: 0, role: "AXWindow", label: "Brave", actions: [] }, { index: 1, parent: 0, depth: 1, role: "AXWebArea", label: "Instagram", actions: [] }, e], e };
+  };
+  const reason = "websites open with open_url; the address bar is never typed into";
+  // Brave / Chrome / Edge / Arc, Safari, Firefox, and the plain shapes
+  for (const label of ["Address and search bar", "Address and Search Bar", "address and search bar", "Smart Search Field", "Search or enter website name", "Search or enter address",
+    "Search or type a URL", "Search Google or type a URL", "Search with Google or enter address", "Address bar", "Address field", "Address", "URL", "Location bar"]) {
+    const { els, e } = field(label, false);
+    expect([label, addressBarForbidden(els, e)]).toEqual([label, reason]);
+    // the same label on the page is the page's own field (a form's "Address", a new-tab page's search box)
+    const page = field(label, true);
+    expect([label, addressBarForbidden(page.els, page.e)]).toEqual([label, null]);
+  }
+  // other fields of the window are not the bar: a page's search box, a message box, other labels
+  for (const label of ["Search", "Search Instagram", "Message...", "Ask anything", "Email address", "Website URL", "Address line 1", "Search or filter", "Find in page"]) {
+    const { els, e } = field(label, false);
+    expect([label, addressBarForbidden(els, e)]).toEqual([label, null]);
+  }
+  // only a text input can be one
+  const button = field("Address and search bar", false, "AXButton");
+  expect(addressBarForbidden(button.els, button.e)).toBeNull();
 });

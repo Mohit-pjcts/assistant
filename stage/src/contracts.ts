@@ -65,6 +65,8 @@ export interface Item {
   i: number; id: string; text: string; role: string; token?: string; value?: string;
   state: "empty" | "filled" | "selected" | "unselected" | "n/a";
   actions?: string[];
+  /** a text field that shows only its own prompt (its label as its value): it holds nothing, so its value is "" and its state "empty" */
+  placeholder?: boolean;
 }
 
 export interface Facts {

@@ -956,6 +956,25 @@ def test_supervisor_prompt_teaches_writing_and_checking_with_backstage():
     assert "any text to type written by you, last, after 'that says:'" not in prompt  # old wording
 
 
+def test_supervisor_prompt_shows_a_message_goal_and_asks_for_the_persons_exact_name():
+    """A message is the risky verb most easily got subtly wrong: the playbook shows what a
+    messaging goal looks like (item 2), and tells the supervisor to name the person exactly as
+    the app shows them, so the agent can check it's in the right chat before sending (item 7)."""
+    prompt = sup.SUPERVISOR_SYSTEM_PROMPT_FALLBACK
+    playbook = prompt[prompt.index("- backstage:") : prompt.index("- onstage")]
+    items = dict(re.findall(r"^  (\d+)\. (.*)$", playbook, re.MULTILINE))
+    # item 2: a Good example (before "Bad:"), right after the reminder one
+    example = "'open the chat with Rishabh Jain and send a message that says: <your text>'"
+    assert f"'add a reminder called Buy milk' · {example} · 'organise the files" in items["2"]
+    assert items["2"].index(example) < items["2"].index("Bad:")
+    # item 7: the risky-verbs rule, closed by the new sentence
+    assert items["7"].startswith("The agents refuse to send, delete, buy, install or sign out")
+    assert items["7"].endswith(
+        "For a message, name the person exactly as the app shows them, "
+        "so the agent can check it's in the right chat before sending."
+    )
+
+
 def test_the_playbook_keeps_its_eight_numbered_rules_in_order():
     prompt = sup.SUPERVISOR_SYSTEM_PROMPT_FALLBACK
     assert prompt.count("- backstage:") == 1

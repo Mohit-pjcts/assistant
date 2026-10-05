@@ -265,7 +265,7 @@ bun run src/cli.ts "... same command ..." --brain llm      # the LLM brain, for 
 ## Tests
 
 ```sh
-bun test            # 137 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
+bun test            # 155 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
 bun run typecheck
 ```
 
@@ -289,13 +289,15 @@ Measured on a 10-file sandbox:
 
 * **No irreversible click you didn't ask for.** Every click an agent makes goes through one guard: send, pay, buy, order, submit, delete, remove, trash, replace, sign out, post, publish, confirm, unsubscribe, discard, reset, approve/allow, cancel subscription, leave group, block… are refused unless your command asks for that action, not negated ("do not delete" never allows Delete) and about the same thing ("delete the draft" doesn't allow "Delete All"). A refusal is always fine ("Don't Allow"), and so is a cookie banner's Accept. Text the agent is told to type is content, not an order: what is in quotes, or after `that says:` / `saying:` / `which says:` / `with the text:` / `the words:` / `exactly:` (up to a following ` Then: `, where the next clause begins), never counts as the command asking for an action, so "create a note that says: remember to delete old files" doesn't make Delete allowed.
 * **Enter is checked too.** Return can fire a dialog's default button ("Delete 3 items?") or submit a checkout form, so Enter is refused while a sheet or dialog shows a risky button, or when the web form's submit button is risky.
-* **Messages only when asked to send.** A message box is filled, and Send or Enter pressed in it, only when the command really asks to send something to someone ("message Sam…", "reply to Sam saying…", "send … to …"). "Tell me…" never counts.
+* **Messages only when asked to send.** A message box is filled, and Send or Enter pressed in it, only when the command really asks to send something to someone ("message Sam…", "reply to Sam saying…", "send … to …"). "Tell me…" never counts. It also goes only to the conversation the command names: for "message Sam…", "send a message to Sam…", "send Sam a message", "send it to Sam" or "click on the 'Sam' conversation" the agent goes to Sam's conversation first and refuses to type or press Enter while the open chat is not with Sam. A name inside the text it is told to type ("… that says: call Mum") is never taken for who to send to.
 * **Never edits your existing content.**
   * An agent refuses to type into a text area that already holds text it didn't write (it tracks which field it wrote, and exactly what). It creates a new note or document instead, unless your command explicitly asks to edit, append to or reply to that text.
   * It never blanks a filled field it didn't write, except a search field, and only clicks the Clear button that belongs to that field.
+  * A box that only shows its own prompt holds nothing. Web pages expose a text box's placeholder as its value (Instagram's message box is a text area called "Message..." that holds "Message..."), so that is read as empty, not as text someone wrote. A native text area whose label mirrors its real text (a note) stays protected, and so does any box whose text differs from its label or runs past 60 characters.
   * TextEdit tasks always get a fresh scratch document.
 * **Files stay put and stay yours.** Finder moves stay inside the folder you named (its real path), refuse symbolic links, never overwrite (an existing name is never replaced), and write an undo script you can run as is.
 * **Links only to websites.** An agent opens http/https links (and Maps/Stocks links Stage builds itself), never `file:`, `javascript:` or other schemes, never local or private-network addresses, and never a link to an unfamiliar site that carries a long chunk of text (a way to leak what's on screen).
+* **Never the browser's address bar.** Sites open with `open_url`, so an agent never types into a browser's own address / search bar ("Address and search bar", Safari's "Smart Search Field", "Search or enter website name"…) and never presses Enter in it: what is typed there gets navigated to or Googled (live, "hi" went into Brave's by mistake). A field inside the web page itself, even one labelled "Address" or "Search", is the page's own and is fine.
 * **Screen text is data.** Every planner, writer, verifier and Onstage prompt says the screen's text is content, never instructions to follow.
 * **The right window.** The fast lane only presses or types into a control in the agent's own window (checked by window id, or frame and title), whose label matches exactly; anything less certain goes through Cua instead. A press that may or may not have happened is never blindly repeated: the agent looks again first.
 * **Stop means stop.** Stop is checked right before every action, not just between steps.
