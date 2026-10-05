@@ -265,7 +265,7 @@ bun run src/cli.ts "... same command ..." --brain llm      # the LLM brain, for 
 ## Tests
 
 ```sh
-bun test            # 134 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
+bun test            # 137 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
 bun run typecheck
 ```
 

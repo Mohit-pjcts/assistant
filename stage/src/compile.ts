@@ -502,10 +502,61 @@ export function stocksPlan(goal: string): PlanStep[] | null {
   return symbol ? [{ action: "open_url", text: `stocks://?symbol=${encodeURIComponent(symbol)}` }] : null;
 }
 
-/** "check the weather in Hong Kong" -> switch the Weather app to that city (done in code: search, pick the city) */
+/** what can follow "in / for / at" or a verb without being a place: a unit, something the app shows, a time, a pronoun */
+const NOT_A_PLACE = new RegExp(`^(?:${[
+  "celsius", "fahrenheit", "kelvin", "centigrade", "degrees?", "metric", "imperial", // units
+  "weather", "forecasts?", "temperatures?", "conditions?", "hourly", "daily", "weekly", "radar", "humidity", "wind", "rain", "snow", "pressure", "visibility", "sunrise", "sunset", "air quality", "uv index", // what the app shows
+  "today", "tonight", "tomorrow", "yesterday", "now", "right now", "(?:morning|afternoon|evening|night|day|week|weekend|month|moment)s?(?:\\s.*)?", // times
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+  "general", "detail", "me", "you", "us", "him", "her", "it", "them", "myself", "a", "an", "the", "this", "that", "my", "our", "your", "his", "their", // not places
+].join("|")})$`, "i");
+/** "the week", "the next three days", "a while": a determiner and a lowercase word is a noun phrase, not a place ("The Hague" is one) */
+const NOUN_PHRASE = /^(?:the|a|an|my|our|your|his|her|their|this|that|these|those|some|any|every|each|no|next|last)\s+[a-z]/;
+const isPlace = (s: string): boolean => s !== "" && !NOT_A_PLACE.test(s) && !NOUN_PHRASE.test(s);
+
+/**
+ * where a place after "in / for / at" ends: before "and", "then", another preposition or a day word, at a comma, colon,
+ * bracket or full stop (not the dot of "St.", "Mt.", "Ft."), or at the end
+ */
+const PLACE_END = String.raw`(?=\s+(?:and|then|in|for|at|today|tonight|tomorrow|now|right now|this week|this weekend)\b|\s*(?:[,;:?!(]|(?<!\b(?:st|mt|ft))\.)|\s*$)`;
+const AFTER_PREPOSITION = new RegExp(String.raw`\b(?:in|for|at)\s+([\p{L}][\p{L} .'’-]*?)${PLACE_END}`, "giu");
+
+/** "check the weather in Hong Kong": a place after "in / for / at", from the first weather word on, the first that is a place */
+function placeAfterPreposition(goal: string): string | null {
+  const from = goal.search(/\b(?:weather|forecast|temperature)\b/i);
+  if (from < 0) return null;
+  for (const m of goal.slice(from).matchAll(AFTER_PREPOSITION)) {
+    const place = m[1]!.trim();
+    if (isPlace(place)) return place;
+  }
+  return null;
+}
+
+/** the verbs that name a place to switch to */
+const PLACE_VERBS = /\b(?:search(?:\s+for)?|look\s+up|find|show(?:\s+me)?|switch\s+to|check)\s+/giu;
+/** a place's name: capitalised words in a row ("New York City", "St. Louis", "Tokyo's") */
+const PLACE_NAME = /^(?:(?:St|Mt|Ft)\.|\p{Lu}[\p{L}'’-]*)(?:\s+(?:(?:St|Mt|Ft)\.|\p{Lu}[\p{L}'’-]*))*/u;
+
+/** "search for Hong Kong and tell me the high": the capitalised words right after the verb (so never "the weather") */
+function placeAfterVerb(goal: string): string | null {
+  for (const v of goal.matchAll(PLACE_VERBS)) {
+    const place = goal.slice(v.index! + v[0].length).match(PLACE_NAME)?.[0].replace(/['’]s$/, "");
+    if (place && isPlace(place)) return place;
+  }
+  return null;
+}
+
+/**
+ * "check the weather in Hong Kong" -> switch the Weather app to that city (done in code: search, pick the city). The
+ * city is read from "weather / forecast / temperature … in | for | at <City>" first, then from the verb that names it:
+ * "search (for) <City>", "look up", "find", "show (me)", "switch to", "check". (Live, "search for Tokyo and tell me the
+ * current temperature shown" compiled to nothing and jev wandered; "… the high temperature in Celsius" found the city
+ * "Celsius", and "weather in Tokyo and tell me the temperature" the city "Tokyo and tell me the temperature".) The city
+ * ends before "and", "then", a comma or a full stop, and is never a unit, a time or a generic word.
+ */
 export function weatherPlan(goal: string): PlanStep[] | null {
-  const m = goal.match(/\b(?:weather|forecast|temperature)\b.*?\b(?:in|for|at)\s+([A-Za-z][A-Za-z .'-]*?)(?:\s+(?:today|tonight|tomorrow|now|right now|this week|this weekend))?\s*[.?!]*$/i);
-  return m ? [{ action: "pick_city", text: m[1]!.trim() }] : null;
+  const city = placeAfterPreposition(goal) ?? placeAfterVerb(goal);
+  return city ? [{ action: "pick_city", text: city }] : null;
 }
 
 /** "check the weather in Tokyo in Weather" -> "check the weather in Tokyo": a trailing "in <this app>" names the app,

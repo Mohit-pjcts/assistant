@@ -3,7 +3,7 @@
 import { expect, test } from "bun:test";
 import { homedir } from "node:os";
 import type { AxElement } from "../src/contracts.ts";
-import { CLAUSE_JOIN, calcChain, calculatorPlan, explicitText, remindersPlan, unquoted, webPlan, withoutAppSuffix, writePlan } from "../src/compile.ts";
+import { CLAUSE_JOIN, calcChain, calculatorPlan, compilePlan, explicitText, remindersPlan, unquoted, weatherPlan, webPlan, withoutAppSuffix, writePlan } from "../src/compile.ts";
 import { folderIn, sameFolder } from "../src/fsops.ts";
 import { overlapShare } from "../src/loop.ts";
 import { mergeSameApp, splitAtAppBoundaries } from "../src/manager.ts";
@@ -139,6 +139,55 @@ test("Wikipedia goals find the topic whatever leads in and whatever is asked aft
   expect(wiki("look up Tell Me Why on Wikipedia and tell me who wrote it")).toBe(wikiUrl("Tell%20Me%20Why"));
   expect(wiki("look up Pride and Prejudice on Wikipedia and tell me who wrote it")).toBe(wikiUrl("Pride%20and%20Prejudice"));
   expect(wiki("Go to the Wikipedia page for Don't Tell Me (Madonna song) and tell me the year")).toBe(wikiUrl("Don't%20Tell%20Me%20(Madonna%20song)"));
+});
+
+const city = (goal: string) => weatherPlan(goal)?.[0]?.text ?? null;
+
+test("Weather: the city also comes from 'search for X' and the other verbs (live, 'search for Tokyo and tell me …' compiled to nothing and jev wandered)", () => {
+  // the two goals as Oni sent them through the real supervisor
+  expect(city("search for Tokyo and tell me the current temperature shown")).toBe("Tokyo");
+  expect(city("search for Hong Kong and tell me today's forecast, including the high temperature in Celsius")).toBe("Hong Kong"); // it used to find the city "Celsius"
+  // each verb
+  for (const goal of ["search Tokyo", "search for Tokyo", "Search for Tokyo.", "look up Tokyo", "find Tokyo", "show Tokyo", "show me Tokyo", "switch to Tokyo", "check Tokyo", "check Tokyo's weather", "show me Tokyo's forecast"]) {
+    expect([goal, city(goal)]).toEqual([goal, "Tokyo"]);
+  }
+  // the capitalised words right after the verb, up to "and", "then", a comma, a full stop or the end
+  expect(city("search for Hong Kong and tell me the high")).toBe("Hong Kong");
+  expect(city("search for New York City")).toBe("New York City");
+  expect(city("look up Hong Kong, then tell me the temperature")).toBe("Hong Kong");
+  expect(city("find San Francisco.")).toBe("San Francisco");
+  expect(city("show me Hong Kong's forecast")).toBe("Hong Kong");
+  expect(city("search for St. Louis and tell me the temperature")).toBe("St. Louis"); // the dot of an abbreviation is not a full stop
+  expect(city("search for São Paulo and tell me the temperature")).toBe("São Paulo");
+  expect(city("search for Stratford-upon-Avon")).toBe("Stratford-upon-Avon");
+  expect(city("search for The Hague and tell me the temperature")).toBe("The Hague");
+  // compiled for the Weather app, whatever is said about the app itself
+  expect(compilePlan("Weather", "search for Tokyo and tell me the current temperature shown", [])).toEqual([{ action: "pick_city", text: "Tokyo" }]);
+  expect(compilePlan("Weather", "search for Tokyo in Weather", [])).toEqual([{ action: "pick_city", text: "Tokyo" }]);
+});
+
+test("Weather: a generic word, a unit or a time is not a city", () => {
+  for (const goal of [
+    "search for the weather", "look up the forecast", "check the weather", "show me the temperature", "find out the weather", "what is the weather",
+    "check Weather", "search for Celsius", "show me Monday's forecast", "search for today",
+    "check the weather for today", "check the weather in the morning", "check the weather for the next three days",
+  ]) expect([goal, city(goal)]).toEqual([goal, null]);
+});
+
+test("Weather: 'weather in X' keeps priority, and no longer swallows what follows the city or takes a unit for it", () => {
+  expect(city("check the weather in Hong Kong")).toBe("Hong Kong");
+  expect(city("in Weather check the weather in Hong Kong")).toBe("Hong Kong");
+  expect(city("what is the temperature in Tokyo right now")).toBe("Tokyo");
+  expect(city("check the weather in tokyo")).toBe("tokyo"); // typed in lower case: as before
+  expect(city("check the weather in St. Louis")).toBe("St. Louis");
+  expect(city("forecast for Hong Kong this week")).toBe("Hong Kong");
+  expect(city("search for Tokyo and check the weather in Paris")).toBe("Paris"); // the older pattern comes first
+  // these used to return "Tokyo and tell me the temperature", "Tokyo and tell me the temperature in Celsius", "New York for", "Celsius in Tokyo"
+  expect(city("check the weather in Tokyo and tell me the temperature")).toBe("Tokyo");
+  expect(city("check the weather in Tokyo and tell me the temperature in Celsius")).toBe("Tokyo");
+  expect(city("check the weather in New York for tomorrow")).toBe("New York");
+  expect(city("what is the temperature in Celsius in Tokyo")).toBe("Tokyo");
+  expect(city("check the weather in São Paulo")).toBe("São Paulo"); // accented names too
 });
 
 // Oni now writes the goals itself (STEPS.md 157) and hands the agent the exact text to type, apostrophes and all.
