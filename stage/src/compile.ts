@@ -14,14 +14,93 @@ export function titledList(goal: string): string | null {
   return `${m[1]!.trim()}\n${items.map((s) => `• ${s}`).join("\n")}`;
 }
 
-/** text the user put in quotes, or after "saying" / "that says" / "the text" */
+/**
+ * What mergeSameApp writes between one app's clauses ("compute 6x7 Then: tell me the answer"), so one agent does them in
+ * turn. Capital T and a single space each side. The text a goal hands over for typing ends here (the next clause is the
+ * goal again); a lowercase "then:", or a line that merely starts with "Then:", is still part of the text.
+ */
+export const CLAUSE_JOIN = " Then: ";
+
+/** a marker that hands over the exact text, WITH its colon: what comes after it is the text */
+const MARKERS = /\b(?:that says|which says|saying|with the text|the words|exactly)\s*:/gi;
+
+/**
+ * An instruction clause that sometimes trails the text a goal hands over: "The year is 1911. and tell me that it was
+ * created." It starts after the text's LAST sentence break (a full stop, ! or ?, and a closing quote if there is one),
+ * runs to the end, and opens with a lowercase "and tell me", "and then tell me" or "then tell me": the forms that carry
+ * on from the sentence before, which is how an instruction gets appended. Group 1 is the text up to and including the
+ * break. It is case-sensitive on purpose, because the text can be a message: a sentence that starts "Tell me …" or
+ * "And tell me …" is the message's own ("Running late. Tell me where you are."), as is a bare lowercase "tell me", and
+ * so is a "tell me" with no sentence break before it ("please tell me when you're home", "hello, and tell me").
+ */
+const TRAILING_ASK = /^([\s\S]*[.!?]["”’']?)\s+(?:and\s+then|and|then)\s+tell\s+me\b[\s\S]*$/;
+
+/**
+ * The texts that markers with a colon hand over, as ranges of the goal: from just after the colon to the next
+ * CLAUSE_JOIN or the end, less a trailing instruction clause (TRAILING_ASK: the agent was typing "… and tell me that the
+ * document was created." into the document). explicitText types the first one, and unquoted() hides them all from the
+ * checks that read the goal for orders, so a trailing instruction counts as the goal's own words. Both take their ranges
+ * from here, so what is typed and what is not read as an order end together.
+ */
+function markedTexts(goal: string): { start: number; end: number }[] {
+  const texts: { start: number; end: number }[] = [];
+  let resume = 0; // where the last text ended
+  for (const m of goal.matchAll(MARKERS)) {
+    if (m.index! < resume) continue; // a marker inside a text that is already taken
+    const start = m.index! + m[0].length;
+    const join = goal.indexOf(CLAUSE_JOIN, start);
+    const clauseEnd = join < 0 ? goal.length : join;
+    const ask = goal.slice(start, clauseEnd).match(TRAILING_ASK);
+    resume = ask ? start + ask[1]!.length : clauseEnd;
+    texts.push({ start, end: resume });
+  }
+  return texts;
+}
+
+/** the older marker, with no colon ("saying hello"); a space (or more) must follow it */
+const PLAIN_MARKERS = /\b(?:saying|that says|which says|with the text|the words)\s*:?(?=\s)/gi;
+/**
+ * a single-quoted span: the quotes sit at word boundaries (the opening one after the start, a space, a colon, a bracket
+ * or a comma; the closing one before the end, a space or punctuation), so an apostrophe inside a word ("I'll", "Mum's")
+ * is never one, and the span itself may hold apostrophes. It can't hold another opening quote: 'a' and then 'bc' is
+ * two spans, not one long one.
+ */
+const SINGLE_QUOTED = /(?<=^|[\s:(,])['‘]((?:(?!(?<=[\s:(,])['‘])[\s\S]){2,}?)['’](?=$|[\s,.!?:;)])/;
+
+/** one pair of quotes around the WHOLE text only marks where it starts and ends ("hi" -> hi); "a" and "b" is two spans, left as is */
+function unquoteWhole(text: string): string {
+  const inner = text.slice(1, -1);
+  if (text.length > 2 && /^["“]/.test(text) && /["”]$/.test(text) && !/["“”]/.test(inner)) return inner.trim();
+  if (text.length > 2 && /^['‘]/.test(text) && /['’]$/.test(text) && !/['’](?=$|[\s,.!?:;)])|(?<=^|[\s:(,])['‘]/.test(inner)) return inner.trim();
+  return text;
+}
+
+/**
+ * The text a goal gives to type. Oni now writes the goal itself, so the order goes from most to least exact:
+ * a titled list; text after a marker with a colon ("create a note that says: I'll call Mum's phone": everything after
+ * the colon, exactly, apostrophes, quotes and line breaks included); a double-quoted span; a single-quoted span (only
+ * at word boundaries: counting every ' as a quote returned "ll call Mum" for that goal); and last the older marker
+ * without a colon ("saying hello"). Both marker forms end at the next CLAUSE_JOIN, so in a merged goal ("create a note
+ * that says: hi Then: delete the draft") only the clause's own text is typed: "hi".
+ */
 export function explicitText(goal: string): string | null {
   const listed = titledList(goal);
   if (listed) return listed;
-  const q = goal.match(/["“'‘]([^"”'’]{2,})["”'’]/);
-  if (q) return q[1]!.trim();
-  const s = goal.match(/\b(?:saying|that says|which says|with the text|the words)\s*:?\s+(.+?)\s*(?:\.$|$|\bin (?:textedit|notes)\b)/i);
-  return s ? s[1]!.trim() : null;
+  const first = markedTexts(goal)[0];
+  const marked = first ? goal.slice(first.start, first.end).trim() : "";
+  if (marked) return unquoteWhole(marked);
+  const double = goal.match(/["“]([^"”]+)["”]/)?.[1]!.trim();
+  if (double) return double;
+  const single = goal.match(SINGLE_QUOTED)?.[1]!.trim();
+  if (single) return single;
+  // the older marker: the text runs to the end of its clause, a full stop, or "in TextEdit" / "in Notes"
+  for (const m of goal.matchAll(PLAIN_MARKERS)) {
+    const from = m.index! + m[0].length;
+    const join = goal.indexOf(CLAUSE_JOIN, from);
+    const text = goal.slice(from, join < 0 ? undefined : join).match(/^\s+(.+?)\s*(?:\.$|$|\bin (?:textedit|notes)\b)/i)?.[1]!.trim();
+    if (text) return text;
+  }
+  return null;
 }
 
 /** the concrete values a goal gives: quoted text, names (capitalised words that aren't the first word or the app it
@@ -56,9 +135,24 @@ export const FIND_FIELD = /\b(search|find|name|number|username|recipient|to:|con
 /** fields whose old contents may be replaced: what to look for, not what the user wrote (search boxes, address bars) */
 export const SEARCH_FIELD = /\b(search|find|filter|address|url|location|go to)\b/i;
 
-/** quoted text is what to WRITE, not what to do: "write 'tell Sam to delete it'" asks to send and delete nothing */
 const QUOTED = /["“][^"”]*["”]|(?<=^|[\s:(,])['‘][^'’]*['’](?=$|[\s,.!?:;)])/g;
-export const unquoted = (goal: string) => goal.replace(QUOTED, " , ");
+/**
+ * The goal without the text it only hands over to WRITE: what every check of "does the goal ask for this action" reads.
+ * Quoted text is what to write, not what to do ("write 'tell Sam to delete it'" asks to send and delete nothing), and so
+ * is the text after a marker with a colon ("create a note that says: remember to delete old files": typed, not ordered),
+ * up to the next CLAUSE_JOIN (the next clause is the goal again) or the end. The text ends where explicitText's does.
+ * Blanking too much only makes the guards refuse more, never allow more, so a lowercase "then:" or a line starting with
+ * "Then:" inside the text is not a clause boundary.
+ */
+export function unquoted(goal: string): string {
+  let out = "";
+  let from = 0; // where the text that is kept starts again
+  for (const { start, end } of markedTexts(goal)) {
+    out += `${goal.slice(from, start)} , `;
+    from = end;
+  }
+  return (out + goal.slice(from)).replace(QUOTED, " , ");
+}
 
 const NEGATION = /\b(?:don[’']?t|do not|does not|doesn[’']?t|never|not|without|no|nothing|none|avoid|stop|won[’']?t|shouldn[’']?t|mustn[’']?t|cannot|can[’']?t)\b/i;
 /** a verb at `at` is negated by a "don't / never / without ..." earlier in its own clause ("do not delete anything") */
@@ -261,6 +355,39 @@ export function openSitesPlan(goal: string): PlanStep[] | null {
   return [{ action: "open_url", text: urls.join(" "), target: newWindow ? "new window" : undefined }];
 }
 
+/**
+ * The question a goal asks about a page comes after the page's name: ", and then tell me …", " then find …", ". Tell me …".
+ * A verb alone isn't enough (a title can hold "Find" or "Let"): it needs an "and" / "then" or a full stop before it.
+ */
+const ASK_AFTER_NAME = /(?:[\s,;]+(?:and\s+then|and|then)\s+|[.!?]\s+)(?:tell|find|report|give|let\s+me\s+know)\b[\s\S]*$/i;
+/** the lead-in of "go to the page for X on Wikipedia": what is left once "on Wikipedia" is cut */
+const PAGE_LEAD = /^(?:(?:go\s+to|visit|read)\s+)?(?:the\s+)?(?:page|article|entry)\s+(?:for|on|about|of)\s+/i;
+
+/**
+ * The thing to look up on Wikipedia, or "" when the goal names none. "look up X on Wikipedia and tell me …", "go to the
+ * Wikipedia page for X and tell me …", "open the Wikipedia article on X", "find the Wikipedia entry about X" and "search
+ * Wikipedia for X" all give X, however the goal leads in and whatever it asks afterwards. (Live, "Go to the Wikipedia
+ * page for the University of Hong Kong and tell me the year it was founded" searched Wikipedia for that whole sentence.)
+ */
+export function wikipediaTopic(g: string): string {
+  const topic = (s: string): string => {
+    const t = s.split(/\s+Then:\s+/i)[0]!.replace(ASK_AFTER_NAME, "").replace(/[\s.,;:!?]+$/, "").trim();
+    return (/^["“](.+)["”]$/.exec(t) ?? /^['‘](.+)['’]$/.exec(t))?.[1]!.trim() ?? t; // a quoted title is the title
+  };
+  // the page is named outright, whatever leads in ("go to", "open", "find" …): X follows "the Wikipedia page for"
+  const named = g.match(/\bwikipedia(?:['’]s)?\s+(?:page|article|entry)\s+(?:for|on|about|of)\s+(.+)$/i)?.[1]
+    ?? g.match(/\b(?:search|look(?:\s+up)?|find)\s+(?:on\s+|in\s+)?wikipedia\s+(?:for|about)\s+(.+)$/i)?.[1]; // "search Wikipedia for X"
+  if (named) return topic(named);
+  // "look up X on Wikipedia and tell me …": X is between the lead verb and "on Wikipedia". ("Open Wikipedia and search
+  // for X" first drops "Open Wikipedia and", or "Open" would be taken as the lead and "Wikipedia and search for" kept)
+  return topic(
+    g.replace(/^(?:please\s+)?(?:open|go\s+to|visit)\s+(?:the\s+)?(?:english\s+)?wikipedia(?:\s+(?:site|website|homepage))?\s*(?:,|and\s+then|and|then)\s+/i, "")
+      .replace(/^.*?\b(?:look up|search(?: for)?|find|open)\s+/i, "")
+      .replace(/\s+(?:on|in|from)\s+(?:the\s+)?(?:english\s+)?wikipedia\b.*$/i, "")
+      .replace(PAGE_LEAD, ""),
+  );
+}
+
 /** a URL that already encodes the search: no search box, no pop-up suggestions */
 export function webPlan(goal: string): PlanStep[] | null {
   const sites = openSitesPlan(goal);
@@ -276,13 +403,7 @@ export function webPlan(goal: string): PlanStep[] | null {
   if (/\byoutube\b/i.test(g) && !/\bsearch\b/i.test(g)) return [{ action: "open_url", text: "https://www.youtube.com" }];
   if (!asksQuestion(g) && !/\b(search|find)\b/i.test(g)) return null;
   if (/\bwikipedia\b/i.test(g)) {
-    // the thing to look up: "look up X on Wikipedia and tell me ..." -> X
-    const what = g
-      .replace(/^.*?\b(?:look up|search(?: for)?|find|open)\s+/i, "")
-      .replace(/\s+on wikipedia\b.*$/i, "")
-      .replace(/\s+and\s+(?:tell|find|report|give).*$/i, "")
-      .replace(/^(?:the\s+)?(?:wikipedia\s+(?:article|page)\s+(?:for|on|about)\s+)/i, "")
-      .trim();
+    const what = wikipediaTopic(g);
     if (what) return [{ action: "open_url", text: `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(what)}` }];
   }
   // otherwise a web search with the whole information need: search engines handle natural language well

@@ -6,7 +6,7 @@ import { matchApp } from "../src/apps.ts";
 import type { Brain, Decision, Facts, Helper, Item, PlanStep, Task } from "../src/contracts.ts";
 import { RunLogger } from "../src/logger.ts";
 import { runTask } from "../src/loop.ts";
-import { planWithoutLlm, totalsOf } from "../src/manager.ts";
+import { planWithoutLlm, runCommand, totalsOf, waitsFor } from "../src/manager.ts";
 import { perceive, relevantLines, screenFromMarkdown, windowElements } from "../src/perceive.ts";
 import { SimCalc } from "./sim-calc.ts";
 
@@ -113,6 +113,25 @@ test("planning without an LLM key: 'App: goal' and 'in App' forms", () => {
     { app: "TextEdit", goal: "write hello" },
   ]);
   expect(planWithoutLlm("compute 6x7 in Calculator", apps)).toEqual([{ app: "Calculator", goal: "compute 6x7 in Calculator" }]);
+});
+
+test("merge off keeps a plan as given, one agent per task, the same app's tasks waiting for each other in order; by default they merge into one goal", async () => {
+  const stopped = new AbortController();
+  stopped.abort(); // every task ends at once ("stopped before it started"): only the shape of the plan is under test here
+  const plan = [
+    { app: "Calculator", goal: "compute 6 times 7 and tell me the answer" },
+    { app: "Calculator", goal: "compute 2 plus 2 and tell me the answer" },
+  ];
+  const run = (merge?: boolean) => runCommand({
+    runId: "t", command: "x", brainKind: "jev", makeBrain: () => { throw new Error("not reached"); }, helper: {} as Helper,
+    driver: new SimCalc(), log: { write() {} }, signal: stopped.signal, plan, merge,
+  });
+  const kept = (await run(false)).tasks;
+  expect(kept.map((t) => [t.id, t.app, t.goal])).toEqual([["t1", "Calculator", plan[0]!.goal], ["t2", "Calculator", plan[1]!.goal]]);
+  expect([waitsFor(kept, 0), waitsFor(kept, 1)]).toEqual([-1, 0]); // the second starts only when the first is over
+  const merged = (await run()).tasks;
+  expect(merged.map((t) => t.goal)).toEqual([`${plan[0]!.goal} Then: ${plan[1]!.goal}`]);
+  expect(plan.map((t) => t.goal)).toEqual(["compute 6 times 7 and tell me the answer", "compute 2 plus 2 and tell me the answer"]); // the caller's plan is left alone
 });
 
 test("app names are matched forgivingly", () => {

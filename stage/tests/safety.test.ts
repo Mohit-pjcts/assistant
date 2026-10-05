@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { sendIntent, unquoted } from "../src/compile.ts";
 import { fromThisComputer } from "../src/localonly.ts";
-import { clickForbidden, typingForbidden } from "../src/safety.ts";
+import { clickForbidden, editAllowed, sendForbidden, typingForbidden } from "../src/safety.ts";
 import { FileOps, safeRoot } from "../src/fsops.ts";
 
 const req = (headers: Record<string, string>, method = "POST") => new Request("http://127.0.0.1:3000/api/run", { method, headers });
@@ -78,6 +79,51 @@ test("send intent: 'tell me' is not sending; messaging someone is", async () => 
     "text +852 9123 4567 that I'm late", "tell Sam I'm running late on WhatsApp", "say happy birthday to Mum on WhatsApp", "tell my mum I'm home",
     "let Priya know I'm late", "post 'hello' in the general channel", "email Sam the report", "ask Priya if she is free tonight", "forward it to the team",
   ]) expect([g, sendIntent(g)]).toEqual([g, true]);
+});
+
+// Oni hands agents the exact text to type after "that says:" (STEPS.md 157): that text is content, not an order.
+
+test("text the agent is told to TYPE never counts as the goal asking for an action; the next clause after 'Then:' still does", () => {
+  const note = "create a new note that says: remember to delete old files and send Sam the invoice";
+  expect(clickForbidden("Delete", note)).not.toBeNull(); // "delete" in the note's text is typed, not ordered
+  expect(sendIntent(note)).toBe(false);
+  expect(sendForbidden("Send", note)).not.toBeNull();
+  expect(editAllowed("create a new note that says: add milk to my Groceries note", "Note\nGroceries\n• eggs")).toBe(false);
+  // every marker with a colon, in any case, up to the end of the goal
+  for (const marker of ["that says", "which says", "saying", "with the text", "the words", "exactly", "That Says"]) {
+    expect([marker, clickForbidden("Delete", `type ${marker}: please delete the old files`)]).not.toEqual([marker, null]);
+  }
+  // what the goal itself orders still counts: on its own, before the marker, or in the next clause of a merged goal
+  expect(clickForbidden("Delete", "delete the draft")).toBeNull();
+  expect(clickForbidden("Delete", "delete the draft that says: groceries")).toBeNull();
+  expect(clickForbidden("Delete", "create a note that says: hi Then: delete the draft")).toBeNull();
+  expect(sendIntent("message Sam that says: running late")).toBe(true);
+  expect(sendIntent("create a note that says: hi Then: message Sam hello")).toBe(true);
+  // fail closed: only a capital-T " Then: " (what the merge writes) ends the text, so a lowercase "then:" inside it stays text
+  expect(clickForbidden("Remove", "create a note that says: buy milk then: remove the pan")).not.toBeNull();
+});
+
+test("unquoted() blanks quoted text and the text after a marker with a colon (up to ' Then: '), nothing else", () => {
+  expect(unquoted("create a note that says: hi Then: delete the draft")).toBe("create a note that says: ,  Then: delete the draft");
+  expect(unquoted("write 'tell Sam' and delete the draft")).toBe("write  ,  and delete the draft");
+  expect(unquoted("type exactly: a Then: write the words: b Then: delete it")).toBe("type exactly: ,  Then: write the words: ,  Then: delete it"); // each clause's own text
+  expect(unquoted("create a note that says: he said the words: hi")).toBe("create a note that says: , "); // a marker inside blanked text adds nothing
+  expect(unquoted("write 'x' and type exactly: \"y\" Then: open 'z' now")).toBe("write  ,  and type exactly: ,  Then: open  ,  now");
+  expect(unquoted("create a note that says:")).toBe("create a note that says: , ");
+  expect(unquoted("create a note that says: hi\nThen: delete the draft")).toBe("create a note that says: , "); // only the exact " Then: " join ends the text: a line starting with Then: stays inside it
+  expect(unquoted("open my notes and delete the draft")).toBe("open my notes and delete the draft"); // nothing to blank
+});
+
+test("a trailing instruction after the typed text is the goal's own words for the checks; the typed text is not", () => {
+  const live = "Create a new document that says: The University of Hong Kong was founded in 1911. That is 115 years before 2026. and tell me that the document was created.";
+  expect(unquoted(live)).toBe("Create a new document that says: ,  and tell me that the document was created."); // the text is hidden, the instruction is read
+  expect(unquoted("create a note that says: Done! and then tell me it worked Then: open the note")).toBe("create a note that says: ,  and then tell me it worked Then: open the note");
+  expect(unquoted("create a note that says: please tell me when you're home")).toBe("create a note that says: , "); // no sentence break: all of it is text
+  expect(unquoted("create a note that says: Running late. Tell me where you are.")).toBe("create a note that says: , "); // a message's own "Tell me" sentence: all of it is text
+  expect(clickForbidden("Delete", "create a note that says: Running late. Tell me, then delete it")).not.toBeNull(); // so these words don't order anything
+  // an order inside the trailing instruction counts, the same words inside the typed text do not
+  expect(clickForbidden("Delete", "create a note that says: remember this. and tell me, then delete the note")).toBeNull();
+  expect(clickForbidden("Delete", "create a note that says: remember to delete the note. and tell me it worked")).not.toBeNull();
 });
 
 test("every click: Send rule, dialog OK carries the dialog's action, rows and long titles are content", async () => {

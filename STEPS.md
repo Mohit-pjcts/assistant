@@ -13230,3 +13230,42 @@ The final full run reported App Store "done" (the knowledge answer, #4) and Remi
 **Not done / follow-ups:** prompts not yet re-synced to Langfuse (the served supervisor prompt still predates the gate removal; harmless — code no longer gates — but run `python scripts/sync_prompts_to_langfuse.py` after merging); the dashboard app needs `npm run tauri build` (or the dev launcher) to drop the removed gate cards; restart Stage from main after merging (`bash stage/scripts/start.sh`).
 
 **Not committed** — branch `backstage-bridge`, worktree `.claude/worktrees/backstage-bridge`, per CLAUDE.md's git rule; git on the main checkout is also out of reach from this isolated session.
+
+
+## 157. Oni orchestrates Backstage: the supervisor plans, Stage's agents execute (2026-10-05)
+
+**Ask (user, verbatim):** "the current problem with backstage is that its not smart enough to do many tasks on its own. i want oni to orchestrate the tasks, prompt backstage with clear tasks that it can do. I dont want oni to offload my prompts directly to backstage. it should use the feature as agents while taking care of the bigger picture by itself. integrating stage with oni should be able to take care of multi-step multi-agent problems." Then: "think it through research on it plan it well and execute", and "use subagents to code after you're done planning" (planning on Opus; all code written by two Sonnet subagents from one spec, reviewed and verified here).
+
+**Before:** Oni's `backstage` specialist sent the supervisor's instruction verbatim to `POST /api/run {command}`, and Stage's own command planner split it. Stage answers in one line, merges same-app jobs into one compound goal, can't carry a value from one app to the next, and can't recover when a step fails.
+
+**Design (load-bearing, supersedes STEPS.md 155's "the engine plans for itself"):** Oni's supervisor — already an LLM in the loop — is the planner; Backstage agents are its workers. Still no extra LLM hop: Stage's command planner is simply bypassed for Oni's runs, and its per-task compilers + jev still execute each task. Two structural facts set the shape: `NoParallelSpecialistCalls` allows one supervisor tool call per step, so parallel agents come from ONE call carrying a task list; and dependent steps go in successive calls, so the supervisor sees each result and puts the real value into the next task.
+
+### Stage engine (stage/)
+- `POST /api/run {tasks: [{app, goal}] (1–8), clientRunId?, purpose?}` next to the unchanged `{command}` form (hotkey/panel). Runs the given plan as-is with same-app merging OFF (`RunOpts.merge`): tasks in different apps run at once, same-app tasks run one after another in order, each its own agent with its own check and answer. Validation errors name the item; replay by clientRunId; re-checks busy/replay after the async app lookup (two concurrent requests both started a run without it).
+- **Strict app names for Oni's paths** (`resolveAppStrict`): exact name, known short names (Word → Microsoft Word, Brave → Brave Browser), or whole words of exactly one installed app — never the reverse (the old `matchApp` turned "Photoshop" into Photos, i.e. an agent in the wrong app). Unknown → `{unknownApps, suggestions}` so Oni corrects itself. Hotkey path unchanged.
+- `POST /api/look {app}`: read-only visible text of an app's window (the same reader the agents use), ≤ 400 lines / 8000 chars, not blocked by a running job. Agents answer in one line; this is how Oni reads a list, a page or a whole window, checks state before planning, or sees why a task failed.
+- `explicitText` (the exact text an agent types): an apostrophe was treated as a quote, so "that says: I'll call Mum's phone" typed "ll call Mum". Now: a colon marker (`that says:` …) takes everything after it; quotes only at word boundaries; text ends at the hotkey's ` Then: ` join; a trailing lowercase ". and tell me …" that Oni appended is not typed (found live: it typed "… and tell me that the document was created." into a document). A capitalised "Tell me …" sentence stays (a real message must be typed whole).
+- **Safety fix that came with it:** `unquoted()` (what the click/send/edit guards read as the goal's own words) now blanks text-to-type after those markers. Without it, a note saying "remember to delete old files" would have counted as the goal asking to click Delete.
+- Wikipedia goals: "go to/open the Wikipedia page|article|entry for|on|about X", "search Wikipedia for X", "X on Wikipedia" → X (live: the whole sentence was searched and an agent read a predecessor college's 1887 as the founding year).
+
+### Oni
+- `backstage(tasks: list[BackstageTask{app, goal}], purpose)` replaces the free-text specialist. Waits 90 s + 60 s per task (cap `STAGE_RUN_WAIT_SECONDS`, now default 600); if Stage is busy, waits up to 60 s for it then retries once. Results: one numbered line per task (DONE + what it read, or FAILED (code) + reason + a fix hint per failure code, a safety-refusal note), the untrusted-data marker. `backstage_look(app)` is a new direct tool. Boundary bookkeeping (activity frames, activity log) factored into `_run_delegation`, shared with `call_specialist`.
+- **The playbook** in the supervisor prompt (8 rules, written here, v2 after live runs): plan the whole job yourself; one app per task with every value spelled out; do arithmetic/comparisons/wording yourself; prefer direct routes (AppleScript Reminders/Notes, research_agent, life_admin_agent, coding_agent) unless the user wants the app itself; batch independent tasks, chain dependent ones with real values; typed text goes last after 'that says:'; read lists/pages with backstage_look and double-check doubtful answers; agents only write NEW documents (to correct, write a new one); retry a failed step at most once, changed; known blind spots; risky verbs only when asked; report honestly.
+
+### Live (real supervisor on a worktree backend with Langfuse disabled so the new local prompt was used; a second Stage on port 3100 with its own server file; the user's live Oni and Stage untouched)
+| scenario | tools Oni used | time | result |
+|---|---|---|---|
+| Safari → Calculator → TextEdit chain (v1 playbook) | 4 backstage, 3 look, research_agent | 107 s | correct after self-recovery: caught the wrong 1887 via research_agent; found the typed "and tell me" via look and rewrote the document |
+| same chain (v2 playbook + fixes) | 3 backstage | **51 s** | 1911 → 115 → clean two-line document |
+| Weather ×2 + Stocks, then compare | 1 backstage (3 agents) | **21 s** | Hong Kong 27°C vs Tokyo 22°C, +5°C; NVIDIA 233.95 |
+| Hacker News top 3 → TextEdit list | backstage, look, backstage | 42 s | correct numbered list (look read the full page) |
+| App Store: who makes Xcode | 2 backstage, 2 look | 69 s | failed honestly (App Store results aren't readable), stopped after one changed retry, answered from knowledge and said so |
+| Finder sort by type, report | 1 backstage | 32 s | 10 files sorted, reported per folder |
+| If Hong Kong's high ≥ 30°C add a reminder | backstage, mac_control_agent | 39 s | read 31°C, chose the direct AppleScript route for the reminder |
+| Calculator 18% of 2480 + web minimum wage + hours | backstage, research_agent | **15 s** | 446.4; $7.25; ≈ 61.6 h (computed by Oni) |
+
+**Verification:** engine `bun test` 134/134 (39 new), `tsc` clean; Oni `tests/test_stage.py` 63/63 (rewritten for the new contract, through the real ToolNode path; both agents mutation-checked their tests); `ruff` only the pre-existing UP035. Test artifacts removed (the reminder; TextEdit scratch windows closed).
+
+**Known limits:** inline " Then: " inside text Oni asks to type is cut there (the hotkey join); titled lists' items aren't blanked for the guards; App Store/Music/Spotify content stays unreadable; one supervisor model round trip per orchestration step (the chain is 3 steps ≈ 51 s, most of it the agents).
+
+**Shipped** the same way as 156: committed on `backstage-bridge`, fast-forwarded into main with the user's uncommitted work set aside and restored, prompts re-synced to Langfuse, Stage restarted from main, the Oni app restarted so its backend loads the new code (no dashboard change this time, so no rebuild).

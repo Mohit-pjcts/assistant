@@ -182,7 +182,6 @@ write_tools.py/mac_tools.py/interrupts.py/disk_tools.py:
 from __future__ import annotations
 
 import json
-from contextvars import ContextVar
 from functools import partial
 from typing import Annotated, Any, Awaitable, Callable, NamedTuple, TypedDict
 
@@ -204,6 +203,7 @@ from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
+from pydantic import BaseModel, Field
 
 from assistant import activity_log, observability, prompts, stage, workflow_store
 from assistant.a2ui import A2UI_SURFACE_KEY, build_render_form_tool, build_render_ui_tool
@@ -331,12 +331,6 @@ _SPECIALIST_TOOL_NAMES = {
     stage.ONSTAGE_ACTION,
 }
 
-# The tool_call_id of the specialist call in progress, for a CODE-backed
-# specialist (Stage) that needs it as its idempotency key the way
-# send_imessage gets it via InjectedToolCallId — `invoke`'s shared
-# (messages, pre_approved) signature has no room for it.
-_SPECIALIST_TOOL_CALL_ID: ContextVar[str | None] = ContextVar("specialist_tool_call_id", default=None)
-
 
 SUPERVISOR_MODEL_NAME = "claude-sonnet-5"
 
@@ -373,24 +367,72 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "calendar'), opening a URL in Brave, sending or reading iMessages "
     "(send_imessage/read_imessages), or a WhatsApp compose draft "
     "(send-only, needs the user to tap Send themselves).\n"
-    "- backstage (Stage's background agents): does a job inside ANY real "
-    "Mac app in background windows while the user keeps working — several "
-    "apps in parallel from ONE sentence (e.g. 'work out 15% of 80 in "
-    "Calculator, and check Tokyo's weather in Weather'); best for apps with "
-    "no API and multi-app errands. Pass the whole job as one plain command "
-    "naming each app, one clause per app separated by commas, with every "
-    "concrete value spelled out; prefer mac_control_agent when one of its "
-    "fixed actions fits exactly. Reports each agent done (with what it "
-    "read) or failed (with why) — tell the user both honestly.\n"
+    "- backstage: Stage's background agents — YOUR workers inside the "
+    "Mac's real apps (any app, in background windows while the user keeps "
+    "working). You are the planner; they are not. Each agent reliably does "
+    "ONE concrete job in ONE app — open or search something, read a value, "
+    "compute, type text you hand it, click a named control, sort a Finder "
+    "folder — and reports what it read or why it stopped. They don't plan, "
+    "don't share context between tasks, and are poor at composing text. So "
+    "never forward the user's request as-is:\n"
+    "  1. Plan the whole job yourself first: the steps, which app each one "
+    "needs, what each step needs from an earlier one, and which parts need "
+    "no app at all — do arithmetic, comparisons, summaries and all wording "
+    "yourself. Prefer a direct route when one fits (mac_control_agent's "
+    "Reminders/Notes/Apple Calendar/Music/iMessage/Shortcut actions, "
+    "research_agent for web facts, life_admin_agent for email and Google "
+    "Calendar, coding_agent for files) unless the user wants it done in the "
+    "app itself.\n"
+    "  2. Call backstage with `tasks`, a list of {app, goal}. Each goal is "
+    "one job in that one app with every value spelled out — exact numbers, "
+    "names, URLs, folder paths — ending with 'and tell me <the exact thing "
+    "you need>' when you need something back. Text for an agent to type is "
+    "written by you and goes LAST, after 'that says:', with nothing after "
+    "it (no 'and tell me' on a writing task — its result already says "
+    "whether it worked). Good: 'compute 2026 minus 1911' · 'look up the "
+    "University of Hong Kong on Wikipedia and tell me the year it was "
+    "founded' · 'go to news.ycombinator.com and tell me the title of the "
+    "top story' · 'check the weather in Tokyo and tell me the temperature' "
+    "· 'search for Helvetica and tell me how many styles it has' · 'add a "
+    "reminder called Buy milk' · 'organise the files in ~/Downloads/inbox "
+    "into folders by type' · 'create a new note that says: <your text>'. "
+    "Bad: 'handle my errands' · 'write a good summary' · two apps in one "
+    "goal.\n"
+    "  3. Batch independent tasks into ONE call: tasks in different apps "
+    "run at the same time; tasks in the same app run one after another, in "
+    "your order. When a step needs an earlier result, wait for it and put "
+    "the actual value into the next call.\n"
+    "  4. Agents answer in one short line. To read a list, a page or a "
+    "whole window, call backstage_look(app): it returns the window's "
+    "visible text without touching anything. Also use it to see an app's "
+    "state before planning, to check what went wrong, or to double-check "
+    "an answer that looks doubtful before you build on it.\n"
+    "  5. Agents write into a NEW document or note. They change existing "
+    "text only when the goal names it and says how ('add milk to the end "
+    "of my Groceries note'), and they can't select all or replace a whole "
+    "document — to correct something an agent wrote, have it write a new "
+    "one with the full corrected text.\n"
+    "  6. Read every result. A failed task comes with its reason and a "
+    "hint: change the step (smaller, more explicit, another app or route) "
+    "and retry it at most once — never resend an identical task. Blind "
+    "spots: Spotify (nothing readable), App Store and Music search "
+    "results, menus, date pickers, keyboard shortcuts.\n"
+    "  7. The agents refuse to send, delete, buy, install or sign out "
+    "unless the goal asks for exactly that in plain words — include such a "
+    "verb only when the user asked for it.\n"
+    "  8. Finish by telling the user what was done, the values found, and "
+    "honestly what failed.\n"
     "- onstage (Stage's screen explainer): answers a question about what "
     "is on the Mac's screen RIGHT NOW ('what does this button do', 'how do "
     "I make a pivot table here') — speaks the answer and draws on the real "
     "controls; 'how do I…' becomes a lesson the user steps through by "
     "saying 'next' (send 'next'/'back'/'repeat'/'stop' to onstage as-is). "
     "Never clicks or types; never from the iPhone channel.\n"
-    "stage_status / stop_backstage: Stage's state and recent runs (also "
-    "hotkey runs, or one still going), and stopping Backstage's agents — "
-    "call stop_backstage at once when the user says stop.\n"
+    "stage_status / stop_backstage / backstage_look: Stage's state and "
+    "recent runs (also hotkey runs, or one still going), stopping "
+    "Backstage's agents — call stop_backstage at once when the user says "
+    "stop — and reading what an app's window shows, untouched "
+    "(backstage_look).\n"
     "- phone_agent: ONLY for the iPhone the user is currently messaging you "
     "FROM (Action Button / Share Sheet channel — never the Mac dashboard/"
     "CLI/voice) — reading the latest synced health snapshot, opening an "
@@ -1224,6 +1266,61 @@ async def _invoke_research_agent_via_http(
     return SpecialistResult(content, [], [], [])
 
 
+async def _run_delegation(tool_name: str, work: Callable[[], Awaitable[Any]]) -> Any:
+    """The supervisor->specialist boundary bookkeeping every delegation tool
+    shares (`_make_specialist_tool`'s `call_specialist` and
+    `_make_backstage_tool`): runs `work()` between the dashboard's live
+    activity frames, writes ONE durable activity-log row for the call, and
+    returns whatever `work()` returned.
+
+    PLAN.md Phase 19: dispatches the OUTER "supervisor is calling
+    specialist X" boundary as an `agent_activity` custom event — same
+    event name/shape `_AgentActivityRelay` uses for a specialist's own
+    INNER tool calls (`agent: "supervisor"`, `tool: tool_name` here, vs.
+    `agent: tool_name` for that specialist's own leaf tools), so the
+    dashboard reads one uniform stream for both levels. Wrapped in
+    try/finally so a failed call still emits its own "tool_end" (the
+    dashboard's status pill/graph must not get stuck "active" forever on an
+    error path).
+
+    Durable activity log (STEPS.md 151) — see activity_log.py's own module
+    docstring for why this records only the OUTER supervisor->specialist
+    boundary, not each specialist's inner tool calls. Factored out of
+    `call_specialist` (STEPS.md 157) when `backstage` stopped being built by
+    `_make_specialist_tool`, so the two paths can't drift apart."""
+    await adispatch_custom_event(
+        "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
+    )
+    started_at = activity_log.now_iso()
+
+    async def _log_outcome(outcome: str) -> None:
+        # Best-effort by this module's own documented contract: a
+        # logging failure must never break a real turn.
+        try:
+            thread_id = get_config()["configurable"]["thread_id"]
+            await activity_log.record_event(thread_id, tool_name, outcome, started_at=started_at)
+        except Exception:
+            pass
+
+    try:
+        result = await work()
+    except GraphBubbleUp:
+        # An interrupt() (a confirmation gate pausing this call) is
+        # control flow, not a failure: the call replays on /resume and
+        # is logged then. Logging it as an error left a spurious error
+        # row in the activity log for every confirmation.
+        raise
+    except Exception:
+        await _log_outcome(activity_log.OUTCOME_ERROR)
+        raise
+    finally:
+        await adispatch_custom_event(
+            "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
+        )
+    await _log_outcome(activity_log.OUTCOME_SUCCESS)
+    return result
+
+
 def _make_specialist_tool(
     tool_name: str,
     description: str,
@@ -1260,15 +1357,9 @@ def _make_specialist_tool(
     identical way, under `additional_kwargs[PHONE_ACTION_KEY]`, for
     server.py's `_run_turn` to read.
 
-    PLAN.md Phase 19: dispatches the OUTER "supervisor is calling
-    specialist X" boundary as an `agent_activity` custom event — same
-    event name/shape `_AgentActivityRelay` uses for a specialist's own
-    INNER tool calls (`agent: "supervisor"`, `tool: tool_name` here, vs.
-    `agent: tool_name` for that specialist's own leaf tools), so the
-    dashboard reads one uniform stream for both levels. Wrapped in
-    try/finally so a failed specialist call still emits its own "tool_end"
-    (the dashboard's status pill/graph must not get stuck "active" forever
-    on an error path).
+    PLAN.md Phase 19: the OUTER "supervisor is calling specialist X"
+    boundary's `agent_activity` frames, and the durable activity-log row,
+    come from `_run_delegation` (see its docstring).
 
     PLAN.md Phase 25: the seed now ALSO includes
     `_prior_specialist_results_this_turn(state)` (decision D5 — see this
@@ -1294,41 +1385,9 @@ def _make_specialist_tool(
             HumanMessage(content=request),
         ]
         pre_approved = _pre_approved_actions_this_turn(state)
-        await adispatch_custom_event(
-            "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
+        content, surfaces, phone_actions, executed_actions = await _run_delegation(
+            tool_name, lambda: invoke(seed, pre_approved)
         )
-        # Durable activity log (STEPS.md 151) — see activity_log.py's own
-        # module docstring for why this records only the OUTER supervisor
-        # ->specialist boundary, not each specialist's inner tool calls.
-        started_at = activity_log.now_iso()
-
-        async def _log_outcome(outcome: str) -> None:
-            # Best-effort by this module's own documented contract: a
-            # logging failure must never break a real turn.
-            try:
-                thread_id = get_config()["configurable"]["thread_id"]
-                await activity_log.record_event(thread_id, tool_name, outcome, started_at=started_at)
-            except Exception:
-                pass
-
-        token = _SPECIALIST_TOOL_CALL_ID.set(tool_call_id)
-        try:
-            content, surfaces, phone_actions, executed_actions = await invoke(seed, pre_approved)
-        except GraphBubbleUp:
-            # An interrupt() (a confirmation gate pausing this call) is
-            # control flow, not a failure: the call replays on /resume and
-            # is logged then. Logging it as an error left a spurious error
-            # row in the activity log for every confirmation.
-            raise
-        except Exception:
-            await _log_outcome(activity_log.OUTCOME_ERROR)
-            raise
-        finally:
-            _SPECIALIST_TOOL_CALL_ID.reset(token)
-            await adispatch_custom_event(
-                "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
-            )
-        await _log_outcome(activity_log.OUTCOME_SUCCESS)
         if executed_actions:
             run_id = _active_workflow_run_id_this_turn(state)
             if run_id is not None:
@@ -1364,12 +1423,72 @@ def _make_specialist_tool(
     return call_specialist
 
 
-async def _invoke_backstage(messages: list[AnyMessage], pre_approved_actions: set[str]) -> SpecialistResult:
-    """The code-backed `backstage` specialist (stage.py's module docstring
-    has the why: no LLM hop in front of an engine that plans for itself).
-    Ungated, so `pre_approved_actions` is unused."""
-    content = await stage.run_backstage(messages, _SPECIALIST_TOOL_CALL_ID.get())
-    return SpecialistResult(content, [], [], [])
+class BackstageTask(BaseModel):
+    """One job for one Backstage agent — the unit the supervisor plans in
+    (`_make_backstage_tool`). The field descriptions are what the model
+    reads in the tool's schema."""
+
+    app: str = Field(
+        description="The ONE Mac app this job happens in, by its name (e.g. Calculator, Safari, Finder, Notes)."
+    )
+    goal: str = Field(
+        description=(
+            "ONE concrete job in that app, every value spelled out: exact numbers, names, URLs, folder "
+            "paths. End with 'and tell me <the exact thing you need>' when you need something back. "
+            "Any text for the agent to type is written by you and goes LAST, after 'that says:', "
+            "with nothing after it (no 'and tell me' on a writing task)."
+        )
+    )
+
+
+def _make_backstage_tool() -> BaseTool:
+    """The supervisor's `backstage` tool (STEPS.md 157, the user's request
+    2026-10-05): the supervisor PLANS and Stage's agents execute, so `tasks`
+    is a list of `{app, goal}` jobs the supervisor worked out itself, handed
+    to Stage as they are — never the user's own words forwarded for the
+    engine's planner to split (stage.py's module docstring has the why).
+
+    Deliberately NOT built by `_make_specialist_tool`: that shape carries one
+    free-text `request`, an `InjectedState` seed (compaction summary, recalled
+    facts, prior specialists' results, approved-action markers) and a
+    `Command` return, none of which a list of explicit tasks wants — every
+    value the agents need is already spelled out in a goal, and earlier tool
+    output must never reach a real app's agent. It keeps the same boundary
+    bookkeeping every specialist call has (`_run_delegation`: live
+    `agent_activity` frames, one durable activity-log row), takes the tool
+    call's id straight from `InjectedToolCallId` as Stage's replay-safe run
+    id, and stays in `_SPECIALIST_TOOL_NAMES`, so its result is still
+    forwarded (labelled untrusted) to a later specialist in the same turn.
+    Ungated, like the rest of Stage."""
+
+    @tool(stage.BACKSTAGE_ACTION, description=_BACKSTAGE_TOOL_DESCRIPTION)
+    async def backstage(
+        tasks: Annotated[
+            list[BackstageTask],
+            Field(
+                description=(
+                    "1 to 8 jobs. Tasks in different apps run at the same time; tasks in the "
+                    "same app run one after another, in this order."
+                )
+            ),
+        ],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+        purpose: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional, a few words: what the user is trying to get done overall. Only "
+                    "shown in Stage's run list; it doesn't steer the agents."
+                )
+            ),
+        ] = "",
+    ) -> str:
+        return await _run_delegation(
+            stage.BACKSTAGE_ACTION,
+            lambda: stage.run_backstage_tasks([t.model_dump() for t in tasks], tool_call_id, purpose),
+        )
+
+    return backstage
 
 
 async def _invoke_onstage(messages: list[AnyMessage], pre_approved_actions: set[str]) -> SpecialistResult:
@@ -1400,12 +1519,15 @@ _MAC_CONTROL_TOOL_DESCRIPTION = (
     "ask for."
 )
 _BACKSTAGE_TOOL_DESCRIPTION = (
-    "Backstage: give Stage's background agents a job to do inside the "
-    "user's real Mac apps, in background windows, one agent per app in "
-    "parallel. `request` is the whole job as ONE plain command naming each "
-    "app (one comma-separated clause per app), every value spelled out — it "
-    "goes to the agents verbatim, with no conversation context. Runs at "
-    "once (no confirmation); returns each agent's outcome."
+    "Run Backstage agents — your workers inside the Mac's real apps, in "
+    "background windows. `tasks`: up to 8 {app, goal}; each goal is ONE "
+    "concrete job in that ONE app with every value spelled out (numbers, "
+    "names, URLs, folder paths, the exact text to type last, after 'that says:'), "
+    "ending with 'and tell me …' when you need something back. Tasks in "
+    "different apps run at the same time; tasks in the same app run one "
+    "after another, in order. Returns each task's result (what the agent "
+    "read) or why it failed, with a hint for fixing the step. Runs at once, "
+    "no confirmation."
 )
 _ONSTAGE_TOOL_DESCRIPTION = (
     "Onstage: answer a question about what's on the Mac's screen right now "
@@ -1468,7 +1590,7 @@ def build_supervisor(
             _PHONE_TOOL_DESCRIPTION,
             partial(_invoke_agent_graph, phone_agent_graph, "phone_agent"),
         ),
-        _make_specialist_tool(stage.BACKSTAGE_ACTION, _BACKSTAGE_TOOL_DESCRIPTION, _invoke_backstage),
+        _make_backstage_tool(),
         _make_specialist_tool(stage.ONSTAGE_ACTION, _ONSTAGE_TOOL_DESCRIPTION, _invoke_onstage),
         *stage.DIRECT_TOOLS,
     ]

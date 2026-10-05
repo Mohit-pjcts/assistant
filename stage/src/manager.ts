@@ -5,7 +5,7 @@
 //     -> one coloured agent per task, all running at the same time
 // Agents think in parallel. With the fast lane (src/fastlane.ts) their clicks and native text inserts are parallel too;
 // what still goes through Cua (web typing, keys, launching) shares its single input lane.
-import { WORD_DOC } from "./compile.ts";
+import { CLAUSE_JOIN, WORD_DOC } from "./compile.ts";
 import { folderIn } from "./fsops.ts";
 import type { AppInfo, Brain, BrainKind, Driver, Helper, Logger, RunTotals, Task } from "./contracts.ts";
 import { AGENT_NAMES } from "./contracts.ts";
@@ -236,9 +236,15 @@ export interface RunOpts {
   log: Logger;
   signal: AbortSignal;
   onUpdate?: (tasks: Task[]) => void;
-  /** reuse a plan (so a comparison runs both brains on identical tasks) */
+  /** reuse a plan (so a comparison runs both brains on identical tasks, or Oni runs the tasks it planned itself) */
   plan?: PlannedTask[];
   plannerMode?: PlannerMode;
+  /**
+   * false: run the plan as it is, one task each. Oni's tasks are already one concrete job apiece, so two for the same
+   * app must stay two agents with their own check and answer (the second waits for the first, below), not become one
+   * long goal. Default true: the planner's clauses for one app are one agent's job.
+   */
+  merge?: boolean;
 }
 
 /** one task per app and place: the same app and the same place (or none) become one goal, "… Then: …" */
@@ -246,7 +252,7 @@ export function mergeSameApp(plan: PlannedTask[]): PlannedTask[] {
   const merged: PlannedTask[] = [];
   for (const t of plan) {
     const same = merged.find((m) => m.app.toLowerCase() === t.app.toLowerCase() && (m.url ?? "") === (t.url ?? ""));
-    if (same) same.goal += ` Then: ${t.goal}`;
+    if (same) same.goal += CLAUSE_JOIN + t.goal; // the text a goal hands over for typing ends at this join (compile.ts)
     else merged.push({ ...t });
   }
   return merged;
@@ -269,8 +275,9 @@ export async function runCommand(o: RunOpts): Promise<{ tasks: Task[]; totals: R
     planCostUsd = p.costUsd;
   }
   // never two agents on one app at once: the same app and the same place merge into one goal; a different place (another
-  // folder, another link) stays its own task and waits for that app's earlier task (below), so its link isn't lost
-  const merged = mergeSameApp(plan);
+  // folder, another link) stays its own task and waits for that app's earlier task (below), so its link isn't lost.
+  // With merge off every task stays its own and only the waiting (below) keeps one app's tasks apart, in order
+  const merged = o.merge === false ? plan.map((t) => ({ ...t })) : mergeSameApp(plan);
   const tasks: Task[] = merged.map((t, i) => ({
     id: `t${i + 1}`,
     agent: AGENT_NAMES[i % AGENT_NAMES.length]!,

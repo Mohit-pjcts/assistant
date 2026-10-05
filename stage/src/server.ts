@@ -3,18 +3,20 @@
 //   Onstage   = the screen explainer (a question → one screenshot → spoken answer + drawings on the real controls)
 import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
-import type { BrainKind, LogLine, RunTotals, Task } from "./contracts.ts";
+import type { AppInfo, BrainKind, LogLine, Observation, RunTotals, Task, WindowRef } from "./contracts.ts";
 import { AGENT_COLOURS } from "./contracts.ts";
 import { JevBrain, LlmBrain, jevModel } from "./decide.ts";
 import { makeHelper } from "./helpers.ts";
 import { CliDriver } from "./driver.ts";
+import { folderIn } from "./fsops.ts";
 import { LLM_BRAIN_MODEL, hasClaude } from "./llm.ts";
 import { RunLogger } from "./logger.ts";
 import { planTasks, runCommand, type PlannedTask } from "./manager.ts";
 import { Explainer, type ToOverlay } from "./explain.ts";
+import { perceive } from "./perceive.ts";
 import { route } from "./router.ts";
 import { agentLabel, spokenSummary, tidyAnswer } from "./results.ts";
-import { LOCKED_MESSAGE, screenLocked } from "./apps.ts";
+import { LOCKED_MESSAGE, resolveAppStrict, screenLocked, suggestApps, windowsOf } from "./apps.ts";
 import { fromThisComputer } from "./localonly.ts";
 import type { ServerWebSocket } from "bun";
 
@@ -46,6 +48,17 @@ const MAX_LINES = 600; // step lines kept for the panel's feed
 const REPLAY_LINES = 200; // replayed to a panel that connects mid-run
 const MAX_WAIT_S = 30; // longest single long poll
 const MAX_COMMAND = 2000;
+// Oni's tasks ({tasks} on /api/run): how many a run takes (each is its own agent; the engine has nine names), and how
+// long an app name, a goal and a purpose may be
+const MAX_TASKS = 8;
+const MAX_APP = 80;
+const MAX_GOAL = 1000;
+const MAX_PURPOSE = 300;
+// /api/look: the most it hands back, and how long the window read may take
+const LOOK_MAX_LINES = 400;
+const LOOK_MAX_CHARS = 8000;
+const LOOK_TIMEOUT_MS = 8000;
+const LOOK_SESSION = "Look"; // a driver session of its own: a look never shares (or ends) an agent's
 
 /** a run as the API reports it: everything a caller needs, none of the per-step bulk (plans, timings, counts) */
 function summary(r: RunRecord) {
@@ -69,6 +82,52 @@ function sameToken(given: string | null, token: string): boolean {
   if (!given) return false;
   const a = Buffer.from(given), b = Buffer.from(token);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** Oni's tasks, checked. The error names the bad item ("tasks[2].goal is empty") so the caller can fix just that one. */
+function parseTasks(raw: unknown): { ok: true; tasks: { app: string; goal: string }[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_TASKS) return { ok: false, error: `tasks must be a list of 1 to ${MAX_TASKS} {app, goal}` };
+  const tasks: { app: string; goal: string }[] = [];
+  for (const [i, item] of raw.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return { ok: false, error: `tasks[${i}] must be {app, goal}` };
+    const row = { app: "", goal: "" };
+    for (const [key, max] of [["app", MAX_APP], ["goal", MAX_GOAL]] as const) {
+      const v = (item as Record<string, unknown>)[key];
+      if (v !== undefined && v !== null && typeof v !== "string") return { ok: false, error: `tasks[${i}].${key} must be text` };
+      const text = (v ?? "").trim();
+      if (!text) return { ok: false, error: `tasks[${i}].${key} is empty` };
+      if (text.length > max) return { ok: false, error: `tasks[${i}].${key} is too long (max ${max} characters)` };
+      row[key] = text;
+    }
+    tasks.push(row);
+  }
+  return { ok: true, tasks };
+}
+
+/** how Oni's run reads in the panel and the log: "<purpose> — 1. <goal> [<App>] 2. <goal> [<App>]" (a display line only: the agents get the plan) */
+function tasksCommand(purpose: string, plan: PlannedTask[]): string {
+  const line = (s: string) => s.replace(/\s+/g, " ");
+  return ((purpose ? `${line(purpose)} — ` : "") + plan.map((t, i) => `${i + 1}. ${line(t.goal)} [${t.app}]`).join(" ")).slice(0, MAX_COMMAND);
+}
+
+/** the reply for app names nothing installed matches: which ones, and the installed apps that look closest to each */
+function noSuchApp(apps: AppInfo[], names: string[]) {
+  const quoted = names.map((n) => `"${n}"`);
+  const list = quoted.length > 1 ? `${quoted.slice(0, -1).join(", ")} or ${quoted[quoted.length - 1]}` : quoted[0];
+  return { error: `no installed app called ${list}`, suggestions: Object.fromEntries(names.map((n) => [n, suggestApps(apps, n)])) };
+}
+
+/** the first lines that fit in `maxLines` lines and `maxChars` characters (joined with line breaks); truncated says some were left out */
+function capLines(all: string[], maxLines: number, maxChars: number): { lines: string[]; truncated: boolean } {
+  const lines: string[] = [];
+  let chars = 0;
+  for (const line of all) {
+    const next = chars + (lines.length ? 1 : 0) + line.length;
+    if (lines.length >= maxLines || next > maxChars) return { lines, truncated: true };
+    lines.push(line);
+    chars = next;
+  }
+  return { lines, truncated: false };
 }
 
 /** what tests swap out (the real ones compile and launch the Swift fast lane, and Onstage warms up the voice) */
@@ -127,7 +186,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
    * start a run (the caller has checked guard() and set busy). Everything up to the first await is synchronous, so the
    * returned record is already in `runs` when this returns. Never throws: a failure is recorded on the run.
    */
-  function execute(command: string, brain: BrainKind, source: RunSource, opts: { plan?: PlannedTask[]; compareGroup?: string; clientRunId?: string } = {}): { rec: RunRecord; done: Promise<RunRecord> } {
+  function execute(command: string, brain: BrainKind, source: RunSource, opts: { plan?: PlannedTask[]; merge?: boolean; compareGroup?: string; clientRunId?: string } = {}): { rec: RunRecord; done: Promise<RunRecord> } {
     const runId = `run-${brain}-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
     const rec: RunRecord = {
       runId, command, brain, model: brain === "jev" ? jevModel() : LLM_BRAIN_MODEL, source, clientRunId: opts.clientRunId,
@@ -149,7 +208,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
         const res = await run({
           runId, command, brainKind: brain,
           makeBrain: () => (brain === "llm" ? new LlmBrain() : new JevBrain()),
-          helper, driver, log, signal: abort.signal, plan: opts.plan,
+          helper, driver, log, signal: abort.signal, plan: opts.plan, merge: opts.merge,
           onUpdate: (tasks) => { rec.tasks = tasks; changed(rec); },
         });
         rec.tasks = res.tasks;
@@ -249,6 +308,16 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
     }
   }
 
+  /** one read of a window, in a driver session of its own that is ended whatever happens (a look never leaves one open) */
+  async function readWindow(win: WindowRef): Promise<Observation> {
+    try {
+      await driver.ensureSession(LOOK_SESSION);
+      return await driver.observe(LOOK_SESSION, win, { timeoutMs: LOOK_TIMEOUT_MS });
+    } finally {
+      try { await driver.endSession(LOOK_SESSION); } catch { /* it ended already, or never started: nothing to clean up */ }
+    }
+  }
+
   const server = Bun.serve({
     port,
     hostname: "127.0.0.1", // this computer only: nobody else on the Wi-Fi can reach the panel or start agents
@@ -313,26 +382,96 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
         return json({ ok: true, version: rec.version, run: summary(rec) });
       }
 
+      // a job for the agents, in one of two forms: {command}, a sentence Stage's own planner splits into tasks (the
+      // hotkey and the panel), or {tasks}, the plan Oni's supervisor made itself (it works out the steps and which app
+      // each needs; the agents only carry them out). Never both.
       if (req.method === "POST" && url.pathname === "/api/run") {
         const b = await body(req);
-        if (!b || typeof b.command !== "string") return json({ ok: false, error: "send {command: string}" }, 400);
-        const command = b.command.trim();
-        if (!command) return json({ ok: false, error: "type a command first" }, 400);
-        if (command.length > MAX_COMMAND) return json({ ok: false, error: `command too long (max ${MAX_COMMAND} characters)` }, 400);
+        if (!b || (b.command === undefined && b.tasks === undefined)) return json({ ok: false, error: "send {command: string} or {tasks: [{app, goal}]}" }, 400);
+        if (b.command !== undefined && b.tasks !== undefined) return json({ ok: false, error: "send {command} or {tasks}, not both" }, 400);
+        let command = "";
+        let asked: { app: string; goal: string }[] | undefined;
+        if (b.tasks !== undefined) {
+          const parsed = parseTasks(b.tasks);
+          if (!parsed.ok) return json({ ok: false, error: parsed.error }, 400);
+          asked = parsed.tasks;
+        } else {
+          if (typeof b.command !== "string") return json({ ok: false, error: "send {command: string}" }, 400);
+          command = b.command.trim();
+          if (!command) return json({ ok: false, error: "type a command first" }, 400);
+          if (command.length > MAX_COMMAND) return json({ ok: false, error: `command too long (max ${MAX_COMMAND} characters)` }, 400);
+        }
+        const purpose = typeof b.purpose === "string" ? b.purpose.trim().slice(0, MAX_PURPOSE) : "";
         const clientRunId = typeof b.clientRunId === "string" && b.clientRunId ? b.clientRunId.slice(0, 200) : undefined;
         // a replayed request (Oni retrying after a timeout, or replaying an approved step) gets the SAME run back, never
         // a second real run in real apps
-        const existing = clientRunId ? runs.find((r) => r.clientRunId === clientRunId) : undefined;
+        const replay = () => (clientRunId ? runs.find((r) => r.clientRunId === clientRunId) : undefined);
+        const existing = replay();
         if (existing) return json({ ok: true, runId: existing.runId, existing: true });
         const brain: BrainKind = b.brain === "llm" ? "llm" : "jev";
         if (await isLocked()) return json({ ok: false, error: LOCKED_MESSAGE, locked: true });
-        const err = guard(brain);
+        let err = guard(brain);
         if (err) return json({ ok: false, error: err, busy });
+        let plan: PlannedTask[] | undefined;
+        if (asked) {
+          // every app is found BEFORE anything starts: a wrong name comes back with suggestions, not as one failed task
+          // in a run that has already worked in the other apps. Found strictly (resolveAppStrict, not the hotkey's
+          // forgiving matchApp): a sloppy name must never end up working in a different app
+          let apps: AppInfo[];
+          try {
+            apps = await driver.listApps();
+          } catch (e: any) {
+            return json({ ok: false, error: `couldn't list the installed apps: ${String(e?.message ?? e).slice(0, 200)}` });
+          }
+          const found = asked.map((t) => resolveAppStrict(apps, t.app));
+          const unknown = [...new Set(asked.filter((_, i) => !found[i]).map((t) => t.app))];
+          if (unknown.length) return json({ ok: false, ...noSuchApp(apps, unknown), unknownApps: unknown });
+          // the app's real name (so "brave" and "Brave Browser" are one app, and its tasks wait for each other); a Finder
+          // task opens the folder its goal names, as the planner does (else the agent works in whatever Finder shows)
+          plan = asked.map((t, i) => {
+            const app = found[i]!.name;
+            const url = app === "Finder" ? folderIn(t.goal) : undefined;
+            return url ? { app, goal: t.goal, url } : { app, goal: t.goal };
+          });
+          command = tasksCommand(purpose, plan);
+          // the await above let other requests in: look again, with nothing awaited between here and `busy = true`
+          const again = replay();
+          if (again) return json({ ok: true, runId: again.runId, existing: true });
+          err = guard(brain);
+          if (err) return json({ ok: false, error: err, busy });
+        }
         busy = true;
         const source: RunSource = b.source === "panel" ? "panel" : "api";
-        const { rec, done } = execute(command, brain, source, { clientRunId });
+        // merge off: Oni's tasks are each one concrete job, so two for the same app stay two agents, in the order given
+        const { rec, done } = execute(command, brain, source, { clientRunId, ...(plan ? { plan, merge: false } : {}) });
         void done.finally(() => { busy = false; changed(); });
         return json({ ok: true, runId: rec.runId });
+      }
+
+      // the text an agent would read in an app's window, with nothing touched: Oni's way to see an app before it plans
+      // a step, or to find out why one failed. Never blocked by a running job: it only reads, so it can't get in the
+      // agents' way.
+      if (req.method === "POST" && url.pathname === "/api/look") {
+        const b = await body(req);
+        const asked = typeof b?.app === "string" ? b.app.trim() : "";
+        if (!asked) return json({ ok: false, error: "send {app: string}" }, 400);
+        if (asked.length > MAX_APP) return json({ ok: false, error: `app too long (max ${MAX_APP} characters)` }, 400);
+        if (await isLocked()) return json({ ok: false, error: LOCKED_MESSAGE, locked: true });
+        try {
+          const apps = await driver.listApps();
+          const app = resolveAppStrict(apps, asked); // as strict as the tasks form: a look must not read a different app
+          if (!app) return json({ ok: false, ...noSuchApp(apps, [asked]) });
+          const win = (await windowsOf(driver, app.name))[0]; // the biggest window on this desktop
+          if (!win) return json({ ok: false, error: `${app.name} has no open window on this desktop${app.running ? "" : " (it isn't running)"}` });
+          const obs = await readWindow(win);
+          if (!obs.elements.length) return json({ ok: false, error: `couldn't read the ${app.name} window (${obs.degraded ?? "empty"}): is it minimised, in full screen or on another desktop?` });
+          // what the agents read; the title line perceive() puts first is left out, the reply names the window itself
+          const screen = perceive(obs).screen;
+          const { lines, truncated } = capLines(screen[0] === `window title: ${obs.window.title}` ? screen.slice(1) : screen, LOOK_MAX_LINES, LOOK_MAX_CHARS);
+          return json({ ok: true, app: app.name, window: win.title, lines, truncated: truncated || obs.truncated });
+        } catch (e: any) {
+          return json({ ok: false, error: `couldn't read ${asked}: ${String(e?.message ?? e).slice(0, 200)}` });
+        }
       }
 
       // Onstage without the hotkey (Oni): ONLY ever explains — never routed to the agents, so a sentence that sounds like

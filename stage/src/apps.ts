@@ -18,6 +18,73 @@ export function matchApp(apps: AppInfo[], name: string): AppInfo | null {
   );
 }
 
+const GENERIC_WORD = /^(the|app|apps|my|new|and|for|of)$/; // these say nothing about which app is meant
+const wordsOf = (s: string) => s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+const nameWords = (s: string) => wordsOf(s).filter((w) => w.length >= 2 && !GENERIC_WORD.test(w));
+/** an app name compared by its letters only: case, spacing and a trailing ".app" don't count */
+const appKey = (s: string) => s.trim().toLowerCase().replace(/\.app$/, "").replace(/\s+/g, " ");
+
+/**
+ * How people name an app whose installed name is longer ("Brave", "Chrome", "Excel"): the planner's own short names
+ * (manager.ts, appAlias), plus "Word": as the name of an app it can only mean Microsoft Word, where in a sentence it
+ * may be "a word doc" (which is why the planner leaves it out).
+ */
+function shortNamesOf(installed: string): string[] {
+  if (installed === "Brave Browser") return ["brave"];
+  if (installed === "Google Chrome") return ["chrome"];
+  const ms = installed.match(/^Microsoft (Word|Excel|PowerPoint|Outlook|Teams|OneNote)$/);
+  return ms ? [ms[1]!.toLowerCase()] : [];
+}
+
+/**
+ * The one installed app a name stands for, or null. Stricter than matchApp, for names that arrive in a field of their
+ * own (Oni's tasks, /api/look), where a sloppy name must never land silently in a different app. In order: the exact
+ * name (any case); a short name people use for it ("Brave", "Chrome", "Word"); the whole words of ONE installed name
+ * ("Settings" is System Settings, but "System" is two apps, so unknown). Never the reverse: a name that CONTAINS an
+ * installed name ("Photoshop" is not Photos, "Safari browser" is not Safari) and a mere prefix ("Calc") are unknown.
+ * The unknown-app reply then offers suggestApps' closest names, so the caller fixes the name instead.
+ */
+export function resolveAppStrict(apps: AppInfo[], name: string): AppInfo | null {
+  const key = appKey(name);
+  if (!key) return null;
+  const named = apps.find((a) => appKey(a.name) === key) ?? apps.find((a) => shortNamesOf(a.name).includes(key));
+  if (named) return named;
+  const given = wordsOf(key);
+  if (!given.some((w) => w.length >= 2 && !GENERIC_WORD.test(w))) return null; // "app", "the": no app is named
+  const holders = new Map<string, AppInfo>(); // each installed name once, whatever its case
+  for (const a of apps) {
+    const words = wordsOf(a.name);
+    const holds = words.some((_, i) => given.every((w, j) => words[i + j] === w)); // the given words, in a row
+    if (holds && !holders.has(appKey(a.name))) holders.set(appKey(a.name), a);
+  }
+  return holders.size === 1 ? [...holders.values()][0]! : null;
+}
+
+/**
+ * Installed apps that look like the one a caller named when nothing matched: a word in common ("Google Docs" ->
+ * Google Chrome), one name inside the other, the same first three letters ("Spotfy" -> Spotify). Best first (more words
+ * in common, then one name inside the other, then the same start, then running apps), at most `max`: an unknown app's
+ * reply offers these so the caller can fix the name instead of guessing again.
+ */
+export function suggestApps(apps: AppInfo[], asked: string, max = 5): string[] {
+  const q = asked.trim().toLowerCase().replace(/\.app$/, "");
+  const qWords = new Set(nameWords(q));
+  const seen = new Set<string>();
+  const scored: { name: string; score: number }[] = [];
+  for (const a of apps) {
+    const n = a.name.toLowerCase();
+    if (!q || seen.has(n)) continue;
+    seen.add(n);
+    const shared = nameWords(n).filter((w) => qWords.has(w)).length;
+    // a name of 3 letters inside a longer word proves nothing (the app Arc inside "search"): same floor as matchApp's
+    const inside = (q.length >= 3 && n.includes(q)) || (n.length >= 4 && q.includes(n));
+    const sameStart = q.length >= 3 && n.length >= 3 && n.slice(0, 3) === q.slice(0, 3);
+    if (!shared && !inside && !sameStart) continue;
+    scored.push({ name: a.name, score: shared * 4 + (inside ? 2 : 0) + (sameStart ? 1 : 0) + (a.running ? 0.5 : 0) });
+  }
+  return scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, max).map((s) => s.name);
+}
+
 export async function windowsOf(driver: Driver, appName: string): Promise<WindowRef[]> {
   const { windows } = await driver.listWindows();
   return windows

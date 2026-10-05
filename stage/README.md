@@ -16,18 +16,47 @@ Backstage, in short:
 
 ## Inside Oni
 
-Oni (the assistant this folder lives in) uses Stage as two of its **specialists**: `backstage` and `onstage`, next to
-coding_agent, research_agent and the rest. They are code, not LLM agents: Stage already plans for itself (rules and
-compilers in code, jev to pick an app, Claude only for open-ended plans), so putting another LLM in front of it would
-only re-type the supervisor's instruction into a tool call — an extra Sonnet round trip per request for nothing. The
-supervisor's instruction goes to Stage as-is (`assistant/stage.py` has the full design).
+Oni (the assistant this folder lives in) uses Stage through `backstage` and `onstage`, next to coding_agent,
+research_agent and the rest. **Oni plans, Stage's agents carry the plan out** (2026-10-05). Alone, the engine does one
+clear job in one app well, but it can't carry a value from one app into the next or recover when a step fails. So Oni's
+supervisor, which is already a model in the loop (no extra call), does that part: it works out the steps, which app each
+needs, what one step needs from an earlier one, and the wording of any text, and sends Backstage a list of small
+tasks. Stage's own command planner (the part that splits one sentence into tasks) is skipped for these runs; each task
+still goes through the same compilers, jev and check. See `assistant/stage.py` for Oni's side.
 
 | Oni | Stage endpoint |
 |---|---|
-| `backstage` specialist | `POST /api/run {command, clientRunId}`, then the long poll `GET /api/runs/{id}?since=&wait=` |
-| `onstage` specialist | `POST /api/explain {question, skipApps}` (a lesson word — next/back/repeat/stop — takes no screenshot) |
+| `backstage` | `POST /api/run {tasks: [{app, goal}], purpose, clientRunId}`, then the long poll `GET /api/runs/{id}?since=&wait=` |
+| `backstage_look` | `POST /api/look {app}`: the text in an app's window, nothing touched |
+| `onstage` | `POST /api/explain {question, skipApps}` (a lesson word — next/back/repeat/stop — takes no screenshot) |
 | `stage_status` | `GET /api/state` (also says when the Mac's screen is locked) |
 | `stop_backstage` | `POST /api/stop` (`{runId}` stops just that run) |
+
+**`POST /api/run {tasks}`** takes 1 to 8 tasks (send `tasks` or `command`, not both):
+
+* `app` is an installed app, found strictly, so a sloppy name never works in a different app: its exact name in any case
+  (`calculator`), a short name people use (`Brave`, `Chrome`, `Word`, `Excel`), or a whole word of a longer name when only
+  one installed app has it (`Settings` is System Settings; `System` is two apps, so it is unknown). A name that merely
+  contains an installed one (`Photoshop` is not Photos, `Safari browser` is not Safari) or starts like one (`Calc`) is
+  unknown too. If a name matches nothing, nothing starts: the reply lists the unknown names and, for each, the installed
+  apps that look closest. (`{command}` and the hotkey keep the forgiving match.)
+* `goal` is one concrete job in that one app, with every value spelled out: "compute 2026 minus 1911", "go to
+  news.ycombinator.com and tell me the title of the top story". Text for an agent to type goes last, after `that says:`:
+  everything after the colon is typed exactly as written, apostrophes, quotes and line breaks included. Two things end
+  it: ` Then: `, which is how Stage joins a sentence's clauses for one app (`{command}`), so keep that out of the text;
+  and a closing instruction that follows a full stop, `!` or `?` and starts with a lowercase "and tell me …", "and then
+  tell me …" or "then tell me …", which is read as part of the goal and not typed. A sentence of the text that starts
+  "Tell me …" is text ("Running late. Tell me where you are." is typed whole), and so is any "tell me" inside a sentence.
+* Tasks in different apps run at the same time. Tasks in the same app run one after another, in the order given, each as
+  its own agent with its own check and answer. (`{command}` merges a sentence's clauses for one app into a single goal.)
+* `purpose` is an optional label for the panel, shown as `purpose — 1. goal [App] 2. …`.
+* `{command}` works as it always did. The hotkey and the panel use it, and Stage's planner splits the sentence.
+
+**`POST /api/look {app}`** returns `{app, window, lines, truncated}`: the text an agent would read in that app's biggest
+window on this desktop (at most 400 lines and 8,000 characters), without clicking, typing or starting an agent, in a second
+or two. A running job doesn't block it. Oni uses it to read a whole list or page (an agent answers in one short line),
+to see an app before planning a step on it, and to find out why a task failed. The app must already have a window open,
+and `app` is found as strictly as in the tasks form.
 
 **No approval cards, by your choice** (2026-10-05): Oni calls Backstage and Onstage at once. What stands between a
 command and your apps is the in-code safety below (it can't be talked past by a prompt), which is why it was hardened
@@ -49,9 +78,9 @@ Run it alongside Oni: copy `stage/.env.example` to `stage/.env` and add your key
 
 **Changes from the HacKU submission** (`github.com/Mohit-pjcts/HackU`, `mac/`), all from a full code review in Oni: the
 API above (run records with an owner, an outcome and their own Stop; summaries instead of full records; the long poll;
-replay-safe runs; 400s for bad requests; the token); Onstage's API path kept apart from the hotkey's; the planner now
-splits "X in Calculator and Y in TextEdit" into two agents (it used to drop the second app); and the safety fixes listed
-under [Safety](#safety-and-robustness-rules-in-code-not-prompts).
+replay-safe runs; 400s for bad requests; the token; the `{tasks}` form and `/api/look`); Onstage's API path kept apart
+from the hotkey's; the planner now splits "X in Calculator and Y in TextEdit" into two agents (it used to drop the
+second app); and the safety fixes listed under [Safety](#safety-and-robustness-rules-in-code-not-prompts).
 
 ## How it works
 
@@ -236,7 +265,7 @@ bun run src/cli.ts "... same command ..." --brain llm      # the LLM brain, for 
 ## Tests
 
 ```sh
-bun test            # 95 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
+bun test            # 134 engine tests: a simulated Calculator, the guards, the server API, one test per live-run finding, …
 bun run typecheck
 ```
 
@@ -258,7 +287,7 @@ Measured on a 10-file sandbox:
 
 ## Safety and robustness rules (in code, not prompts)
 
-* **No irreversible click you didn't ask for.** Every click an agent makes goes through one guard: send, pay, buy, order, submit, delete, remove, trash, replace, sign out, post, publish, confirm, unsubscribe, discard, reset, approve/allow, cancel subscription, leave group, block… are refused unless your command asks for that action, not negated ("do not delete" never allows Delete) and about the same thing ("delete the draft" doesn't allow "Delete All"). A refusal is always fine ("Don't Allow"), and so is a cookie banner's Accept.
+* **No irreversible click you didn't ask for.** Every click an agent makes goes through one guard: send, pay, buy, order, submit, delete, remove, trash, replace, sign out, post, publish, confirm, unsubscribe, discard, reset, approve/allow, cancel subscription, leave group, block… are refused unless your command asks for that action, not negated ("do not delete" never allows Delete) and about the same thing ("delete the draft" doesn't allow "Delete All"). A refusal is always fine ("Don't Allow"), and so is a cookie banner's Accept. Text the agent is told to type is content, not an order: what is in quotes, or after `that says:` / `saying:` / `which says:` / `with the text:` / `the words:` / `exactly:` (up to a following ` Then: `, where the next clause begins), never counts as the command asking for an action, so "create a note that says: remember to delete old files" doesn't make Delete allowed.
 * **Enter is checked too.** Return can fire a dialog's default button ("Delete 3 items?") or submit a checkout form, so Enter is refused while a sheet or dialog shows a risky button, or when the web form's submit button is risky.
 * **Messages only when asked to send.** A message box is filled, and Send or Enter pressed in it, only when the command really asks to send something to someone ("message Sam…", "reply to Sam saying…", "send … to …"). "Tell me…" never counts.
 * **Never edits your existing content.**
