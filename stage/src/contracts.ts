@@ -176,7 +176,9 @@ export interface RunTotals {
 }
 
 export type LogLine =
-  | { type: "run_start"; runId: string; t: string; command: string; brain: BrainKind; tasks: Task[] }
+  // source: who started the run ("api" = Oni, "hotkey", "panel"); clientRunId: the caller's own id for it (Oni sends its
+  // tool-call id). Both optional: logs from before they existed lack them. Oni's History panel reads them (assistant/stage_history.py)
+  | { type: "run_start"; runId: string; t: string; command: string; brain: BrainKind; tasks: Task[]; source?: string; clientRunId?: string }
   | {
       type: "step"; runId: string; t: string; taskId: string; agent: AgentName; step: number;
       items: Item[]; decision: Decision; acted: string; results: ActionResult[];

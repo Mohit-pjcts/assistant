@@ -23,8 +23,10 @@ specialist's own context) — there is no shared history left to leak from,
 so the `SubAgentWindowMiddleware` this file used to carry solely to bound
 that leakage is gone rather than kept as now-redundant defense.
 
-Extended thinking is enabled (thinking={"type": "adaptive"}) on every model
-here and in supervisor.py, paired with `ThinkingBlockRepairMiddleware` in
+Extended thinking is enabled on every model here and in supervisor.py
+(`thinking_repair.THINKING_CONFIG`: adaptive, `display: "summarized"` — without
+that last key claude-sonnet-5 returns thinking blocks with no text, STEPS.md
+158), paired with `ThinkingBlockRepairMiddleware` in
 every middleware list (assistant/thinking_repair.py) — STEPS.md 28/73/74: a
 confirmed bug in langchain-anthropic==1.4.8 (still the latest available) can
 drop a streamed thinking block's required "thinking" field during SSE chunk
@@ -35,6 +37,12 @@ risk. The original Phase 1-era fix disabled thinking project-wide to remove
 the bug class entirely; superseded at Phase 10's resume checkpoint by the
 repair middleware, verified live against the real bug and the real API
 (STEPS.md 73/74) rather than assumed safe.
+
+Every specialist also carries `ToolTraceMiddleware(<its own name>)`
+(assistant/tool_trace.py, STEPS.md 158): this graph's message list is thrown
+away when its isolated `ainvoke()` returns, so that middleware is the only
+place its inner tool calls are ever recorded for the History panel. A new
+specialist built here must include it too.
 
 **Upfront confirmation (superseded per-tool-only gating for the CLOSED set of
 actions in supervisor.GATED_ACTIONS):** every specialist graph here uses
@@ -87,7 +95,8 @@ from assistant.disk_tools import GATED_TOOLS as DISK_GATED_TOOLS
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
 from assistant.media_tools import render_local_media, render_web_media
 from assistant.phone_tools import build_phone_action_tools
-from assistant.thinking_repair import ThinkingBlockRepairMiddleware
+from assistant.thinking_repair import THINKING_CONFIG, ThinkingBlockRepairMiddleware
+from assistant.tool_trace import ToolTraceMiddleware
 from assistant.tools import web_search
 from assistant.write_tools import build_write_tools
 
@@ -210,7 +219,7 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
         render_local_media,
         *(extra_tools or []),
     ]
-    model = ChatAnthropic(model=CODING_MODEL_NAME, thinking={"type": "adaptive"})
+    model = ChatAnthropic(model=CODING_MODEL_NAME, thinking=THINKING_CONFIG)
     return create_agent(
         model=model,
         tools=tools,
@@ -220,6 +229,7 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
+            ToolTraceMiddleware("coding_agent"),
         ],
         state_schema=GatedAgentState,
         name="coding_agent",
@@ -279,7 +289,7 @@ def build_research_agent() -> CompiledStateGraph:
     instead of the supervisor reconstructing one from its prose summary.
     See build_render_ui_tool's own docstring for the live verification this
     extension rested on."""
-    model = ChatAnthropic(model=RESEARCH_MODEL_NAME, thinking={"type": "adaptive"})
+    model = ChatAnthropic(model=RESEARCH_MODEL_NAME, thinking=THINKING_CONFIG)
     return create_agent(
         model=model,
         tools=[
@@ -293,6 +303,7 @@ def build_research_agent() -> CompiledStateGraph:
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
+            ToolTraceMiddleware("research_agent"),
         ],
         state_schema=GatedAgentState,
         name="research_agent",
@@ -473,7 +484,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
     its prose summary. See build_render_ui_tool's own docstring for the
     live verification this extension rested on.
     """
-    model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking={"type": "adaptive"})
+    model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking=THINKING_CONFIG)
     system_prompt = LIFE_ADMIN_SYSTEM_PROMPT + _life_admin_unavailable_integrations_note(mcp_tools)
     return create_agent(
         model=model,
@@ -489,6 +500,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
+            ToolTraceMiddleware("life_admin_agent"),
         ],
         state_schema=GatedAgentState,
         name="life_admin_agent",
@@ -598,7 +610,7 @@ def build_mac_control_agent() -> CompiledStateGraph:
     open_url_in_brave (ungated — see mac_tools.py's module docstring for
     the accepted-risk decision); NoParallelMacWrites added alongside since
     this agent now has more than one gated tool."""
-    model = ChatAnthropic(model=MAC_CONTROL_MODEL_NAME, thinking={"type": "adaptive"})
+    model = ChatAnthropic(model=MAC_CONTROL_MODEL_NAME, thinking=THINKING_CONFIG)
     return create_agent(
         model=model,
         tools=[*MAC_CONTROL_TOOLS, render_local_media],
@@ -608,6 +620,7 @@ def build_mac_control_agent() -> CompiledStateGraph:
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
+            ToolTraceMiddleware("mac_control_agent"),
         ],
         state_schema=GatedAgentState,
         name="mac_control_agent",
@@ -657,7 +670,7 @@ def build_phone_agent() -> CompiledStateGraph:
     they stash a structured action on their own ToolMessage for
     `server.py`'s `_run_turn` to surface in its JSON response, which the
     calling Shortcut then executes locally."""
-    model = ChatAnthropic(model=PHONE_MODEL_NAME, thinking={"type": "adaptive"})
+    model = ChatAnthropic(model=PHONE_MODEL_NAME, thinking=THINKING_CONFIG)
     return create_agent(
         model=model,
         tools=build_phone_action_tools(),
@@ -666,6 +679,7 @@ def build_phone_agent() -> CompiledStateGraph:
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
+            ToolTraceMiddleware("phone_agent"),
         ],
         state_schema=GatedAgentState,
         name="phone_agent",

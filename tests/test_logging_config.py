@@ -2,12 +2,17 @@
 gap found during the reliability/orchestration backlog audit (STEPS.md
 151). Covers the two real, non-obvious behaviors: idempotent configuration
 (no duplicate handlers piling up across repeated calls, e.g. --reload) and
-the trace-id filter's fail-soft behavior when Langfuse isn't configured.
+the trace-id filter's fail-soft behavior (a dash with no active span, or when
+the lookup itself fails). The filter's feedback-loop fix — it reads OpenTelemetry
+directly and never calls the Langfuse client — has its own file,
+test_logging_trace_id.py.
 """
 
 from __future__ import annotations
 
 import logging
+
+from opentelemetry.sdk.trace import TracerProvider
 
 import assistant.logging_config as logging_config
 
@@ -52,32 +57,34 @@ def test_configure_logging_creates_log_dir_and_writes(tmp_path, monkeypatch):
         _reset()
 
 
-def test_trace_id_filter_defaults_to_dash_when_no_client(monkeypatch):
-    monkeypatch.setattr(logging_config, "get_client", lambda: None)
-    record = logging.LogRecord("x", logging.INFO, __file__, 1, "msg", None, None)
+def _record() -> logging.LogRecord:
+    return logging.LogRecord("x", logging.INFO, __file__, 1, "msg", None, None)
+
+
+def test_trace_id_filter_defaults_to_dash_with_no_active_span():
+    record = _record()
     result = logging_config._TraceIdFilter().filter(record)
     assert result is True
     assert record.trace_id == "-"
 
 
-def test_trace_id_filter_uses_current_trace_id_when_available(monkeypatch):
-    class _FakeClient:
-        def get_current_trace_id(self):
-            return "abc123"
-
-    monkeypatch.setattr(logging_config, "get_client", lambda: _FakeClient())
-    record = logging.LogRecord("x", logging.INFO, __file__, 1, "msg", None, None)
-    logging_config._TraceIdFilter().filter(record)
-    assert record.trace_id == "abc123"
+def test_trace_id_filter_uses_the_active_otel_spans_trace_id():
+    tracer = TracerProvider().get_tracer("test")  # the OTEL SDK, no exporter
+    with tracer.start_as_current_span("work") as span:
+        record = _record()
+        logging_config._TraceIdFilter().filter(record)
+        expected = format(span.get_span_context().trace_id, "032x")
+    assert record.trace_id == expected
 
 
-def test_trace_id_filter_never_raises_on_client_error(monkeypatch):
-    class _BrokenClient:
-        def get_current_trace_id(self):
+def test_trace_id_filter_never_raises_when_the_lookup_fails(monkeypatch):
+    class _BrokenOtel:
+        @staticmethod
+        def get_current_span():
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(logging_config, "get_client", lambda: _BrokenClient())
-    record = logging.LogRecord("x", logging.INFO, __file__, 1, "msg", None, None)
+    monkeypatch.setattr(logging_config, "trace", _BrokenOtel)
+    record = _record()
     result = logging_config._TraceIdFilter().filter(record)
     assert result is True
     assert record.trace_id == "-"

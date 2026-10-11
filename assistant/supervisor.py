@@ -214,7 +214,7 @@ from assistant.compaction import (
     is_genuine_human_turn,
     is_recalled_facts_message,
 )
-from assistant.memory_extraction import recall_memory_node
+from assistant.memory_extraction import recall_memory_node, text_only_content
 from assistant.obsidian_tools import build_obsidian_tools
 from assistant.phone_tools import PHONE_ACTION_KEY
 from assistant.sub_agents import (
@@ -224,7 +224,8 @@ from assistant.sub_agents import (
     build_phone_agent,
     build_research_agent,
 )
-from assistant.thinking_repair import ThinkingBlockRepairMiddleware
+from assistant.thinking_repair import THINKING_CONFIG, ThinkingBlockRepairMiddleware
+from assistant.tool_trace import TRACE_CONTEXT, ToolTraceMiddleware
 
 # Phase 16 Part A.5 (the mentor's distributed-tracing spike, PLAN.md):
 # toggles research_agent between its normal in-process embedding and the
@@ -1070,6 +1071,29 @@ def _make_propose_workflow_tool() -> BaseTool:
     return propose_workflow
 
 
+# What the supervisor reads when a specialist's final message has no text at
+# all (only thinking, say): a plain marker, not an empty tool result.
+_NO_SPECIALIST_TEXT = "(the specialist returned no text)"
+
+
+def _specialist_text(content: object) -> str:
+    """A specialist's final message as the text the supervisor reads. A string
+    is used as is; a content-block list is rendered as its TEXT blocks only,
+    through `memory_extraction.text_only_content` (the project's text-only
+    renderer — not a fourth copy of it). It used to be `str()`ed, which put the
+    whole Python repr of the list into the supervisor's context: thinking
+    blocks with their 5-15k-character signatures (and, since
+    `thinking_repair.THINKING_CONFIG` asks for summarized thinking, the
+    thinking text too) — 150 of the 193 delegation results in the real
+    conversation database were that repr (STEPS.md 158), a waste of the
+    supervisor's tokens on every one. A list with no text gets a short marker
+    rather than an empty result."""
+    if isinstance(content, str):
+        return content
+    text = text_only_content(content)
+    return text if text.strip() else _NO_SPECIALIST_TEXT
+
+
 class SpecialistResult(NamedTuple):
     """What a delegated specialist call hands back to the supervisor —
     pins down a shape that had organically accreted across five phases
@@ -1148,7 +1172,7 @@ async def _invoke_agent_graph(
     )
     result_messages = result["messages"]
     final = result_messages[-1]
-    content = final.content if isinstance(final.content, str) else str(final.content)
+    content = _specialist_text(final.content)
     surfaces: list[dict[str, Any]] = []
     phone_actions: list[dict[str, Any]] = []
     for m in result_messages:
@@ -1261,7 +1285,7 @@ async def _invoke_research_agent_via_http(
     if not final_messages:
         return SpecialistResult("Research request returned no result.", [], [], [])
     final = final_messages[-1]
-    content = final.content if isinstance(final.content, str) else str(final.content)
+    content = _specialist_text(final.content)
     # PLAN.md Phase 25: always empty, same reasoning as the surfaces/
     # phone_actions gaps documented above — research_agent has no gated
     # tools (GATED_ACTIONS owns none of them) and this HTTP path never sees
@@ -1269,7 +1293,9 @@ async def _invoke_research_agent_via_http(
     return SpecialistResult(content, [], [], [])
 
 
-async def _run_delegation(tool_name: str, work: Callable[[], Awaitable[Any]]) -> Any:
+async def _run_delegation(
+    tool_name: str, work: Callable[[], Awaitable[Any]], tool_call_id: str | None = None
+) -> Any:
     """The supervisor->specialist boundary bookkeeping every delegation tool
     shares (`_make_specialist_tool`'s `call_specialist` and
     `_make_backstage_tool`): runs `work()` between the dashboard's live
@@ -1290,11 +1316,28 @@ async def _run_delegation(tool_name: str, work: Callable[[], Awaitable[Any]]) ->
     docstring for why this records only the OUTER supervisor->specialist
     boundary, not each specialist's inner tool calls. Factored out of
     `call_specialist` (STEPS.md 157) when `backstage` stopped being built by
-    `_make_specialist_tool`, so the two paths can't drift apart."""
+    `_make_specialist_tool`, so the two paths can't drift apart.
+
+    History panel (STEPS.md 158): `tool_call_id` is this delegation's own
+    tool-call id. While `work()` runs, `(thread_id, tool_call_id)` is
+    published as `tool_trace.TRACE_CONTEXT`, which is how every tool call the
+    specialist makes inside its isolated `ainvoke()` gets recorded as a child of
+    this call (tool_trace.py's module docstring has the why). The delegation
+    call itself is recorded by the SUPERVISOR's own `ToolTraceMiddleware`, not
+    here — recording it in both places would write two rows for one call. Reset
+    in the `finally` below, so a failed, cancelled or interrupted call can't
+    leave the context set for whatever runs next."""
     await adispatch_custom_event(
         "agent_activity", {"phase": "tool_start", "agent": "supervisor", "tool": tool_name}
     )
     started_at = activity_log.now_iso()
+    trace_token = None
+    if tool_call_id:
+        try:
+            thread_id = get_config()["configurable"]["thread_id"]
+            trace_token = TRACE_CONTEXT.set((thread_id, tool_call_id))
+        except Exception:
+            pass  # no thread to record under (a bare ainvoke): nothing would be recorded anyway
 
     async def _log_outcome(outcome: str) -> None:
         # Best-effort by this module's own documented contract: a
@@ -1317,6 +1360,8 @@ async def _run_delegation(tool_name: str, work: Callable[[], Awaitable[Any]]) ->
         await _log_outcome(activity_log.OUTCOME_ERROR)
         raise
     finally:
+        if trace_token is not None:
+            TRACE_CONTEXT.reset(trace_token)
         await adispatch_custom_event(
             "agent_activity", {"phase": "tool_end", "agent": "supervisor", "tool": tool_name}
         )
@@ -1389,7 +1434,7 @@ def _make_specialist_tool(
         ]
         pre_approved = _pre_approved_actions_this_turn(state)
         content, surfaces, phone_actions, executed_actions = await _run_delegation(
-            tool_name, lambda: invoke(seed, pre_approved)
+            tool_name, lambda: invoke(seed, pre_approved), tool_call_id
         )
         if executed_actions:
             run_id = _active_workflow_run_id_this_turn(state)
@@ -1489,6 +1534,7 @@ def _make_backstage_tool() -> BaseTool:
         return await _run_delegation(
             stage.BACKSTAGE_ACTION,
             lambda: stage.run_backstage_tasks([t.model_dump() for t in tasks], tool_call_id, purpose),
+            tool_call_id,
         )
 
     return backstage
@@ -1560,7 +1606,7 @@ def build_supervisor(
     delegate to each specialist's own compiled graph directly, rather than
     being handoff tools that redirect a separate outer graph (see this
     module's docstring)."""
-    model = ChatAnthropic(model=SUPERVISOR_MODEL_NAME, thinking={"type": "adaptive"})
+    model = ChatAnthropic(model=SUPERVISOR_MODEL_NAME, thinking=THINKING_CONFIG)
     research_invoke = (
         _invoke_research_agent_via_http
         if RESEARCH_AGENT_VIA_HTTP
@@ -1606,6 +1652,9 @@ def build_supervisor(
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
+            # History panel (STEPS.md 158): records every tool call below,
+            # including each delegation; the specialists carry their own.
+            ToolTraceMiddleware("supervisor"),
         ],
         name="supervisor",
     )

@@ -1,104 +1,78 @@
-import { useCallback, useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { A2UIRenderer } from "@/components/chat/A2UIRenderer";
-import { fetchHistory, type HistoryMessage } from "@/lib/api";
+import { useState } from "react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ConversationTab } from "./ConversationTab";
+import { OnstageList } from "./OnstageList";
+import { RenderBoundary } from "./RenderBoundary";
+import { StageRunsList } from "./StageRunsList";
 
-// PLAN.md Phase 9 step 4 — the full-fidelity counterpart to the chat panel.
-// ChatPanel deliberately HIDES tool/system messages, empty-content turns,
-// and synthetic graph-inserted messages (STEPS.md 57/58) to keep the live
-// chat readable; this panel shows ALL of it, labeled honestly, since that's
-// exactly the transparency a "what did the assistant actually do" view is
-// for. No fetch-on-a-timer / real-time sync — a manual refresh is enough
-// for a view you open to inspect, not to watch live (that's the chat tab's
-// job).
+// STEPS.md 158 — the full-fidelity counterpart to the chat panel, rebuilt.
+// ChatPanel deliberately shows only the dialogue; this panel shows
+// everything the system did: every tool call with its arguments and output,
+// every delegation and what the specialist did and said inside it, and — since
+// Stage runs the computer-use agents — every Stage run and Onstage answer,
+// including the ones Oni never started.
 //
-// Phase 15's thread picker briefly lived inline in this panel, then moved
-// to the persistent `ThreadSidebar` (visible from every tab, not just this
-// one) after the user asked for Claude-style thread switching from the
-// Chat tab itself — this panel remounts (`key={activeThreadId}` in
-// App.tsx) whenever the sidebar switches threads, which is what makes its
-// plain `fetchHistory()` call (no thread_id) pick up the newly active
-// thread automatically.
-export function HistoryPanel() {
-  const [messages, setMessages] = useState<HistoryMessage[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+// Three tabs. Conversation follows the active thread the way the old panel
+// did: App.tsx remounts this component (`key={activeThreadId}`) whenever the
+// sidebar switches threads, and the backend answers for the active thread
+// when no thread id is given. Stage and Onstage aren't per-thread at all —
+// they are Stage's own logs.
+//
+// Each tab is mounted the first time it's opened and kept mounted after
+// that (Base UI's `keepMounted`), so the filter text, loaded pages and
+// expanded rows survive a trip to another tab — but opening the panel
+// doesn't pull Stage's logs for someone who only came for the conversation.
 
-  const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    fetchHistory()
-      .then(setMessages)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setLoading(false));
-  }, []);
+type HistoryTab = "conversation" | "stage" | "onstage";
 
-  useEffect(() => {
-    load();
-  }, [load]);
+const TAB_LABEL_CLASS = "panel-label text-[0.7rem]";
+
+function isHistoryTab(value: unknown): value is HistoryTab {
+  return value === "conversation" || value === "stage" || value === "onstage";
+}
+
+export function HistoryPanel({ threadId }: { threadId?: string }) {
+  const [tab, setTab] = useState<HistoryTab>("conversation");
+  const [visited, setVisited] = useState<ReadonlySet<HistoryTab>>(new Set(["conversation"]));
+
+  function handleTabChange(value: unknown) {
+    if (!isHistoryTab(value)) return;
+    setTab(value);
+    setVisited((prev) => (prev.has(value) ? prev : new Set(prev).add(value)));
+  }
 
   return (
-    <div className="flex h-full flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">
-          Full graph state, including internal messages the chat view hides.
-        </p>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          {loading ? "Refreshing…" : "Refresh"}
-        </Button>
-      </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
-      {/* min-h-0 — see ChatPanel.tsx's comment on the same pattern: without
-          it a growing list expands the whole page instead of scrolling
-          internally (found live in the real window, STEPS.md 61). */}
-      <ScrollArea className="min-h-0 flex-1 rounded-md border p-4">
-        <div className="flex flex-col gap-2">
-          {messages.length === 0 && !loading && (
-            <p className="text-sm text-muted-foreground">No messages yet.</p>
-          )}
-          {messages.map((message, index) => (
-            <div
-              key={index}
-              className="rounded-md border border-transparent bg-muted/40 p-2 text-sm"
-              data-testid="history-row"
-            >
-              <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                <Badge variant={message.role === "user" ? "default" : "secondary"}>
-                  {message.role}
-                </Badge>
-                {message.name && (
-                  <Badge variant="outline" className="font-mono text-[0.65rem]">
-                    {message.name}
-                  </Badge>
-                )}
-                {message.synthetic && (
-                  <Badge
-                    variant="outline"
-                    className="font-mono text-[0.65rem] text-muted-foreground"
-                  >
-                    internal
-                  </Badge>
-                )}
-              </div>
-              <p className="whitespace-pre-wrap break-words">
-                {message.content || <span className="italic text-muted-foreground">(empty)</span>}
-              </p>
-              {/* Phase 18 (PLAN.md): whatever A2UI surface(s) this
-                  ToolMessage persisted — re-render inline, right on this
-                  row, matching this panel's own full-fidelity philosophy.
-                  No onAction: a past turn's Button submitting again would
-                  re-fire a new turn, which isn't what "viewing history"
-                  means here — same reasoning A2UIRenderer's own docstring
-                  gives for omitting it. */}
-              {message.surfaces?.map((surface, surfaceIndex) => (
-                <A2UIRenderer key={surfaceIndex} surface={surface} />
-              ))}
-            </div>
-          ))}
-        </div>
-      </ScrollArea>
-    </div>
+    <Tabs value={tab} onValueChange={handleTabChange} className="h-full min-h-0 gap-3">
+      <TabsList variant="line">
+        <TabsTrigger value="conversation" className={TAB_LABEL_CLASS}>
+          Conversation
+        </TabsTrigger>
+        <TabsTrigger value="stage" className={TAB_LABEL_CLASS}>
+          Stage
+        </TabsTrigger>
+        <TabsTrigger value="onstage" className={TAB_LABEL_CLASS}>
+          Onstage
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="conversation" keepMounted className="flex min-h-0 flex-col">
+        <RenderBoundary what="the conversation">
+          <ConversationTab threadId={threadId} />
+        </RenderBoundary>
+      </TabsContent>
+      <TabsContent value="stage" keepMounted className="flex min-h-0 flex-col">
+        {visited.has("stage") && (
+          <RenderBoundary what="the Stage runs">
+            <StageRunsList />
+          </RenderBoundary>
+        )}
+      </TabsContent>
+      <TabsContent value="onstage" keepMounted className="flex min-h-0 flex-col">
+        {visited.has("onstage") && (
+          <RenderBoundary what="the Onstage journal">
+            <OnstageList />
+          </RenderBoundary>
+        )}
+      </TabsContent>
+    </Tabs>
   );
 }

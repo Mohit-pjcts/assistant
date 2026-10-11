@@ -38,9 +38,12 @@ export interface HistoryMessage {
   // specialist-delegation ToolMessage forwarding what a sub-agent rendered
   // during its own isolated run (server.py's /history, assistant/a2ui.py's
   // A2UI_SURFACE_KEY). Empty/absent on every message that carries none.
-  // HistoryPanel renders these inline on that row; ChatPanel groups them
-  // onto the turn's closing assistant bubble to match what a live turn
-  // looks like (see ChatPanel's own history-loading code).
+  // ChatPanel groups them onto the turn's closing assistant bubble to match
+  // what a live turn looks like (see ChatPanel's own history-loading code).
+  // The History panel draws the same cards, but reads them from
+  // /history/trace (STEPS.md 158) rather than from here: each tool event
+  // there carries its own `surfaces`, shown inline under the call that
+  // produced them.
   surfaces?: A2UISurface[];
 }
 
@@ -305,6 +308,353 @@ export async function fetchHistory(): Promise<HistoryMessage[]> {
   }
   const body = (await response.json()) as { messages: HistoryMessage[]; thread_id: string };
   return body.messages;
+}
+
+// STEPS.md 158 — the full-fidelity History panel's data. `fetchHistory`
+// above stays as it is (ChatPanel's reload path); everything below is a
+// separate, read-only family of endpoints that carries what that one never
+// did: every tool call with its arguments, everything a specialist did and
+// said inside a delegation, and Stage's own run logs.
+//
+// The backend answers ONLY loopback clients on all of these (403 otherwise):
+// they expose complete tool I/O and Stage's screen contents, and the
+// backend binds 0.0.0.0 for the iPhone channel with no auth. A 403 is
+// therefore an expected, explainable state (opening the dashboard from the
+// phone), not a broken request — the panel shows a plain message for it
+// instead of the generic error line.
+export class HistoryForbiddenError extends Error {}
+
+export type TraceToolStatus = "ok" | "error" | "interrupted" | "pending";
+
+// One tool call — a supervisor-level one, or (nested under `children`) one a
+// specialist made inside a delegation. Fields that older rows simply don't
+// have (calls recorded before call tracing existed carry no timing and no
+// children) are optional/nullable rather than assumed present.
+export interface TraceToolEvent {
+  kind: "tool";
+  id: string;
+  agent: string;
+  name: string;
+  // The call's arguments exactly as the model sent them — an object, except
+  // for an invalid call (arguments the model got wrong), which arrives as
+  // status "error" with the raw string it sent. Typed `unknown` because the
+  // panel never reads into it — it only pretty-prints it.
+  input: unknown;
+  output: string | null;
+  status: TraceToolStatus;
+  // The exception text when the call raised, as opposed to returning an
+  // error as its output. Null/absent otherwise.
+  error?: string | null;
+  // The tool name when this call is a delegation to a specialist (or Stage),
+  // null for an ordinary call. The panel only needs "is it one".
+  delegation?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+  // Set on backstage/stage_status calls whose output names a Backstage run;
+  // the id GET /stage/runs/{id} takes.
+  stage_run_id?: string | null;
+  // The A2UI card(s) this call's ToolMessage carried — render_ui's own, or a
+  // delegation forwarding what its specialist rendered. Filled on top-level
+  // events only: a specialist's cards are already forwarded onto its
+  // delegation, so repeating them on its inner calls would draw each twice.
+  surfaces?: A2UISurface[];
+  // Every other key the call's ToolMessage carried in additional_kwargs
+  // (e.g. a phone_action to open a URL), as plain data. {} when none.
+  extras?: Record<string, unknown>;
+  // A delegation's inner steps, in the order they happened: the specialist's
+  // own tool calls and its own model turns. Empty/null on a call that isn't a
+  // delegation and on delegations recorded before inner steps were traced.
+  children?: TraceChild[] | null;
+}
+
+// Token counts for one model call, as the backend recorded them. The cache
+// fields are only there when the provider reported them.
+export interface TraceUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
+}
+
+// What the assistant said and thought in one model turn. At the top level it
+// is just {text, thinking} (the supervisor's turns come out of the
+// checkpoint, which keeps no agent, timing or usage). Inside a delegation's
+// `children` it is the specialist's own turn and the optional fields below
+// are filled in — the specialist's reasoning between its tool calls, which
+// nothing else records.
+export interface TraceAssistantEvent {
+  kind: "assistant";
+  text: string;
+  thinking?: string | null;
+  id?: string;
+  agent?: string;
+  model?: string | null;
+  status?: "ok" | "error";
+  error?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+  usage?: TraceUsage | null;
+}
+
+export type TraceChild = TraceToolEvent | TraceAssistantEvent;
+
+// A graph-inserted message the model saw but the user never typed: recalled
+// facts, the compaction summary, prior specialist results handed forward.
+export interface TraceContextEvent {
+  kind: "context";
+  label: string;
+  content: string;
+}
+
+export type TraceEvent = TraceAssistantEvent | TraceContextEvent | TraceToolEvent;
+
+// One genuine human message and everything the graph did in answer to it.
+// `user` is null only for graph activity that precedes the first real
+// message. `reply` is the last assistant text of the turn — it is also the
+// last assistant entry in `events`, so the panel doesn't render it twice.
+export interface TraceTurn {
+  index: number;
+  user: { content: string; synthetic?: boolean } | null;
+  events: TraceEvent[];
+  reply: string | null;
+}
+
+export interface HistoryTrace {
+  thread_id: string;
+  total_turns: number;
+  turns: TraceTurn[];
+}
+
+// Omit threadId for the active thread (what the History tab wants — it
+// remounts per thread, see App.tsx). `before` is a turn index: the page is
+// the most recent `limit` turns older than it.
+export async function fetchHistoryTrace(
+  threadId?: string,
+  opts: { limit?: number; before?: number } = {},
+): Promise<HistoryTrace> {
+  const params = new URLSearchParams();
+  if (threadId) params.set("thread_id", threadId);
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.before !== undefined) params.set("before", String(opts.before));
+  const query = params.toString();
+  return getHistoryJSON<HistoryTrace>(`/history/trace${query ? `?${query}` : ""}`);
+}
+
+// Stage (the sibling computer-use project) writes every run to
+// stage/runs/<runId>/steps.jsonl. These types follow stage/src/contracts.ts
+// (Task, RunTotals, LogLine) — kept loose where Stage itself is (a task's
+// `cost` is {decisionsUsd, helperUsd}; a bare number is tolerated).
+export interface StageTaskCost {
+  decisionsUsd?: number;
+  helperUsd?: number;
+}
+
+export interface StageTaskSummary {
+  id: string;
+  agent: string;
+  app: string;
+  goal: string;
+  status: string;
+  answer?: string | null;
+  exception?: { code: string; reason: string } | null;
+  seconds?: number | null;
+  steps?: number | null;
+  cost?: StageTaskCost | number | null;
+  // Stage's own field is the list of reasons each LLM call was needed; a
+  // plain count is tolerated.
+  llmCalls?: string[] | number | null;
+}
+
+export interface StageRunTotals {
+  tasks: number;
+  done: number;
+  failed: number;
+  seconds: number;
+  decisionsUsd: number;
+  helperUsd: number;
+  decisions: number;
+  actions: number;
+  medianDecideMs: number;
+}
+
+export interface StageRunSummary {
+  run_id: string;
+  started_at: string | null;
+  ended_at: string | null;
+  command: string;
+  brain: string | null;
+  // "hotkey" | "panel" | "api" ("api" = started by Oni). Null on runs
+  // logged before Stage recorded where a run came from.
+  source: string | null;
+  client_run_id: string | null;
+  status: "finished" | "unfinished";
+  // Only a run that wrote its run_end line has totals.
+  totals: StageRunTotals | null;
+  tasks: StageTaskSummary[];
+}
+
+export interface StageRunsPage {
+  runs: StageRunSummary[];
+  // Pass back as `before` for the next page; null when there is none.
+  next: string | null;
+}
+
+export async function fetchStageRuns(
+  opts: { limit?: number; before?: string } = {},
+): Promise<StageRunsPage> {
+  const params = new URLSearchParams();
+  if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.before) params.set("before", opts.before);
+  const query = params.toString();
+  return getHistoryJSON<StageRunsPage>(`/stage/runs${query ? `?${query}` : ""}`);
+}
+
+export interface StageItem {
+  i: number;
+  id?: string;
+  text?: string;
+  role?: string;
+  value?: string;
+  state?: string;
+}
+
+export interface StageActionResult {
+  ok: boolean;
+  channel?: string;
+  effect?: string;
+  route?: string;
+  error?: { code: string; detail: string };
+  ms?: number;
+  cli?: string;
+}
+
+export interface StageDecision {
+  kind: string;
+  item?: number;
+  text?: string;
+  kindConf?: number;
+  itemConf?: number;
+  gate?: number;
+  backend?: string;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  ms?: number;
+}
+
+export interface StageRunStartLine {
+  type: "run_start";
+  runId?: string;
+  t?: string;
+  command?: string;
+  brain?: string;
+  source?: string;
+  clientRunId?: string;
+  tasks?: StageTaskSummary[];
+}
+
+export interface StageStepLine {
+  type: "step";
+  runId?: string;
+  t?: string;
+  taskId?: string;
+  agent?: string;
+  step: number;
+  items?: StageItem[];
+  decision?: StageDecision;
+  acted?: string;
+  results?: StageActionResult[];
+  ms?: { observe?: number; decide?: number; act?: number };
+  truncated?: boolean;
+}
+
+export interface StageHelperLine {
+  type: "helper";
+  runId?: string;
+  t?: string;
+  taskId?: string;
+  agent?: string;
+  what: string;
+  detail: string;
+  costUsd?: number;
+  ms?: number;
+}
+
+export interface StageTaskEndLine {
+  type: "task_end";
+  runId?: string;
+  t?: string;
+  task: StageTaskSummary;
+}
+
+export interface StageRunEndLine {
+  type: "run_end";
+  runId?: string;
+  t?: string;
+  totals?: StageRunTotals;
+  tasks?: StageTaskSummary[];
+}
+
+// Every line of a run's steps.jsonl, parsed and in file order. The panel
+// shows each one somewhere (header, a task's timeline, or an "other" group)
+// so nothing Stage logged is unreachable.
+export type StageLogLine =
+  StageRunStartLine | StageStepLine | StageHelperLine | StageTaskEndLine | StageRunEndLine;
+
+export interface StageRunDetail {
+  run_id: string;
+  summary: StageRunSummary;
+  lines: StageLogLine[];
+}
+
+export async function fetchStageRun(runId: string): Promise<StageRunDetail> {
+  return getHistoryJSON<StageRunDetail>(`/stage/runs/${encodeURIComponent(runId)}`);
+}
+
+// Onstage = Stage's "explain what's on my screen" mode; each question it
+// answered is one line of explain-journal.jsonl. The endpoint passes the
+// objects through raw, so unknown extra fields are expected.
+export interface OnstageStep {
+  say: string;
+  shapes?: number;
+}
+
+export interface OnstageEntry {
+  t: string;
+  question: string;
+  app?: string | null;
+  window?: string | null;
+  steps?: OnstageStep[];
+  model?: string;
+  usd?: number;
+  ms?: number;
+  captureMs?: number;
+  controls?: number;
+  [key: string]: unknown;
+}
+
+export async function fetchOnstageJournal(limit = 50): Promise<OnstageEntry[]> {
+  const body = await getHistoryJSON<{ entries: OnstageEntry[] }>(`/stage/onstage?limit=${limit}`);
+  return body.entries;
+}
+
+// Shared by the four fetchers above: all are startup-race-safe GETs
+// (fetchWithRetry, same as fetchHistory — the panel mounts the moment its
+// tab opens), and all share the 403 meaning described at
+// HistoryForbiddenError.
+async function getHistoryJSON<T>(path: string): Promise<T> {
+  const response = await fetchWithRetry(`${API_BASE_URL}${path}`);
+  const route = path.split("?")[0];
+  if (response.status === 403) {
+    throw new HistoryForbiddenError(`${route} is only served to the Mac it runs on (403)`);
+  }
+  if (!response.ok) {
+    throw new Error(`${route} failed (${response.status}): ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
 }
 
 // Phase 15: multi-thread conversation support. Full thread management

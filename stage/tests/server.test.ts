@@ -149,6 +149,16 @@ test("a replayed request gets the same run back; a different one while busy is r
   await settle(first.json.runId);
 });
 
+test("the run is told who asked for it, for the log's run_start line: the source and the caller's own id", async () => {
+  const oni = await startRun("compute 2 plus 2 in Calculator", "toolu_meta1");
+  expect(lastRun?.meta).toEqual({ source: "api", clientRunId: "toolu_meta1" });
+  await settle(oni.json.runId);
+  const panel = await post("/api/run", { command: "compute 3 plus 3 in Calculator", source: "panel" });
+  started.push(panel.json.runId);
+  expect(lastRun?.meta).toEqual({ source: "panel", clientRunId: undefined }); // no id was sent, so none is passed
+  await settle(panel.json.runId);
+});
+
 test("the long poll answers at once when behind, else the moment the run changes", async () => {
   const { json } = await startRun("compute 6 x 7 in Calculator", "call-lp");
   const now = await get(`/api/runs/${json.runId}?since=-1&wait=0`);

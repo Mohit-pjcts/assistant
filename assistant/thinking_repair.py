@@ -8,10 +8,12 @@ an `AIMessageChunk` via `chat_models.py`'s `content_block_start`/
 `content_block_delta` handling. For a `thinking`-type block, the
 `content_block_start` handler only emits a starter chunk `if thinking or
 signature` on that opening event. When Anthropic returns a thinking block
-whose visible text is empty (a real, common case with `thinking={"type":
-"adaptive"}` — the model "thought" but the summarized reasoning shown back
-is blank) AND the opening event carries no signature yet either, no starter
-chunk is emitted at all. The block is then built purely from a later
+whose visible text is empty (a real case with `thinking={"type":
+"adaptive"}` — the model "thought" but the reasoning shown back is blank;
+claude-sonnet-5's API default was to omit it ALWAYS, until `THINKING_CONFIG`
+below asked for `display: "summarized"` (STEPS.md 158), after which it is rare:
+only an empty summary hits it) AND the opening event carries no signature yet
+either, no starter chunk is emitted at all. The block is then built purely from a later
 `signature_delta` event, whose own `model_dump()` never carries a `thinking`
 key. The final merged message ends up with `signature` set but NO
 `thinking` key whatsoever (not just an empty string) — confirmed via direct
@@ -39,8 +41,8 @@ the malformed shape via `astream()`; confirmed replaying it unpatched 400s
 with the exact error above; confirmed the identical replay succeeds once
 patched with `"thinking": ""`.
 
-**Scope:** applied to every agent model that has `thinking={"type":
-"adaptive"}` enabled (supervisor + all 4 sub-agents). NOT applied to
+**Scope:** applied to every agent model that has thinking enabled
+(`THINKING_CONFIG` below: the supervisor + all 5 sub-agents). NOT applied to
 compaction.py/memory_extraction.py's Haiku calls, which stay
 `thinking={"type": "disabled"}` — single-shot summarization/extraction
 tasks with no orchestration reasoning to gain from it.
@@ -52,6 +54,19 @@ from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.messages import BaseMessage
+
+# The `thinking` config every agent model is built with (supervisor.py and
+# sub_agents.py). `display: "summarized"` is what makes the reasoning's TEXT
+# come back: for claude-sonnet-5 the API's default is to omit it — thinking
+# blocks arrive with an empty `thinking` string and only a signature, whatever
+# the SDK docstring says — which left the History panel's thinking toggle blank
+# forever. Verified live (STEPS.md 158): the same call returns the summarized
+# reasoning with `display: "summarized"`, at the same token use (406 vs 423
+# output tokens). Only the text changes: the signature, and so the replay
+# rules this module's middleware guards, are the same. The chat stream is
+# untouched — server.py's text extractors take `type == "text"` blocks only.
+# ChatAnthropic copies the dict, so sharing one is safe.
+THINKING_CONFIG: dict[str, str] = {"type": "adaptive", "display": "summarized"}
 
 
 def _repair_content(content: Any) -> Any:

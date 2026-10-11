@@ -69,7 +69,7 @@ from dotenv import load_dotenv
 # first.
 load_dotenv()
 
-from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
@@ -89,17 +89,21 @@ from assistant import (  # noqa: E402
     claude_code_sessions,
     conversation_search,
     cost_cache,
+    history_trace,
     memory_review_agent,
     memory_store,
     observability,
     phone_store,
+    stage_history,
     thread_store,
+    trace_store,
     workflow_store,
 )
 from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
+from assistant.local_only import require_local_client  # noqa: E402
 from assistant.logging_config import configure_logging  # noqa: E402
 from assistant.mcp_tools import load_mcp_tools  # noqa: E402
 from assistant.memory import get_checkpointer  # noqa: E402
@@ -110,7 +114,12 @@ from assistant.sub_agents import (  # noqa: E402
     build_life_admin_agent,
     build_mac_control_agent,
 )
-from assistant.supervisor import GATED_ACTIONS, _invoke_agent_graph, build_graph  # noqa: E402
+from assistant.supervisor import (  # noqa: E402
+    _SPECIALIST_TOOL_NAMES,
+    GATED_ACTIONS,
+    _invoke_agent_graph,
+    build_graph,
+)
 from assistant.tools import _resolve_in_workspace  # noqa: E402
 
 # Historically had to run before observability's lazy handler was first
@@ -167,6 +176,11 @@ if "ASSISTANT_WORKFLOWS_DB_PATH" in os.environ:
 # Same redirect story again, for STEPS.md 151's durable activity log.
 if "ASSISTANT_ACTIVITY_LOG_DB_PATH" in os.environ:
     activity_log.DEFAULT_DB_PATH = os.environ["ASSISTANT_ACTIVITY_LOG_DB_PATH"]
+
+# Same redirect story again, for STEPS.md 158's tool-call trace store (the
+# History panel's data).
+if "ASSISTANT_TRACES_DB_PATH" in os.environ:
+    trace_store.DEFAULT_DB_PATH = os.environ["ASSISTANT_TRACES_DB_PATH"]
 
 # PLAN.md Phase 24: which GATED_ACTIONS an automation may be pre-approved
 # for — a deliberate NARROWING of the full GATED_ACTIONS set, not full
@@ -1565,6 +1579,50 @@ async def history() -> dict[str, Any]:
         ],
         "thread_id": thread_id,
     }
+
+
+@app.get("/history/trace", dependencies=[Depends(require_local_client)])
+async def get_history_trace(
+    thread_id: str | None = None,
+    limit: int = Query(30, ge=1, le=200),
+    before: int | None = Query(None, ge=0),
+) -> dict[str, Any]:
+    """The History panel's conversation view (STEPS.md 158): one thread as
+    turns of events — what was said and thought, every tool call with its
+    full input and output (plus the A2UI cards and other data its result
+    carried), and under each delegation everything the specialist itself
+    did: its tool calls and what it said between them. `/history` stays
+    exactly as it was (ChatPanel reloads from it); this is the
+    full-fidelity sibling, built by `history_trace.py` from the same
+    checkpointed messages plus `trace_store`'s rows.
+
+    `thread_id` is optional (the active thread, like `/history`); an unknown
+    one is a 404. Paged from the newest end: the `limit` most recent turns
+    before turn index `before` (omit it for the latest), returned oldest first,
+    with `total_turns` so a client knows whether earlier ones remain — it
+    asks again with `before` set to the lowest `index` it has.
+
+    Loopback-only (`local_only.py`): this returns whole tool inputs and
+    outputs. Every other endpoint here keeps the access it had."""
+    resolved = await _resolve_thread_id(thread_id)
+    snapshot = await app.state.graph.aget_state(make_thread_config(resolved))
+    messages: list[BaseMessage] = snapshot.values.get("messages", [])
+    calls = await trace_store.calls_for_thread(resolved)
+    total_turns, turns = history_trace.trace_page(
+        messages,
+        calls,
+        limit=limit,
+        before=before,
+        delegation_names=_SPECIALIST_TOOL_NAMES,
+    )
+    return {"thread_id": resolved, "total_turns": total_turns, "turns": turns}
+
+
+# Stage's own run history (`GET /stage/runs`, `/stage/runs/{id}`,
+# `/stage/onstage`) — read straight from Stage's log files, loopback-only.
+# Registered before the static mount at the bottom of this file, like every
+# route (see the comment there).
+app.include_router(stage_history.router)
 
 
 @app.get("/memory/facts")

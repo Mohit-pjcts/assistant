@@ -209,6 +209,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
           runId, command, brainKind: brain,
           makeBrain: () => (brain === "llm" ? new LlmBrain() : new JevBrain()),
           helper, driver, log, signal: abort.signal, plan: opts.plan, merge: opts.merge,
+          meta: { source, clientRunId: opts.clientRunId }, // written on the log's run_start line, for Oni's History panel
           onUpdate: (tasks) => { rec.tasks = tasks; changed(rec); },
         });
         rec.tasks = res.tasks;

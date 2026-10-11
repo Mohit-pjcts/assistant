@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { matchApp } from "../src/apps.ts";
-import type { Brain, Decision, Facts, Helper, Item, PlanStep, Task } from "../src/contracts.ts";
+import type { Brain, Decision, Facts, Helper, Item, LogLine, PlanStep, Task } from "../src/contracts.ts";
 import { RunLogger } from "../src/logger.ts";
 import { runTask } from "../src/loop.ts";
 import { planWithoutLlm, runCommand, totalsOf, waitsFor } from "../src/manager.ts";
@@ -132,6 +132,29 @@ test("merge off keeps a plan as given, one agent per task, the same app's tasks 
   const merged = (await run()).tasks;
   expect(merged.map((t) => t.goal)).toEqual([`${plan[0]!.goal} Then: ${plan[1]!.goal}`]);
   expect(plan.map((t) => t.goal)).toEqual(["compute 6 times 7 and tell me the answer", "compute 2 plus 2 and tell me the answer"]); // the caller's plan is left alone
+});
+
+test("the run_start line says who asked for the run (source, clientRunId), and carries only what was given", async () => {
+  const stopped = new AbortController();
+  stopped.abort(); // every task ends at once: only the run_start line is under test here
+  const runStart = async (meta?: { source?: string; clientRunId?: string }) => {
+    const lines: LogLine[] = [];
+    await runCommand({
+      runId: "t", command: "x", brainKind: "jev", makeBrain: () => { throw new Error("not reached"); }, helper: {} as Helper,
+      driver: new SimCalc(), log: { write: (l) => { lines.push(l); } }, signal: stopped.signal,
+      plan: [{ app: "Calculator", goal: "compute 6 times 7 and tell me the answer" }], meta,
+    });
+    return lines.find((l) => l.type === "run_start")!;
+  };
+  const oni = await runStart({ source: "api", clientRunId: "toolu_abc" });
+  expect(oni).toMatchObject({ type: "run_start", source: "api", clientRunId: "toolu_abc" });
+  const hotkey = await runStart({ source: "hotkey" });
+  expect(hotkey).toMatchObject({ source: "hotkey" });
+  expect("clientRunId" in hotkey).toBe(false); // an omitted id is left off the line, not written as null
+  const bare = await runStart();
+  expect("source" in bare).toBe(false);
+  expect("clientRunId" in bare).toBe(false);
+  expect(JSON.parse(JSON.stringify(oni))).toMatchObject({ source: "api", clientRunId: "toolu_abc" }); // and it survives the log's JSON
 });
 
 test("app names are matched forgivingly", () => {

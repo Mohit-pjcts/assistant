@@ -245,6 +245,12 @@ export interface RunOpts {
    * long goal. Default true: the planner's clauses for one app are one agent's job.
    */
   merge?: boolean;
+  /**
+   * who asked for this run, written on its run_start line so a later reader of the log (Oni's History panel) can tell
+   * Oni's runs from the user's and match one to the call that made it: `source` ("api" = Oni, "hotkey", "panel") and the
+   * caller's own `clientRunId` (Oni's tool-call id). Omitted fields are left off the line.
+   */
+  meta?: { source?: string; clientRunId?: string };
 }
 
 /** one task per app and place: the same app and the same place (or none) become one goal, "… Then: …" */
@@ -291,7 +297,11 @@ export async function runCommand(o: RunOpts): Promise<{ tasks: Task[]; totals: R
     counts: { decisions: 0, actions: 0, helperCalls: 0, gated: 0, foreground: 0, scripted: 0 },
     decideMs: [], llmCalls: [],
   }));
-  o.log.write({ type: "run_start", runId: o.runId, t: nowIso(), command: o.command, brain: o.brainKind, tasks });
+  const { source, clientRunId } = o.meta ?? {};
+  o.log.write({
+    type: "run_start", runId: o.runId, t: nowIso(), command: o.command, brain: o.brainKind, tasks,
+    ...(source ? { source } : {}), ...(clientRunId ? { clientRunId } : {}),
+  });
   o.onUpdate?.(tasks);
 
   // a task waits for the earlier one on the same app, and for the earlier one with the same agent name (only 9 names:
