@@ -1367,3 +1367,42 @@ export async function fetchClaudeCodeSession(sessionId: string): Promise<ClaudeC
   }
   return response.json() as Promise<ClaudeCodeSessionDetail>;
 }
+
+// Semester calendar (assistant/calendar_store.py): classes, tutorials and
+// deadlines parsed from the vault's timetable / deadlines / tutorials notes
+// on every request, so the notes stay the one source of truth. Loopback-only
+// on the backend (server.py), like /history/trace.
+export type CalendarEventKind = "class" | "tutorial" | "exam" | "deadline";
+
+export interface CalendarEvent {
+  id: string;
+  date: string; // ISO start date
+  end_date: string | null; // inclusive end of a multi-day window
+  title: string;
+  course: string;
+  kind: CalendarEventKind;
+  start_time: string | null; // "HH:MM", HKT
+  end_time: string | null;
+  location: string | null;
+  weight: string | null;
+  detail: string | null; // full item text when `title` is shortened
+  note: string | null; // e.g. "time not stated"
+  tbc: boolean; // a real session whose time/room is not in the vault
+  source: string;
+}
+
+export interface CalendarData {
+  events: CalendarEvent[];
+  undated: { text: string; source: string }[];
+  courses: { code: string; title: string }[];
+  sources: string[];
+  warnings: string[];
+}
+
+export async function fetchCalendar(): Promise<CalendarData> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/calendar`);
+  if (!response.ok) {
+    throw new Error(`/calendar failed (${response.status}): ${await response.text()}`);
+  }
+  return response.json() as Promise<CalendarData>;
+}

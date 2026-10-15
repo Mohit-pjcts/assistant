@@ -12,6 +12,7 @@ import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { CostPanel } from "@/components/cost/CostPanel";
 import { CostSummaryCard } from "@/components/cost/CostSummaryCard";
 import { KanbanBoard } from "@/components/board/KanbanBoard";
+import { CalendarPanel } from "@/components/calendar/CalendarPanel";
 import { AutomationsPanel } from "@/components/automations/AutomationsPanel";
 import { WorkflowsPanel } from "@/components/workflows/WorkflowsPanel";
 import { ClaudeCodeSessionsPanel } from "@/components/claude-code/ClaudeCodeSessionsPanel";
@@ -180,6 +181,9 @@ function App() {
           </TabsContent>
           <TabsContent value="board" className="min-h-0 h-full">
             <KanbanBoard />
+          </TabsContent>
+          <TabsContent value="calendar" className="min-h-0">
+            <CalendarPanel />
           </TabsContent>
           <TabsContent value="automations" className="min-h-0">
             <AutomationsPanel />

@@ -1,5 +1,6 @@
 import {
   Brain,
+  CalendarDays,
   DollarSign,
   History,
   Kanban,
@@ -23,6 +24,7 @@ const NAV_ITEMS: NavItem[] = [
   { value: "memory", label: "Memory", icon: Brain },
   { value: "cost", label: "Cost", icon: DollarSign },
   { value: "board", label: "Board", icon: Kanban },
+  { value: "calendar", label: "Calendar", icon: CalendarDays },
   { value: "automations", label: "Automations", icon: Zap },
   { value: "workflows", label: "Workflows", icon: Workflow },
   { value: "claude-code", label: "Claude Code", icon: Terminal },

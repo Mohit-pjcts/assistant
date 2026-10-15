@@ -85,6 +85,7 @@ from assistant import (  # noqa: E402
     activity_log,
     automation_store,
     board_store,
+    calendar_store,
     claude_code_live,
     claude_code_sessions,
     conversation_search,
@@ -2029,6 +2030,23 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
 
     await automation_store.log_run(automation_id, outcome="fired", detail=content)
     return {"outcome": "fired", "detail": content}
+
+
+# --- Semester calendar (vault timetable + deadlines + tutorials) ------------
+
+
+@app.get("/calendar", dependencies=[Depends(require_local_client)])
+async def get_calendar() -> dict[str, Any]:
+    """Classes, tutorials and deadlines for the dashboard's Calendar view,
+    parsed fresh from the vault notes on every call (calendar_store's own
+    docstring: the notes stay the single source of truth, so fixing a date
+    there fixes it here with no sync step). Loopback-only like /history/trace:
+    the backend is unauthenticated and bound to 0.0.0.0 for the iPhone
+    channel, and a room-by-room weekly schedule says where the user will be
+    and when. The iPhone never needs it."""
+    # Plain file reads of a few small notes, but still blocking I/O.
+    data = await asyncio.to_thread(calendar_store.load_calendar)
+    return data.to_json()
 
 
 # --- Workflow runs (PLAN.md Phase 25) --------------------------------------

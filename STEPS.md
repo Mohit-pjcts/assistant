@@ -13303,3 +13303,21 @@ Three tabs. **Conversation**: each turn is the user's message then its events in
 - Rows for turns compaction later removed are stored but not shown (no message left to attach them to). Nothing is recorded for the HTTP research path (separate process) or the automation-fire path (no thread).
 - `compaction.py` still builds its summarizer transcript with `repr()` of list contents, so summarized thinking text now reaches that Haiku prompt (left alone on purpose, a separate cleanup).
 - `~/Library/Logs/PersonalAssistant/oni-dev.log` is 44.7 GB (a Sep 24 dev-server log); the agent runs' flood replaced the history in `oni-backend.log` and its rotations. Both are for the user to delete.
+
+## 160. Calendar view: classes, tutorials and deadlines from the vault (2026-10-16)
+
+**Ask (user, verbatim):** "i want you to make a calendar space in oni. fill it with all my classes/ttrs and deadlines. btw comp2119 quiz date is oct 27 update it everywhere."
+
+**Reading of "space":** Oni has no feature called a space; its destinations are the dashboard's tabs. Built as a new **Calendar** tab (nav rail, after Board). Not asked which was meant; the cheaper-to-undo reading was taken.
+
+**Decision: a view over the vault, not a second copy.** `assistant/calendar_store.py` parses three vault notes on every request: `Semester N — Class Timetable.md` (weekly rows expanded to one event per session, honouring first/last date and excluded weeks), `Semester N — Deadlines.md` (the chronological table, plus its "no date" bullets as the undated list), and a new user-edited `Semester 3 — Tutorials.md`. Why: the quiz date had to be fixed "everywhere", and every duplicated copy is one more place to fix. Now correcting the note corrects the calendar. Parsing is by column header, not position, and inconsistencies (a weekday that doesn't match its date, a Sessions count that disagrees with the expansion) come back as `warnings` shown in the panel rather than being dropped.
+
+**Backend:** `GET /calendar` (server.py), loopback-only via `require_local_client` like `/history/trace`: the backend is unauthenticated and bound to 0.0.0.0 for the iPhone, and a room-by-room schedule says where the user will be. The iPhone never needs it.
+
+**Dashboard:** `components/calendar/CalendarPanel.tsx` + `lib/calendar.ts` (pure date/grid logic). Month grid (Monday first), course colours, shape per kind (bar = session, diamond = deadline, ringed dot = exam; dashed = slot not known), a day agenda, "Coming up", "No date yet", and kind/course filters. Dates stay ISO strings and are built in local time (`new Date("2026-10-27")` is UTC and lands on the wrong day west of UTC); labels use fixed English names because ICU output differs between WebViews.
+
+**Vault edits (outside the repo):** COMP2119 quiz = Tue 27 Oct 2026, 13:00-14:50 (the Tuesday lecture slot, CYPP2) in `COMP2119 — Deadlines and Assessment` (assessment table + quiz section), `COMP2119 — Overview`, and `Semester 3 — Deadlines` (new row, and removed from "no date"). Checked and unchanged: Oni's board (no quiz task exists; the WA/PA tasks are there), long-term memory (no quiz fact), Oni's workspace and code (no COMP2119 mention). Added `Semester 3 — Tutorials.md`: COMP1117 STA slot (Tue 12:00-12:50; first date inferred from Tutorial 2 being taught Tue 22 Sep) and MATH2014 Tutorials 1-10 as TBC (week known, day/slot not).
+
+**Known gaps (not in the vault, not invented):** the user's AILT9009 group, CCCH9053 tutorial slots, COMP2119 tutorial slot (A/B/C), MATH2014 tutorial day/time, final-exam dates, PA2. They are listed under "No date yet" and in the Tutorials note's "Not yet placed" section.
+
+**Verification:** `tests/test_calendar_store.py` 23/23 (temp vault; includes the quiz on 27 Oct, the 403 for non-local callers, and that edits to a note show on the next call); dashboard `vitest` 449/449 (22 new), `tsc` clean, `prettier` clean, `npm run build` clean. Real vault parsed to 224 events (173 classes, 20 tutorials, 26 deadlines, 5 exams) with zero warnings, every row's Sessions count matching. **Not done:** a visual check of the rendered tab (the Chrome extension was not connected).
