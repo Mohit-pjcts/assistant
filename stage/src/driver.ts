@@ -109,7 +109,7 @@ export class CliDriver implements Driver {
   /** what each element token pointed at when it was read, and in which window: lets the fast lane find the same element */
   private seen = new Map<string, { pid: number; role: string; label?: string; frame?: Rect; windowId: number; winFrame?: Rect; winTitle?: string }>();
   onAction?: (n: ActionNote) => void;
-  /** Cua's own gliding cursors; off when the overlay draws the agents' cursors (one cursor per agent, not two) */
+  /** Cua's own gliding cursors (also played for fast-lane actions, see glide); off only when the overlay draws the agents' cursors instead (one cursor per agent, not two) */
   cuaCursors = true;
 
   /** a session that ended (5 min idle, or end_session) refuses calls until start_session: revive it, retry once */
@@ -179,6 +179,19 @@ export class CliDriver implements Driver {
   }
 
   /**
+   * Cua's own agent cursor (the look the first, all-Cua prototypes had) glides to the control before a fast-lane
+   * action, so it looks like a Cua one: the fast lane has no cursor of its own. `move_cursor` in its default
+   * window scope moves only the visual overlay, never the real pointer (checked: the hardware pointer did not move).
+   * It waits out the ~150 ms glide (set in ensureSession), which is still ~3x faster than a Cua click. A failure
+   * here only costs the visual, never the action. STAGE_CURSORS=overlay turns this off (server.ts).
+   */
+  private async glide(agent: AgentName, f: Rect): Promise<void> {
+    try {
+      await this.call(agent, "move_cursor", { session: agent, x: f.x + f.w / 2, y: f.y + f.h / 2 }, 3000);
+    } catch { /* the visual only */ }
+  }
+
+  /**
    * try the fast lane; undefined = do it through Cua (the fast lane is off, or did nothing because it couldn't do it
    * safely). An uncertain result comes back as is (not ok, effect "uncertain"): it must not be repeated through Cua.
    */
@@ -187,6 +200,7 @@ export class CliDriver implements Driver {
     // an element read from another window than the one this action is for: let Cua resolve the token
     if (!this.fast.on || !el?.frame || el.windowId !== w.windowId || unusableLabel(el.label)) return undefined;
     const t: FastTarget = { pid: el.pid, frame: el.frame, role: el.role, label: el.label, windowId: el.windowId, winFrame: el.winFrame, winTitle: el.winTitle };
+    if (this.cuaCursors) await this.glide(agent, el.frame);
     const r = kind === "press" ? await this.fast.press(t) : await this.fast.type(t, text ?? "");
     const cli = `fastlane ${kind} ${el.role} "${el.label ?? ""}"${kind === "type" ? ` "${(text ?? "").slice(0, 40)}"` : ""}`;
     const result = fastToAction(r, cli);

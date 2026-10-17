@@ -29,9 +29,11 @@ import Speech
 
 // MARK: - look
 
-let MINT = NSColor(srgbRed: 0.20, green: 0.83, blue: 0.60, alpha: 1)
-let CORAL = NSColor(srgbRed: 1.00, green: 0.42, blue: 0.42, alpha: 1)
-let INK = NSColor(srgbRed: 0.06, green: 0.09, blue: 0.16, alpha: 0.94)
+// Oni's palette (dashboard/src/index.css, dark values): accent violet #9b87f5, rust #e0788a, moss #7ec9a6, void #161619.
+let VIOLET = NSColor(srgbRed: 0.608, green: 0.529, blue: 0.961, alpha: 1)
+let RUST = NSColor(srgbRed: 0.878, green: 0.471, blue: 0.541, alpha: 1)
+let MOSS = NSColor(srgbRed: 0.494, green: 0.788, blue: 0.651, alpha: 1)
+let INK = NSColor(srgbRed: 0.086, green: 0.086, blue: 0.098, alpha: 0.94)
 let OFFSET = CGPoint(x: 35, y: 8) // the buddy sits this far right of / below the cursor
 /** recording mode (--record): screen recordings show the cursors, widgets and drawings (normally this app's windows
  *  are never captured). Explain mode's own screenshot still sees a clean screen: the overlay hides for that instant */
@@ -99,7 +101,7 @@ final class DrawView: NSView {
     ctx.restoreGState()
   }
 
-  private func glow(_ c: NSColor = MINT) {
+  private func glow(_ c: NSColor = VIOLET) {
     let s = NSShadow()
     s.shadowColor = c.withAlphaComponent(0.85)
     s.shadowBlurRadius = 10
@@ -110,7 +112,7 @@ final class DrawView: NSView {
   private func stroke(_ path: NSBezierPath, length: CGFloat, _ p: CGFloat, width: CGFloat = 3.5) {
     NSGraphicsContext.saveGraphicsState()
     glow()
-    MINT.setStroke()
+    VIOLET.setStroke()
     path.lineWidth = width
     path.lineCapStyle = .round
     path.lineJoinStyle = .round
@@ -134,7 +136,7 @@ final class DrawView: NSView {
     let bubble = NSBezierPath(roundedRect: r, xRadius: 8, yRadius: 8)
     INK.withAlphaComponent(0.94 * alpha).setFill()
     bubble.fill()
-    MINT.withAlphaComponent(alpha).setStroke()
+    VIOLET.withAlphaComponent(alpha).setStroke()
     bubble.lineWidth = 1.5
     bubble.stroke()
     s.draw(with: r.insetBy(dx: 9, dy: 5), options: [.usesLineFragmentOrigin])
@@ -182,7 +184,7 @@ final class DrawView: NSView {
       if p > 0 {
         NSGraphicsContext.saveGraphicsState()
         glow()
-        MINT.setFill()
+        VIOLET.setFill()
         NSBezierPath(ovalIn: CGRect(x: s.rect.minX - 5, y: s.rect.minY - 5, width: 10, height: 10)).fill()
         NSGraphicsContext.restoreGraphicsState()
       }
@@ -398,7 +400,7 @@ final class Pulses {
 
 struct AgentCard {
   var id = "", name = "", app = "", goal = "", status = "queued", now = "", answer = "", reason = ""
-  var colour = MINT
+  var colour = VIOLET
   var seconds = 0.0
   var windowId: UInt32 = 0
   var startedAt: CFTimeInterval? // when this overlay first saw it running (the clock ticks between server updates)
@@ -487,7 +489,7 @@ final class DockView: NSView {
     let t = CACurrentMediaTime()
     for (i, c) in cards.enumerated() {
       let r = rect(i)
-      let accent = c.status == "failed" ? CORAL : c.colour
+      let accent = c.status == "failed" ? RUST : c.colour
       let card = NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1), xRadius: 12, yRadius: 12)
       INK.setFill(); card.fill()
       accent.withAlphaComponent(0.85).setStroke(); card.lineWidth = 1.2; card.stroke()
@@ -515,7 +517,7 @@ final class DockView: NSView {
       case "failed": badge = "✕  stopped"
       default: badge = "waiting"
       }
-      let b = NSAttributedString(string: badge, attributes: [.font: mono, .foregroundColor: c.status == "done" ? MINT : c.status == "failed" ? CORAL : dim])
+      let b = NSAttributedString(string: badge, attributes: [.font: mono, .foregroundColor: c.status == "done" ? MOSS : c.status == "failed" ? RUST : dim])
       b.draw(at: CGPoint(x: r.maxX - 14 - b.size().width, y: r.minY + 10))
 
       let line = { (text: String, y: CGFloat, colour: NSColor) in
@@ -525,7 +527,7 @@ final class DockView: NSView {
       }
       line(c.goal, 30, dim)
       let now = c.status == "done" ? (c.answer.isEmpty ? "Done" : "→ \(c.answer)") : c.status == "failed" ? (c.reason.isEmpty ? "Couldn't finish" : c.reason) : (c.now.isEmpty ? (running ? "working" + String(repeating: ".", count: Int(t * 3) % 4) : "waiting for its turn") : c.now)
-      line(now, 47, c.status == "done" ? white : c.status == "failed" ? CORAL : white.withAlphaComponent(0.85))
+      line(now, 47, c.status == "done" ? white : c.status == "failed" ? RUST : white.withAlphaComponent(0.85))
 
       // the live preview of the agent's window
       guard thumbH > 0 else { continue }
@@ -700,7 +702,7 @@ final class BuddyView: NSView {
     dirty.fill(using: .copy)
     let t = CACurrentMediaTime()
     let pulse = state == "listening" ? 1 + 0.25 * sin(t * 8) : 1
-    let colour = state == "listening" ? CORAL : state == "error" ? CORAL : MINT
+    let colour = state == "listening" ? RUST : state == "error" ? RUST : VIOLET
     let d = 12 * pulse
     let dot = CGRect(x: 14 - d / 2, y: 14 - d / 2, width: d, height: d)
     NSGraphicsContext.saveGraphicsState()
@@ -942,7 +944,7 @@ final class TypeBox: NSObject, NSTextFieldDelegate {
     bg.wantsLayer = true
     bg.layer?.backgroundColor = INK.cgColor
     bg.layer?.cornerRadius = 12
-    bg.layer?.borderColor = MINT.cgColor
+    bg.layer?.borderColor = VIOLET.cgColor
     bg.layer?.borderWidth = 1.5
     field.frame = CGRect(x: 14, y: 9, width: 352, height: 22)
     field.isBordered = false

@@ -1227,6 +1227,27 @@ See PLAN.md.
   the complete per-item build record and the one confirmed-pre-existing
   test-isolation flake found (not introduced) along the way.
 
+- **History panel rebuilt: every tool call, delegation and Stage run
+  (2026-10-07, STEPS.md 158) — not a numbered phase, built at the user's
+  request ("i want to be able to see every tool call every agent
+  delegation, even the history from stage").** New tracing layer
+  (`tool_trace.py`/`trace_store.py`/`history_trace.py`, see the load-bearing
+  rule above), `GET /history/trace` + `GET /stage/runs[/{id}]` +
+  `GET /stage/onstage` (loopback-only), Stage's `run_start` now carries
+  `source`/`clientRunId`, and a dashboard History panel with Conversation,
+  Stage and Onstage tabs (A2UI cards render inline again). Also fixed in the
+  same change: thinking text was always blank (now summarized), specialist
+  results reached the supervisor as a Python repr of a content-block list
+  (150 of 193 real delegation results), and a log-filter recursion that had
+  wedged the live backend. Verified offline (308 History-related Python
+  tests, 157 Stage, 434 dashboard) and live on a worktree backend with a real
+  turn; shipped to main (`8fc0763`, not pushed) with the user's uncommitted
+  work preserved. **Open:** the rebuilt `Oni.app` is not installed — the
+  installed app is the previous build because a freshly ad-hoc-signed bundle
+  makes macOS re-ask for Documents-folder access and the backend blocks on
+  the prompt until it is answered; install it from
+  `dashboard/src-tauri/target/release/bundle/macos/Oni.app` and click Allow.
+
 This block is the only part of this file that changes routinely; everything
 below is durable.
 
@@ -1244,7 +1265,8 @@ below is durable.
 - **Checkpointer lifecycle:** main.py owns the `with get_checkpointer()` block
   for the process lifetime and passes it into `build_agent()`. agent.py never
   creates its own.
-- **Extended thinking: enabled (`thinking={"type": "adaptive"}`) on all 5
+- **Extended thinking: enabled (`thinking=THINKING_CONFIG` — adaptive with
+  `display: "summarized"` since STEPS.md 158) on all 5
   agent models, ALWAYS paired with `ThinkingBlockRepairMiddleware`
   (superseded Phase 10, 2026-07-15, STEPS.md 74 — reverses the Phase 1/
   Studio-era `thinking={"type": "disabled"}` fix from STEPS.md 28):
@@ -1332,6 +1354,34 @@ below is durable.
   never again be surprised by a process that had been silently running
   in the background. See STEPS.md 122 for the full incident, the fix,
   and the new cross-channel visibility feature this prompted.
+- **Tool-call tracing: `ToolTraceMiddleware(<agent name>)` in every agent
+  model's middleware list (added 2026-10-07, STEPS.md 158)** — the write side
+  of the History panel. A specialist's graph is a fresh, checkpointer-less
+  `ainvoke()` whose message list `_invoke_agent_graph` throws away, so this
+  middleware (`assistant/tool_trace.py`, rows in `traces.sqlite` via
+  `trace_store.py`) is the ONLY place its inner tool calls and model turns
+  are ever recorded. `awrap_tool_call` records every call (full arguments,
+  result, status incl. 'interrupted' for a confirmation gate, timing, any
+  `additional_kwargs` the result carried); `awrap_model_call` records a
+  specialist's own turns (text, thinking, model, token usage) only inside a
+  delegation. `supervisor._run_delegation` sets the `TRACE_CONTEXT` contextvar
+  to the delegation's tool-call id so inner rows link to their parent.
+  **Any new `create_agent(...)` in supervisor.py/sub_agents.py MUST include
+  it**, same standing as the thinking-repair/prompt-caching/circuit-breaker
+  rules — omitting it doesn't break the agent, it silently makes its calls
+  invisible in History. Recording is best-effort and never changes what a
+  call does. `GET /history/trace` and every `/stage/*` endpoint are
+  **loopback-only** (`assistant/local_only.py`: client address AND Host
+  header, 403 otherwise) because they expose complete tool I/O and Stage's
+  screen contents while the backend binds 0.0.0.0 with no auth — keep any new
+  endpoint that exposes the same kind of data behind `require_local_client`.
+  Related, same change: every thinking-enabled model uses the shared
+  `thinking_repair.THINKING_CONFIG` (`display: "summarized"` — without it
+  claude-sonnet-5 returns signature-only, empty thinking), and
+  `logging_config._TraceIdFilter` reads the OpenTelemetry span directly,
+  never Langfuse's `get_current_trace_id()` (which logs a warning outside a
+  span, re-entering the filter and recursing until the backend wedged — a
+  real 5 MB/s log flood on the live app).
 - **Active-thread pointer, not a fixed `THREAD_ID` constant (superseded
   Phase 15, 2026-07-15):** every client previously shared one hardcoded
   `THREAD_ID = "cli-default-thread"`, which was fine until concurrent real

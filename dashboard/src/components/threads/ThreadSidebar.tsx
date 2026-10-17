@@ -61,6 +61,10 @@ interface ThreadSidebarProps {
   // the user resizes the sidebar; the Tailwind w-[216px] below stays as
   // the default for anyone who hasn't dragged it yet.
   width?: number;
+  // App.tsx's live-wallpaper hero (2026-08-08 follow-up) — see NavRail's
+  // own identical prop docstring for the full reasoning; same glass
+  // recipe, same trigger condition.
+  transparent?: boolean;
 }
 
 // A persistent, Claude-style sidebar — visible from every tab (Chat/
@@ -87,7 +91,11 @@ interface ThreadSidebarProps {
 // against the SAME active pointer this sidebar moves, so a remount is all
 // it takes for them to pick up the new thread. No thread_id prop drilling
 // needed.
-export function ThreadSidebar({ onActiveThreadChange, width }: ThreadSidebarProps) {
+export function ThreadSidebar({
+  onActiveThreadChange,
+  width,
+  transparent = false,
+}: ThreadSidebarProps) {
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -587,7 +595,12 @@ export function ThreadSidebar({ onActiveThreadChange, width }: ThreadSidebarProp
           now lives in NavRail.tsx, a separate sibling column — this used
           to be one 256px column combining both). */}
       <aside
-        className="flex h-screen w-[216px] shrink-0 flex-col gap-3 border-r border-sidebar-border bg-sidebar p-3 text-sidebar-foreground"
+        className={cn(
+          "flex h-screen w-[216px] shrink-0 flex-col gap-3 border-r p-3",
+          transparent
+            ? "border-sidebar-border/40 bg-card/60 text-sidebar-foreground backdrop-blur-md"
+            : "border-sidebar-border bg-sidebar text-sidebar-foreground",
+        )}
         style={width ? { width } : undefined}
       >
         <Button

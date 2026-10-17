@@ -3453,3 +3453,236 @@ not a silent lowering of it. If a real rendering bug surfaces later
 (the DESIGN.md §12 classes of bug this phase's own build notes already
 guarded against, or something new), it's a bug against already-closed
 Phase 29 work, not an open item of this phase.
+
+
+## Phase 30 — Oni for iPhone: native SwiftUI Vault app with on-device Oni — PLANNED, not built (scoped 2026-10-18 via `/grill-with-docs`, STEPS.md 164)
+
+**Objective:** a proper native iPhone app (not a browser page, not the PWA)
+that costs nothing to build and install: SwiftUI, installed from this Mac
+with Xcode and the user's free Apple ID. Its one required feature is the
+**Vault**: a **Replica** of the Notes on the phone that works with the Mac
+off, plus an on-device Oni that reads/writes it by calling the Claude API
+directly. Everything else Oni does stays on the Mac (Phase 31). See
+`CONTEXT.md` (Replica, Conflict copy, Trash) and `docs/adr/0004-*` (the
+security posture) and `0001`-`0003` (the write rules the phone inherits).
+
+**Real facts found during scoping, not assumed:**
+- Full Xcode is NOT installed (only the Command Line Tools;
+  `xcodebuild`/the iphoneos SDK are unavailable) — a hard, user-side
+  prerequisite for anything below that touches the iOS app.
+- The Vault is 449 Notes / 4.8 MB (People 162, Semester 1-3 264, Personal
+  Archive 12, Diary 1, loose root notes), plus `.obsidian/` JSON and
+  `.DS_Store` that must never sync. Small enough to hold in full.
+- `server.py` has no authentication and binds `0.0.0.0`; no `/vault/*`
+  endpoint exists. `local_only.py` already anticipates `tailscale serve`
+  (a proxied request arrives from 127.0.0.1 with a foreign Host header and
+  is rejected by the loopback-only endpoints), so serving over HTTPS does
+  not weaken them.
+- Tailscale is installed on the Mac (`100.72.4.97`); the iPhone
+  (`iphone173`) was **offline, last seen 13 days ago**. No `tailscale serve`
+  config exists.
+- The vault-behavior prompt ("decide yourself when to save", "only
+  update/delete what you created") is one paragraph inside the supervisor
+  prompt (`supervisor.py`), which Langfuse overrides in production and which
+  is mostly routing for six specialists the phone does not have — so the
+  phone cannot reuse it.
+- ADR 0003 removed the per-turn write cap, so the phone has none either (an
+  early draft of this plan wrongly said it kept one; corrected in scoping).
+
+**Decisions locked (each the user's own call; full reasoning in STEPS.md 164):**
+1. **Native SwiftUI, free signing.** Re-run from Xcode every 7 days (app
+   data survives a reinstall over the same bundle ID; deleting the app or
+   changing the bundle ID wipes the sandbox). No push, iCloud, TestFlight.
+2. **Sync model.** The Mac's Vault is the source of truth; the phone holds
+   a Replica. Markdown Notes only, never `.obsidian/`. Per-top-level-folder
+   switches in the app (default all on); switching one off removes it from
+   the phone and from on-device Oni.
+3. **Conflict:** keep both. If a note changed on the Mac since the phone's
+   last sync, the phone's write is rejected (409) and the phone's version
+   is uploaded to `_conflicts/` in the Vault (a Conflict copy), surfaced in
+   the app until the user resolves it. Never silently overwritten.
+4. **Delete:** syncs both ways, soft. A phone delete moves the Note to
+   `_trash/` in the Vault; an edit on the other side since the last sync
+   beats a delete (the Note is restored). The Mac's own `delete_vault_note`
+   also moves to `_trash/` instead of hard-deleting (**a behavior change to
+   ADR 0001's tool, made so a Mac-side delete is as recoverable as a phone
+   one**). Nothing leaves `_trash/` except a manual restore/empty.
+5. **Oni ignores `_conflicts/` and `_trash/`** — `search_vault`, the
+   wikilink matcher, `_iter_notes`, `vault_search.py`, and the
+   update/delete tools all skip them.
+6. **Auth:** a bearer token on `/vault/*` only; existing endpoints
+   unchanged (ADR 0004). Generated on the Mac into a gitignored file,
+   pasted into the app once, kept in the iPhone Keychain.
+7. **Transport:** HTTPS via `tailscale serve --bg 8000` (enable HTTPS in
+   the Tailscale admin console first). No ATS exception in the app.
+8. **On-device Oni:** direct Claude API (Swift, streaming), the same five
+   vault tools as `obsidian_tools.py`, under ADRs 0001-0003 unchanged
+   (autonomous, ungated, no cap, `oni: true` guard on update/delete,
+   deletes to Trash). The Mac's Console key, in the Keychain (ADR 0004).
+9. **No app lock** (ADR 0004).
+10. **Sync triggers:** foreground only — app open, pull-to-refresh, ~5 s
+    after a local edit; offline edits queue. No background refresh.
+11. **Search:** keyword over the Replica on the phone, plus the Mac's
+    semantic results through a token-protected `/vault/search` (wrapping
+    `vault_search.py`) when reachable. Offline, on-device Oni is told its
+    results are keyword-only.
+12. **Prompt:** written in Swift and bundled, with a cross-reference comment
+    in both it and `supervisor.py`'s vault paragraph (drift is manual, by
+    choice).
+13. **Scope cut:** Mac-connected chat is Phase 31, not this phase.
+14. **Done bar:** not COMPLETE until the user runs the on-device checklist
+    below; a waiver must be recorded explicitly (Phase 29 precedent).
+
+**Defaults assumed, not explicitly confirmed (change freely):** phone chats
+live on the phone only; no Facts on the phone (it can read the Master
+Profile note); a hand-edited Oni-authored Note keeps `oni: true`; the model
+defaults to Haiku (`claude-haiku-5-5`) with a Sonnet 5.5 toggle and a
+per-chat token/cost counter; the app targets iOS 18+ (the iPhone 16's
+shipping OS — confirm the installed version at Stage 0).
+
+**Stages (each ends with its own tests/verification; do not build ahead):**
+- **Stage 0 — user-side prerequisites.** Install Xcode; `sudo xcode-select
+  -s /Applications/Xcode.app`; open it once to accept the license; sign in
+  with the Apple ID; enable Developer Mode on the iPhone; open Tailscale on
+  the iPhone; enable Tailscale HTTPS + `tailscale serve --bg 8000`; run an
+  empty app on the device to prove the free-signing pipeline. Decide here
+  how the Xcode project is generated (leaning XcodeGen: text `project.yml`
+  committed, `.xcodeproj` gitignored — dev-time tool only).
+- **Stage 1 — backend (needs no Xcode; can start now).** `assistant/
+  vault_sync.py` + `server.py`: `GET /vault/manifest` (relative path,
+  SHA-256, mtime, size; Markdown only; reserved folders and `.obsidian/`
+  excluded), `GET /vault/note`, `PUT /vault/note` (carries the hash the
+  phone last saw; 409 on mismatch; create = no base hash, 409 if it
+  exists), `DELETE /vault/note` (base hash; moves to `_trash/` keeping the
+  relative path; 409 → edit wins), `GET /vault/search`. Constant-time token
+  compare, 401 without it. Path handling follows the project convention
+  (resolve-then-`relative_to`, reject traversal, non-`.md`, oversize).
+  The sync API is the USER acting, not Oni — the `oni: true` guard stays in
+  Oni's tools and is not applied here. Reserved-folder skip in
+  `obsidian_tools.py`/`vault_search.py`; `delete_vault_note` → Trash. Token
+  file gitignored (verify with `git check-ignore`). Tests: pytest with a
+  temp vault only (never the real one); every rejection path (bad token,
+  traversal, stale hash, reserved folder write, `.obsidian`, size); verify
+  other endpoints behave identically through `tailscale serve`.
+- **Stage 2 — the Vault app.** `ios/`: folder tree honoring the folder
+  switches, Markdown rendering with working `[[wikilinks]]` (block
+  rendering is not provided by `AttributedString(markdown:)` — decide
+  between Apple's `swift-markdown` and a small parser at this stage),
+  keyword search, create/edit/delete (to Trash), per-note last-synced hash,
+  offline queue, sync on the Decision-10 triggers, Conflicts screen,
+  first-run pairing (Mac URL + token, Keychain). Swift unit tests for the
+  sync engine against a fake server, including the conflict, delete-vs-edit
+  and queued-offline cases; Simulator run against the real backend using a
+  temp vault.
+- **Stage 3 — on-device Oni.** Messages API client (URLSession streaming
+  SSE), tool-use loop with the five vault tools ported to Swift (including
+  the keyword-overlap wikilink append, the `oni: true` guard on
+  update/delete, title sanitizing, read-size cap), the bundled prompt,
+  `cache_control` on the system prompt/tools (the project's prompt-caching
+  rule applies in spirit — cost is the user's), an identical-tool-failure
+  circuit breaker mirroring `circuit_breaker.py`, a Stop button, a visible
+  in-flight indicator (the user's standing "never a silent background
+  process" ask), the token/cost counter, semantic search via `/vault/search`
+  with the offline keyword-only notice. Tests: the tool layer against a
+  temp Replica; one real-API smoke run, cost stated first.
+- **Stage 4 — verification and docs.** README section, `PHONE_SETUP`-style
+  `IOS_SETUP.md` (Xcode, signing, the 7-day re-run, `tailscale serve`,
+  token, key, rotation after a lost phone), and the on-device checklist.
+
+**Done-when (all required, in this order):** backend tests pass; the app's
+unit tests and a Simulator run against the real backend + a temp vault pass;
+then **the user** confirms on the real iPhone 16: (1) install via Xcode and
+first-run pairing; (2) first sync pulls the Replica, folder switches add and
+remove folders; (3) edit a Note offline, reconnect, see it on the Mac;
+(4) edit the same Note on both sides → a Conflict copy appears in
+`_conflicts/` and the app; (5) delete on the phone → Note in `_trash/`, and
+an edit on the Mac beats a pending phone delete; (6) on-device Oni answers
+from the Replica and writes a linked `oni: true` Note with the Mac off,
+which syncs on reconnect; (7) it refuses to delete/update a non-Oni Note;
+(8) with the Mac reachable, search returns semantic hits; offline, it says
+keyword-only. Only then is a status flip proposed.
+
+**Risks, named up front:** the 7-day expiry; a deleted app or changed
+bundle ID loses unsynced edits (why Conflict copies are uploaded rather
+than kept phone-local); stored injection via web-derived Notes (ADR 0004);
+lost-phone key rotation breaks the Mac until `.env` is updated; free
+accounts are limited in app IDs per week and installed apps, which matters
+if the bundle ID is changed repeatedly during development.
+
+**Explicitly not in this phase:** talking to the Mac's Oni, threads/
+projects, confirmation gates, A2UI, voice, uploads, the Stage/hotkey
+channel, push notifications, iCloud, background sync, on-device embeddings.
+
+
+**Progress log (2026-10-18, STEPS.md 165) — written at the user's request to
+start; this heading's status is unchanged pending the user's approval.**
+- **Stage 1 (backend): built and verified.** `assistant/vault_sync.py` +
+  `tests/test_vault_sync.py` (73 tests; 170 with neighbouring suites), the
+  reserved-folder skips in every vault walker including `calendar_store`, and
+  `delete_vault_note` now moving to `_trash/`. Smoke-tested against a copy of
+  the real Vault (449 notes, 0 failures). The live backend already serves it.
+- **Stage 2, engine only: built and verified.** `ios/OniCore` (Swift package,
+  no UI): `SyncEngine` implements Decisions 2-4 and 10 as a three-way,
+  state-based comparison; 49 Swift tests; `ios/OniCore/Scripts/integration.sh`
+  runs it against the real Python router over a temp copy of the real Vault
+  (450 notes) and passes. The integration run found a real bug (`+` in a note
+  title decoded as a space) that the unit tests could not.
+- **Not started:** Stage 0 (user-side), Stage 2's SwiftUI screens, Stage 3,
+  Stage 4. Nothing is verified on a real iPhone, so the done-when list above
+  is entirely still open.
+
+## Phase 31 — Mac-connected Oni on the iPhone — PLANNED, NOT YET SCOPED (written out 2026-10-18 alongside Phase 30; needs its own `/grill-with-docs` session before any code)
+
+**Objective:** with the Mac reachable, the same iPhone app talks to the real
+Oni — the full supervisor with its specialists (email/calendar, research,
+Mac control, coding, Stage, the board, the Oni calendar) — instead of only
+the on-device vault Oni. Phone-only Oni stays the fallback. **This entry
+records known constraints and the questions a scoping session must answer;
+it deliberately makes no decisions**, because none of the below was grilled.
+
+**What Phase 30 hands it (so this phase starts with plumbing done):** the
+pairing flow, the Keychain-held token, the HTTPS-over-`tailscale serve`
+transport, the reachability detection, the sync engine, and an SSE
+streaming client.
+
+**Surface that would need a native counterpart (from the dashboard, which
+is the reference implementation):**
+- `/chat` and `/resume` SSE streams (including the non-terminal `a2ui`,
+  `agent_activity` and stop-mid-run frames), `/chat/stop`.
+- Threads and Projects (`/threads`, `/projects`, the active-thread pointer).
+- Confirmation gates: `InterruptGate.tsx`'s verbatim-payload contract is
+  security-critical (every action's real content shown as-is; free-text
+  gates are never voice-approvable; calendar delete is). A native version
+  must carry the same guarantee and ideally the same injection-shaped
+  tests.
+- A2UI: 18 Basic Catalog component types, `dataModel` binding, `/a2ui/
+  action` submissions (a plain, non-synthetic user turn).
+- `/uploads` (image allowlist, server-side downsampling), `/voice/
+  transcribe`, `ActiveTurnBanner`'s in-flight visibility.
+
+**Questions the scoping session must resolve (none decided yet):**
+1. **Auth for the rest of the API.** ADR 0004 limited the bearer token to
+   `/vault/*` and named this phase as the revisit point. Exposing `/chat`,
+   history and the board to an app means deciding whether to extend the
+   token to all non-loopback requests (and what that does to the PWA and
+   the Shortcuts, which send none).
+2. **Gate fidelity.** Which gates render natively at launch, and does an
+   unrecognized gate fail closed (declined, like the hotkey channel's
+   `hold_all_gates`) or fall back to a generic verbatim view?
+3. **A2UI scope.** Full catalog, a subset, or text-only fallback with a
+   "open on Mac" hint.
+4. **Threads.** Phase 30's phone-local chats vs the Mac's threads: merge,
+   keep separate, or one-way. Which Project do app-originated threads land
+   in?
+5. **Channel identity.** Is the app the existing "phone" channel (so
+   `phone_agent`/`_PHONE_CHANNEL_MARKER` apply and "open Spotify" means the
+   phone), a new channel, or the dashboard channel? A native app can open
+   URLs but not arbitrary apps by name, which changes what `phone_agent`
+   actions are even possible from it.
+6. **Mode UX.** Automatic switch on reachability vs an explicit toggle; what
+   a half-finished Mac turn does when the Mac drops mid-stream.
+7. **Free-signing ceiling.** No push, so a long Mac-side turn only reports
+   when the app is open; no Live Activities. Acceptable, or does this phase
+   argue for the paid program after all?
+8. **Done bar** — the same on-device verification requirement as Phase 30,
+   unless waived explicitly.

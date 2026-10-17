@@ -66,6 +66,9 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   run_shortcut: "The assistant wants to run this Shortcut:",
   calendar_create_event: "The assistant wants to create this Apple Calendar event:",
   calendar_update_event: "The assistant wants to update this Apple Calendar event:",
+  // calendar_delete_event is deliberately absent — ungated at the user's
+  // own explicit request, 2026-08-25 (mac_tools.py's own docstring), so
+  // it never gates and this entry would be dead/misleading code.
   send_imessage: "The assistant wants to send this iMessage:",
   write_disk_file: "The assistant wants to write this file OUTSIDE the workspace:",
   delete_disk_file: "The assistant wants to DELETE this file OUTSIDE the workspace:",

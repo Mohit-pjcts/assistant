@@ -455,6 +455,32 @@ export function wikipediaTopic(g: string): string {
   );
 }
 
+/**
+ * Where a site's own section lives, when the goal is about it: "go to instagram.com ... open the direct messages
+ * inbox ... send a message" belongs on the inbox, not on the home feed (live, 6 Oct: Oni's Instagram DM goal opened
+ * the home page and the agent wandered).
+ */
+const DEEP_LINKS: [RegExp, RegExp, string][] = [
+  [/(?:^|\.)instagram\.com$/i, /\b(dms?|direct\s+messages?|inbox|messages?|chats?)\b/i, "https://www.instagram.com/direct/inbox/"],
+];
+export function deepLink(url: string, goal: string): string {
+  let host = "";
+  try { host = new URL(url).hostname; } catch { return url; }
+  // an address that already goes somewhere specific is left alone
+  try { if (new URL(url).pathname.replace(/\/+$/, "")) return url; } catch { /* keep */ }
+  for (const [h, about, to] of DEEP_LINKS) if (h.test(host) && about.test(goal)) return to;
+  return url;
+}
+
+/** a goal that starts as a search ("search for", "look up"), as opposed to one that merely mentions a search field */
+const LEADING_SEARCH = /^(?:please\s+)?(?:look up|search(?: for)?)\b/i;
+/**
+ * A goal that is about USING a page (click, type, pick, send a message, open a chat): its words are instructions for the
+ * agent, never a question for a search engine. (Live, 6 Oct: "... click on the search field ... type Rishabh ... send
+ * a message that says: hi" and "... and tell me what the page shows" were each typed into Google whole.)
+ */
+const PAGE_ACTION = /\b(click|tap|tick|choose|select|press|fill in)\b|\b(send|reply)\b.*\b(message|dm|text)\b|\b(chat|conversation|inbox)\b/i;
+
 /** a URL that already encodes the search: no search box, no pop-up suggestions */
 export function webPlan(goal: string): PlanStep[] | null {
   const sites = openSitesPlan(goal);
@@ -466,8 +492,16 @@ export function webPlan(goal: string): PlanStep[] | null {
   // a site the goal names is opened even when the goal asks a question about it ("go to news.ycombinator.com and tell
   // me the top story"): the answer is read off THAT page. Live, the question sent the whole sentence to Google instead,
   // and the "answer" came from a search engine's AI summary. (A goal that searches the site is a search, below)
-  if (site && !/\b(search|look up)\b/i.test(g)) return [{ action: "open_url", text: site[1]!.replace(/[.,;:!?]+$/, "").startsWith("http") ? site[1]!.replace(/[.,;:!?]+$/, "") : `https://${site[1]!.replace(/[.,;:!?]+$/, "")}` }];
+  if (site && !/\b(search|look up)\b/i.test(g)) {
+    const bare = site[1]!.replace(/[.,;:!?]+$/, "");
+    return [{ action: "open_url", text: deepLink(/^https?:\/\//i.test(bare) ? bare : `https://${bare}`, g) }];
+  }
+  // an address written out anywhere in the goal ("go to the URL https://…", "type https://… and press Enter") is where the
+  // task starts; what the goal does on that page is the agent's job. (Not for a goal that begins as a search.)
+  const explicit = g.match(/\bhttps?:\/\/[^\s,;)"'<>]+/i)?.[0]?.replace(/[.,;:!?]+$/, "");
+  if (explicit && !LEADING_SEARCH.test(g)) return [{ action: "open_url", text: deepLink(explicit, g) }];
   if (/\byoutube\b/i.test(g) && !/\bsearch\b/i.test(g)) return [{ action: "open_url", text: "https://www.youtube.com" }];
+  if (!LEADING_SEARCH.test(g) && PAGE_ACTION.test(g)) return null;
   if (!asksQuestion(g) && !/\b(search|find)\b/i.test(g)) return null;
   if (/\bwikipedia\b/i.test(g)) {
     const what = wikipediaTopic(g);

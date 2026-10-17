@@ -60,7 +60,7 @@ KEEP_TOKENS = 15_000
 # Sonnet-level reasoning isn't needed." Summarizing conversation that already
 # happened is exactly that case; the summary quality bar is much lower than
 # live agent reasoning.
-SUMMARIZER_MODEL_NAME = "claude-haiku-4-5"
+SUMMARIZER_MODEL_NAME = "claude-haiku-5-5"
 
 _SUMMARY_MARKER_KEY = "phase7_compaction_summary"
 _RECALLED_FACTS_MARKER_KEY = "phase7_recalled_facts"

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
-import { Mic, Paperclip, Send, Square, X } from "lucide-react";
+import { ArrowUp, Mic, Paperclip, Square, X } from "lucide-react";
 import {
   SparklesIcon,
   PencilSquareIcon,
@@ -9,8 +9,10 @@ import {
 } from "@heroicons/react/24/outline";
 import { cn } from "@/lib/utils";
 import { InstrumentCard } from "@/components/ui/instrument-card";
+import { OniGreetingCloud } from "./OniGreetingCloud";
 import { InterruptGate } from "./InterruptGate";
 import { A2UIRenderer } from "./A2UIRenderer";
+import { Markdown } from "./Markdown";
 import {
   fetchHistory,
   fetchThreads,
@@ -204,12 +206,21 @@ interface ChatPanelProps {
   // "Hi, {greetingName}". Not persisted anywhere server-side; a plain
   // display-only prop, same as it was on the old, now-folded-in HomePage.
   greetingName?: string;
+  // 2026-08-08 follow-up (live-wallpaper hero, App.tsx): fires whenever
+  // THIS panel's own `isNewChat` changes. App.tsx is what actually needs
+  // to know — the full-viewport video and the rest of the app shell's
+  // glass treatment live there, not in this component, since a
+  // panel-local background can't span wider than this panel's own
+  // column. Read-only from here, mirroring `onActiveThreadChange`'s own
+  // write-only pattern elsewhere in this codebase.
+  onLandingViewChange?: (active: boolean) => void;
 }
 
 export function ChatPanel({
   onActivity = () => {},
   onStreamEnded = () => {},
   greetingName = "Mohit",
+  onLandingViewChange = () => {},
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
@@ -641,6 +652,21 @@ export function ChatPanel({
     pendingA2ui.length === 0;
   const suggestions = category ? CATEGORY_SUGGESTIONS[category] : null;
 
+  // Reports `isNewChat` up to App.tsx (see `onLandingViewChange`'s own
+  // docstring) — and reports `false` on unmount, so switching away from
+  // Chat entirely (Base UI unmounts inactive tab panels) can't leave
+  // App.tsx's own hero flag stuck true. Harmless no-op for any caller
+  // that doesn't pass the prop (ChatPanel.test.tsx doesn't).
+  useEffect(() => {
+    onLandingViewChange(isNewChat);
+    return () => onLandingViewChange(false);
+    // Deliberately keyed on `isNewChat` alone, not `onLandingViewChange` —
+    // the real caller (App.tsx) passes its own stable `setState` function,
+    // and re-running this effect on every render (as a fresh inline
+    // default `() => {}` would otherwise cause) is pure waste for no
+    // behavioral difference.
+  }, [isNewChat]);
+
   // PLAN.md: the user's own direct follow-up — the composer itself
   // stays centered (with the greeting/suggestions) on a new chat, and
   // only relocates to the bottom bar once real chat mode starts. Built
@@ -651,24 +677,12 @@ export function ChatPanel({
   // and the remount always happens at the exact moment `handleSend` has
   // just cleared it anyway.
   const composerBar = (
-    <div className="flex items-end gap-2">
-      <label
-        aria-label="Attach files"
-        className={cn(
-          "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:text-foreground",
-          (busy || pendingInterrupt !== null) && "pointer-events-none opacity-50",
-        )}
-      >
-        <Paperclip className="size-4" />
-        <input
-          type="file"
-          multiple
-          className="hidden"
-          accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json"
-          onChange={handleFileInputChange}
-          disabled={busy || pendingInterrupt !== null}
-        />
-      </label>
+    <div
+      className={cn(
+        "flex flex-col gap-1 rounded-3xl border border-graphite/30 bg-card/90 px-3 pb-2 pt-3 shadow-sm backdrop-blur-md transition-colors",
+        "focus-within:border-accent-signal/60",
+      )}
+    >
       <textarea
         aria-label="Message the assistant"
         value={input}
@@ -677,40 +691,60 @@ export function ChatPanel({
         placeholder="Message the assistant…"
         disabled={busy || pendingInterrupt !== null}
         rows={1}
-        className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-1.5 text-[14.5px] leading-[1.5] outline-none placeholder:text-muted-foreground disabled:opacity-50"
+        className="max-h-48 min-h-9 w-full resize-none bg-transparent px-1.5 py-1 text-[15px] leading-[1.5] outline-none placeholder:text-muted-foreground disabled:opacity-50"
       />
-      <button
-        type="button"
-        aria-label={recording ? "Stop recording" : "Record a voice message"}
-        onClick={() => void toggleRecording()}
-        disabled={transcribing || busy || pendingInterrupt !== null}
-        className={cn(
-          "flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground disabled:opacity-50",
-          recording && "animate-pulse text-destructive",
+      <div className="flex items-center gap-1">
+        <label
+          aria-label="Attach files"
+          className={cn(
+            "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+            (busy || pendingInterrupt !== null) && "pointer-events-none opacity-50",
+          )}
+        >
+          <Paperclip className="size-4" />
+          <input
+            type="file"
+            multiple
+            className="hidden"
+            accept=".png,.jpg,.jpeg,.gif,.webp,.txt,.md,.csv,.json"
+            onChange={handleFileInputChange}
+            disabled={busy || pendingInterrupt !== null}
+          />
+        </label>
+        <div className="flex-1" />
+        <button
+          type="button"
+          aria-label={recording ? "Stop recording" : "Record a voice message"}
+          onClick={() => void toggleRecording()}
+          disabled={transcribing || busy || pendingInterrupt !== null}
+          className={cn(
+            "flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50",
+            recording && "animate-pulse text-destructive",
+          )}
+        >
+          {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+        </button>
+        {busy ? (
+          <button
+            type="button"
+            aria-label="Stop"
+            onClick={() => void handleStop()}
+            className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-signal text-white hover:opacity-90"
+          >
+            <Square className="size-3.5" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            aria-label="Send"
+            onClick={() => void handleSend()}
+            disabled={sendDisabled}
+            className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-signal text-white transition-opacity hover:opacity-90 disabled:opacity-30"
+          >
+            <ArrowUp className="size-4" />
+          </button>
         )}
-      >
-        {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
-      </button>
-      {busy ? (
-        <button
-          type="button"
-          aria-label="Stop"
-          onClick={() => void handleStop()}
-          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-signal text-white hover:opacity-90"
-        >
-          <Square className="size-3.5" />
-        </button>
-      ) : (
-        <button
-          type="button"
-          aria-label="Send"
-          onClick={() => void handleSend()}
-          disabled={sendDisabled}
-          className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent-signal text-white hover:opacity-90 disabled:opacity-40"
-        >
-          <Send className="size-4" />
-        </button>
-      )}
+      </div>
     </div>
   );
 
@@ -747,20 +781,33 @@ export function ChatPanel({
 
   if (isNewChat) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-8 overflow-y-auto px-3 py-4">
-        <div className="flex flex-col items-center gap-1 text-center">
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <SparklesIcon className="size-4 text-accent-signal" />
-            <span className="text-base">Hi, {greetingName}</span>
-          </div>
-          <h1 className="font-heading text-3xl">Where should we start?</h1>
+      <div className="relative flex h-full flex-col overflow-y-auto px-3 py-4">
+        {/* No hero layer here anymore — App.tsx now owns it (a fixed,
+            full-viewport, full-WIDTH live-wallpaper video behind the
+            entire app shell, not just this panel; see App.tsx's own
+            `showHero`/`landingActive`). That's the direct fix for the
+            user's own follow-up: a background confined to this panel's
+            own ~800px column necessarily cropped the wide source shot
+            down; App.tsx's version is `object-contain` against the whole
+            window, so nothing is ever cropped off the sides. This
+            component's only remaining job for that feature is reporting
+            ITS OWN `isNewChat` up via `onLandingViewChange`, below. */}
+        <div className="relative z-10 flex flex-col items-center pt-2">
+          <OniGreetingCloud name={greetingName} />
         </div>
-        <div className="flex w-full max-w-[640px] flex-col gap-3">
-          {errorBanner}
-          {attachmentsPreview}
-          {composerBar}
-        </div>
-        <div className="flex w-full max-w-[520px] flex-col gap-6">
+
+        {/* Keeps the greeting pinned near the top and the dock below
+            pinned to the bottom, with the middle left genuinely empty —
+            exactly the artwork's own negative space, not filled with
+            anything just because room happened to be there. */}
+        <div className="relative z-10 min-h-8 flex-1" />
+
+        {/* The "dock": category filter, suggestions, composer — the whole
+            "start chatting" cluster, bottom-most edge first. Only dark
+            mode gets the floating glass treatment (bg/blur/border/shadow);
+            light mode has no hero image behind it, so it stays exactly as
+            plain as it was before this change. */}
+        <div className="relative z-10 mx-auto flex w-full max-w-[720px] flex-col gap-3 pb-1">
           <div className="flex flex-wrap justify-center gap-2" role="group" aria-label="Category">
             {CATEGORIES.map((cat) => {
               const active = category === cat.key;
@@ -784,23 +831,29 @@ export function ChatPanel({
             })}
           </div>
           {suggestions && (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            // A horizontal-scrolling row rather than the old 2-col grid —
+            // the grid's own height used to eat into the vertical middle
+            // this redesign now deliberately keeps clear for the artwork.
+            <div className="flex gap-3 overflow-x-auto pb-1">
               {suggestions.map((suggestion) => (
                 <InstrumentCard
                   key={suggestion.heading}
-                  className="cursor-pointer p-3"
+                  className="w-[200px] shrink-0 cursor-pointer p-3"
                   onClick={() => void handleSend(suggestion.prompt)}
                   role="button"
                   tabIndex={0}
                 >
                   <div className="flex flex-col gap-0.5">
                     <h4 className="font-heading text-sm font-semibold">{suggestion.heading}</h4>
-                    <p className="text-xs text-muted-foreground">{suggestion.body}</p>
+                    <p className="line-clamp-2 text-xs text-muted-foreground">{suggestion.body}</p>
                   </div>
                 </InstrumentCard>
               ))}
             </div>
           )}
+          {errorBanner}
+          {attachmentsPreview}
+          {composerBar}
         </div>
       </div>
     );
@@ -816,77 +869,63 @@ export function ChatPanel({
           the fold. Found live in the real Tauri window, not in any test —
           jsdom doesn't do real layout, so this class of bug is invisible
           to vitest. */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-4" role="log">
-        {!historyLoaded && <p className="text-sm text-muted-foreground">Loading conversation…</p>}
-        {visibleMessages.map((message, index) => (
-          <Fragment key={index}>
-            {message.content.trim().length > 0 && (
-              <div
-                className={cn(
-                  "mb-[22px] flex max-w-[640px] flex-col",
-                  message.role === "user" ? "ml-auto items-end" : "items-start",
-                )}
-              >
-                <div
-                  className={cn(
-                    "panel-label mb-1.5 text-[10px]",
-                    message.role === "user" ? "text-muted-foreground/70" : "text-accent-signal",
-                  )}
-                >
-                  {message.role === "user" ? "You" : "Oni"}
-                </div>
-                <div
-                  className={cn(
-                    "whitespace-pre-wrap text-[14.5px] leading-[1.7]",
-                    message.role === "user" ? "text-right text-muted-foreground" : "text-left",
-                  )}
-                >
-                  {message.content}
-                </div>
-              </div>
-            )}
-            {message.a2uiSurfaces?.map((surface, surfaceIndex) => (
-              <A2UIRenderer
-                key={surfaceIndex}
-                surface={surface}
-                onAction={handleA2UIAction}
-                disabled={busy || pendingInterrupt !== null}
-              />
-            ))}
-          </Fragment>
-        ))}
-        {streamingText && (
-          <div className="mb-[22px] max-w-[640px]">
-            <div className="panel-label mb-1.5 text-[10px] text-accent-signal">Oni</div>
-            <div
-              className="reveal whitespace-pre-wrap text-[14.5px] leading-[1.7]"
-              data-testid="streaming-bubble"
-            >
-              {streamingText}
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6" role="log">
+        <div className="flex w-full flex-col gap-7">
+          {!historyLoaded && <p className="text-sm text-muted-foreground">Loading conversation…</p>}
+          {visibleMessages.map((message, index) => (
+            <Fragment key={index}>
+              {message.content.trim().length > 0 &&
+                (message.role === "user" ? (
+                  // Claude-app style: the user's turn is a soft, right-aligned
+                  // pill; the assistant's turn below has no container at all.
+                  <div
+                    data-testid="user-message"
+                    className="ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-3xl bg-muted px-4 py-2.5 text-[15px] leading-[1.6]"
+                  >
+                    {message.content}
+                  </div>
+                ) : (
+                  <Markdown className="text-[15.5px] leading-[1.75]">{message.content}</Markdown>
+                ))}
+              {message.a2uiSurfaces?.map((surface, surfaceIndex) => (
+                <A2UIRenderer
+                  key={surfaceIndex}
+                  surface={surface}
+                  onAction={handleA2UIAction}
+                  disabled={busy || pendingInterrupt !== null}
+                />
+              ))}
+            </Fragment>
+          ))}
+          {streamingText && (
+            <div data-testid="streaming-bubble">
+              <Markdown className="text-[15.5px] leading-[1.75]">{streamingText}</Markdown>
             </div>
-          </div>
-        )}
-        {pendingA2ui.map((surface, surfaceIndex) => (
-          <A2UIRenderer
-            key={surfaceIndex}
-            surface={surface}
-            onAction={handleA2UIAction}
-            disabled={busy || pendingInterrupt !== null}
-          />
-        ))}
-        {pendingInterrupt && (
-          <InterruptGate
-            payload={pendingInterrupt}
-            onApprove={() => void handleResume(true)}
-            onDecline={() => void handleResume(false)}
-            disabled={busy}
-          />
-        )}
-        <div ref={bottomRef} />
+          )}
+          {pendingA2ui.map((surface, surfaceIndex) => (
+            <A2UIRenderer
+              key={surfaceIndex}
+              surface={surface}
+              onAction={handleA2UIAction}
+              disabled={busy || pendingInterrupt !== null}
+            />
+          ))}
+          {pendingInterrupt && (
+            <InterruptGate
+              payload={pendingInterrupt}
+              onApprove={() => void handleResume(true)}
+              onDecline={() => void handleResume(false)}
+              disabled={busy}
+            />
+          )}
+          <div ref={bottomRef} />
+        </div>
       </div>
-      {errorBanner && <div className="px-1">{errorBanner}</div>}
-      {attachmentsPreview && <div className="px-1">{attachmentsPreview}</div>}
-      <div className="border-t border-graphite/20 pt-3">{composerBar}</div>
+      <div className="flex w-full flex-col gap-2 px-4 pb-4">
+        {errorBanner}
+        {attachmentsPreview}
+        {composerBar}
+      </div>
     </div>
   );
 }

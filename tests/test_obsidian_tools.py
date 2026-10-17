@@ -11,19 +11,33 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import assistant.obsidian_tools as obsidian_tools
+import assistant.vault_search as vault_search
 
 
 @contextmanager
-def _temp_vault():
+def _temp_vault(*, semantic_results: list[tuple[str, float]] | None = None):
+    """Also stubs vault_search.semantic_search for the duration — real
+    ML/network cost aside, `vault_search.VAULT_DIR` is a separate binding
+    from `obsidian_tools.VAULT_DIR` (a plain `from ... import VAULT_DIR`
+    doesn't track later reassignment of the original), so without this
+    stub every test here would silently search the REAL
+    ~/Documents/OniVault instead of this test's own temp one — a real
+    test-isolation bug found while building this feature, not a
+    theoretical concern. Defaults to no semantic hits, matching this
+    file's existing exact-match-only test expectations; pass
+    `semantic_results` to test the hybrid-merge behavior explicitly."""
     with tempfile.TemporaryDirectory() as tmp:
         vault = Path(tmp) / "OniVault"
         vault.mkdir()
-        original = obsidian_tools.VAULT_DIR
+        original_vault_dir = obsidian_tools.VAULT_DIR
+        original_semantic_search = vault_search.semantic_search
         obsidian_tools.VAULT_DIR = vault
+        vault_search.semantic_search = lambda query, **kw: semantic_results or []
         try:
             yield vault
         finally:
-            obsidian_tools.VAULT_DIR = original
+            obsidian_tools.VAULT_DIR = original_vault_dir
+            vault_search.semantic_search = original_semantic_search
 
 
 def _invoke(tool, args: dict):
@@ -63,6 +77,28 @@ def test_search_vault_is_recursive_into_subfolders() -> None:
         (nested / "STL Containers.md").write_text("---\noni: false\n---\n\nvector, list, map.\n")
         result = obsidian_tools.search_vault.invoke({"query": "STL"})
     assert "[[STL Containers]]" in result
+
+
+def test_search_vault_supplements_exact_hits_with_semantic_matches() -> None:
+    """Backlog Section 3 feature (STEPS.md 150): a paraphrase-shaped query
+    with no exact substring overlap still finds a relevant note via the
+    semantic supplement."""
+    with _temp_vault(semantic_results=[("Recursion Basics", 0.55)]) as vault:
+        (vault / "Recursion Basics.md").write_text("---\noni: true\n---\n\nSome content.\n")
+        result = obsidian_tools.search_vault.invoke({"query": "functions that call themselves"})
+    assert "[[Recursion Basics]]" in result
+    assert "semantic match" in result.lower()
+    assert "0.55" in result
+
+
+def test_search_vault_does_not_duplicate_a_note_found_both_ways() -> None:
+    """A note that already matched exactly must not also show up a second
+    time in the semantic-supplement section."""
+    with _temp_vault(semantic_results=[("Recursion Basics", 0.9)]) as vault:
+        (vault / "Recursion Basics.md").write_text("---\noni: true\n---\n\nrecursion example.\n")
+        result = obsidian_tools.search_vault.invoke({"query": "recursion"})
+    assert result.count("Recursion Basics") == 1
+    assert "semantic match" not in result.lower()
 
 
 # --- read_vault_note --------------------------------------------------------
@@ -273,6 +309,8 @@ if __name__ == "__main__":
         test_search_vault_finds_by_content_and_shows_snippet,
         test_search_vault_no_matches_reports_plainly,
         test_search_vault_is_recursive_into_subfolders,
+        test_search_vault_supplements_exact_hits_with_semantic_matches,
+        test_search_vault_does_not_duplicate_a_note_found_both_ways,
         test_read_vault_note_reads_existing_note,
         test_read_vault_note_missing_reports_error_not_exception,
         test_read_vault_note_finds_notes_in_subfolders,

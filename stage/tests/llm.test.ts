@@ -44,8 +44,8 @@ test("a model with no listed price is estimated at the most expensive price, nev
 
 test("dated forms of a listed model use its price", () => {
   expect(priceOf("claude-sonnet-5-5-20261001")).toEqual({ price: PRICES["claude-sonnet-5-5"]!, estimated: false });
-  expect(priceOf("claude-haiku-4-5")).toEqual({ price: PRICES["claude-haiku-4-5-20251001"]!, estimated: false });
-  expect(costOf("claude-haiku-4-5-20251001", 1e6, 1e6)).toBe(6);
+  expect(priceOf("claude-haiku-5-5")).toEqual({ price: PRICES["claude-haiku-5-5"]!, estimated: false });
+  expect(costOf("claude-haiku-5-5", 1e6, 1e6)).toBe(0.6);
 });
 
 test("when no tool call ever comes, the error still carries what was paid", async () => {

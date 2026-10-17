@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ActionResult, AxElement, Brain, Decision, Driver, Facts, Helper, Item, Observation, PlanStep, Task, WindowRef } from "../src/contracts.ts";
 import { RunLogger } from "../src/logger.ts";
-import { runTask } from "../src/loop.ts";
+import { ignoresBackgroundKeys, runTask } from "../src/loop.ts";
 import { SimCalc } from "./sim-calc.ts";
 
 const OK: ActionResult = { ok: true, channel: "ax", ms: 1, cli: "fake" };
@@ -332,4 +332,136 @@ test("pressing the page's Search link does not retype the address bar's text (it
   await runTask(ctxOf(page, new Scripted((items) => decide("click", by(items, "Search"))), new StubHelper(), undefined, 3), newTask("open instagram.com and search for Rishabh", "Brave Browser"));
   expect(page.clicks).toContain("Search");
   expect([page.typed, page.sets, page.keys]).toEqual([[], [], []]);
+});
+
+/**
+ * WhatsApp (live, 6 Oct): background key events are ignored (the call says ok, the box stays empty and reports NO value), a
+ * Return sent nothing, and jev wandered onto the "changed their phone number" notice. The box only shows a Send button once real text is
+ * in it. Foreground keystrokes land; pressing the Send button sends.
+ */
+const whatsapp = (conversation = "Rishabh", earlier = false) => {
+  const app = new FakeApp([
+    el(0, "AXWindow", "WhatsApp", { frame: WINDOW }),
+    el(1, "AXStaticText", conversation, { parent: 0, frame: { x: 600, y: 40, w: 160, h: 24 } }),
+    el(2, "AXTextArea", "Compose message", { parent: 0, frame: { x: 400, y: 700, w: 500, h: 40 } }), // no value while empty
+    ...(earlier ? [el(8, "AXStaticText", `Your message, hi, 3:51 AM, Sent to ${conversation}, Delivered`, { parent: 0 })] : []), // an identical message sent earlier
+  ]);
+  const how: string[] = [];
+  const log: string[] = [];
+  let sent: string | undefined;
+  app.typeText = async (_a: string, _w: WindowRef, t: string, text: string, foreground?: boolean) => {
+    how.push(foreground ? "foreground" : "background");
+    const e = app.els.find((x) => x.token === t);
+    if (!foreground || !e) return OK; // a background key event: reported ok, ignored
+    app.typed.push(text);
+    e.value = text;
+    app.els.push(el(9, "AXButton", "‎Send", { parent: 0, frame: { x: 920, y: 700, w: 40, h: 40 } })); // appears once there is text
+    return { ...OK, channel: "foreground" as const };
+  };
+  app.click = async (_a, _w, t) => {
+    const e = app.els.find((x) => x.token === t);
+    app.clicks.push(e?.label ?? t);
+    if (e?.label?.includes("Send")) {
+      sent = app.els.find((x) => x.role === "AXTextArea")?.value;
+      log.push(`sent:${sent}`);
+      const box = app.els.find((x) => x.role === "AXTextArea"); if (box) box.value = undefined;
+      app.els = app.els.filter((x) => x.label?.includes("Send") !== true);
+      app.els.push(el(10, "AXStaticText", `Your message, ${sent}, 4:05 AM, Sent to ${conversation}`, { parent: 0 })); // the new bubble
+    }
+    return OK;
+  };
+  return { app, how, log, sent: () => sent };
+};
+
+test("WhatsApp: text that a background key event dropped is typed again as foreground keys, then the Send button is pressed (not Return)", async () => {
+  const w = whatsapp();
+  const brain = new Scripted((items, n) => n === 0 ? decide("type_text", by(items, "Compose message"), "hi") : n === 1 ? decide("press_enter", by(items, "Compose message")) : decide("done"));
+  const { ctx, acted } = withSteps(ctxOf(w.app, brain, new StubHelper([], { achieved: () => true }), undefined, 8));
+  const task = await runTask(ctx, newTask("open the chat with Rishabh and send a message that says: hi", "WhatsApp"));
+  expect(w.how).toEqual(["background", "foreground"]); // dropped once, then real keys
+  expect(w.sent()).toBe("hi");
+  expect(w.log).toEqual(["sent:hi"]); // exactly one send
+  expect(w.app.keys).toEqual([]); // and no Return afterwards (it would have been a second send)
+  expect(acted.some((a) => a.includes("then pressed Send"))).toBe(true);
+  expect(acted.some((a) => a.startsWith("skipped: the message was already sent"))).toBe(true);
+  expect(task.status).toBe("done");
+});
+
+test("WhatsApp: a goal that does not ask to send never types, never presses Send", async () => {
+  const w = whatsapp();
+  const brain = new Scripted((items) => decide("type_text", by(items, "Compose message"), "hi"));
+  await runTask(ctxOf(w.app, brain, new StubHelper(), undefined, 3), newTask("open the chat with Rishabh and look at it", "WhatsApp"));
+  expect(w.how).toEqual([]);
+  expect(w.log).toEqual([]);
+});
+
+test("WhatsApp: a chat that is not the named person's is never typed into", async () => {
+  const w = whatsapp("Maria");
+  const brain = new Scripted((items) => decide("type_text", by(items, "Compose message"), "hi"));
+  const task = await runTask(ctxOf(w.app, brain, new StubHelper(), undefined, 4), newTask("open the chat with Rishabh and send a message that says: hi", "WhatsApp"));
+  expect(w.how).toEqual([]);
+  expect(w.log).toEqual([]);
+  expect(task.exception?.reason).toContain("not with Rishabh");
+});
+
+test("Instagram: once the text is confirmed in the box, the Send button is pressed once, and a following Return is skipped", async () => {
+  const app = instagram();
+  app.els.push(el(5, "AXButton", "Send", { parent: 1, frame: { x: 920, y: 700, w: 60, h: 40 } }));
+  const clicks: string[] = [];
+  app.click = async (_a, _w, t) => { clicks.push(app.els.find((x) => x.token === t)?.label ?? t); return OK; };
+  const brain = new Scripted((items, n) => n === 0 ? decide("type_text", by(items, "Message..."), "hi") : n === 1 ? decide("press_enter", by(items, "Message...")) : decide("done"));
+  const { ctx } = withSteps(ctxOf(app, brain, new StubHelper([], { achieved: () => true }), undefined, 8));
+  await runTask(ctx, newTask(SEND_HI, "Brave Browser"));
+  expect(app.typed).toEqual(["hi"]);
+  expect(clicks.filter((c) => c === "Send")).toEqual(["Send"]);
+  expect(app.keys).toEqual([]);
+});
+
+test("WhatsApp: an identical earlier message on screen does not make a send goal 'done' (live: a second \"hi\" to Rishabh was never typed or sent)", async () => {
+  const w = whatsapp("Rishabh", true);
+  const brain = new Scripted((items, n) => n < 4 ? decide("done") : decide("done")); // jev sees "hi" already in the chat and keeps saying done
+  const { ctx, acted } = withSteps(ctxOf(w.app, brain, new StubHelper([], { achieved: (screen) => screen.some((l) => l.includes("4:05 AM")) }), undefined, 10));
+  const task = await runTask(ctx, newTask("open the chat with Rishabh and send a message that says: hi", "WhatsApp"));
+  expect(w.log).toEqual(["sent:hi"]); // sent exactly once, by this task
+  expect(w.how).toEqual(["background", "foreground"]);
+  expect(acted.some((a) => a.includes("then pressed Send"))).toBe(true);
+  expect(task.status).toBe("done");
+});
+
+test("a goal that is not about sending a message can still be 'done' straight away", async () => {
+  const w = whatsapp("Rishabh", true);
+  const task = await runTask(ctxOf(w.app, new Scripted(() => decide("done")), new StubHelper([], { achieved: () => true }), undefined, 4), newTask("tell me what the last message in the chat with Rishabh says", "WhatsApp"));
+  expect(w.how).toEqual([]);
+  expect(w.log).toEqual([]);
+  expect(task.status).toBe("done");
+});
+
+test("a plan that only opens or clicks something is not 'done' for a send goal: the verifier's page-text 'achieved' is not enough (live: Instagram's inbox opened, nothing sent, reported as sent)", async () => {
+  const w = whatsapp();
+  const plan: PlanStep[] = [{ action: "click", target: "Rishabh" }];
+  const brain = new Scripted((items, n) => n === 0 ? decide("type_text", by(items, "Compose message"), "hi") : decide("done"));
+  const helper = new StubHelper(plan, { source: "compiled", achieved: () => true }); // a verifier that approves anything
+  const { ctx, acted } = withSteps(ctxOf(w.app, brain, helper, undefined, 10));
+  const task = await runTask(ctx, newTask("open the chat with Rishabh and send a message that says: hi", "WhatsApp"));
+  expect(w.log).toEqual(["sent:hi"]); // the message really went out before the task counted as done
+  expect(task.status).toBe("done");
+  expect(acted.some((a) => a.includes("then pressed Send"))).toBe(true);
+});
+
+test("a send goal whose message never goes out ends as failed, not done", async () => {
+  const w = whatsapp("Maria"); // the open chat is not Rishabh's: typing is refused, nothing can be sent
+  const brain = new Scripted((items) => decide("done"));
+  const task = await runTask(ctxOf(w.app, brain, new StubHelper([], { achieved: () => true }), undefined, 12), newTask("open the chat with Rishabh and send a message that says: hi", "WhatsApp"));
+  expect(w.log).toEqual([]);
+  expect(task.status).toBe("failed");
+});
+
+test("which apps get the foreground typing fallback: WhatsApp by default, others only when named in STAGE_FOREGROUND_TYPING_APPS", () => {
+  expect(ignoresBackgroundKeys("WhatsApp", "")).toBe(true);
+  expect(ignoresBackgroundKeys("\u200eWhatsApp", "")).toBe(true);
+  expect(ignoresBackgroundKeys("Notes", "")).toBe(false);
+  expect(ignoresBackgroundKeys("Discord", "")).toBe(false);
+  expect(ignoresBackgroundKeys("Discord", "discord, Slack")).toBe(true);
+  expect(ignoresBackgroundKeys("Slack", " discord ,Slack ")).toBe(true);
+  expect(ignoresBackgroundKeys("Safari", "discord, .*")).toBe(false); // names are plain text, not patterns
 });

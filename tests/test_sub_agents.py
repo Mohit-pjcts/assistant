@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from assistant.mac_tools import TOOLS as MAC_CONTROL_TOOLS
 from assistant.sub_agents import (
     LIFE_ADMIN_SYSTEM_PROMPT,
+    LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK,
     MAC_CONTROL_SYSTEM_PROMPT,
     RESEARCH_SYSTEM_PROMPT,
     NoParallelMacWrites,
@@ -107,6 +108,26 @@ def test_life_admin_agent_carries_render_ui() -> None:
     graph = build_life_admin_agent([])
     tool_names = set(graph.get_graph().nodes["tools"].data.tools_by_name)
     assert "render_ui" in tool_names
+
+
+def test_life_admin_agent_owns_the_oni_calendar_tools() -> None:
+    """Moved here from the supervisor at the user's request (STEPS.md 162)."""
+    graph = build_life_admin_agent([])
+    tool_names = set(graph.get_graph().nodes["tools"].data.tools_by_name)
+    assert {
+        "oni_calendar_list",
+        "oni_calendar_add",
+        "oni_calendar_edit",
+        "oni_calendar_remove",
+    } <= tool_names
+
+
+def test_life_admin_system_prompt_describes_the_oni_calendar() -> None:
+    # The local fallback, not LIFE_ADMIN_SYSTEM_PROMPT: that one prefers
+    # Langfuse's "production" copy, which is stale until the prompt is synced.
+    for name in ("oni_calendar_list", "oni_calendar_add", "oni_calendar_edit", "oni_calendar_remove"):
+        assert name in LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK
+    assert "never an image" in LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK
 
 
 def test_research_system_prompt_mentions_render_ui() -> None:

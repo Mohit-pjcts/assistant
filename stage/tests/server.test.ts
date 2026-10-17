@@ -77,12 +77,21 @@ const fakeDriver = {
   observe: async (agent: string, w: WindowRef, opts?: unknown) => { sessions.push(`observe ${agent}`); observeOpts = opts; return observeImpl(w); },
 } as unknown as CliDriver;
 
+const formCalls: string[] = [];
+const fakeForms = {
+  open: async (url: string) => { formCalls.push(`open ${url}`); return { title: "F", url, fields: [{ id: "q1", label: "Name", kind: "text" as const, required: true }], buttons: ["Next"] }; },
+  view: async () => { formCalls.push("view"); return { title: "F", url: "u", fields: [], buttons: [] }; },
+  fill: async (a: any[]) => { formCalls.push(`fill ${JSON.stringify(a)}`); return { results: a.map((x) => ({ field: x.field, status: "filled" as const })), view: { title: "F", url: "u", fields: [], buttons: [] } }; },
+  press: async (b: string) => { formCalls.push(`press ${b}`); if (b === "nope") throw new Error('no "nope" button on this page (buttons: Next)'); return { title: "F", url: "u", fields: [], buttons: [], confirmation: "Your response has been recorded." }; },
+  front: async (u?: string) => { formCalls.push(`front ${u ?? ""}`); return { title: "Sign in", url: u ?? "" }; },
+  close: async () => { formCalls.push("close"); },
+};
 let server: ReturnType<typeof startPanel>;
 let base = "";
 const started: string[] = [];
 beforeAll(() => {
   process.env.TYPESAFE_API_KEY ||= "test";
-  server = startPanel(0, TOKEN, { driver: fakeDriver, run: fakeRun, onstage: fakeOnstage, locked: async () => locked });
+  server = startPanel(0, TOKEN, { driver: fakeDriver, run: fakeRun, onstage: fakeOnstage, locked: async () => locked, forms: fakeForms });
   base = `http://127.0.0.1:${server.port}`;
 });
 afterEach(() => {
@@ -541,4 +550,93 @@ test("look needs an app name, the token, and an unlocked screen", async () => {
   } finally {
     locked = false;
   }
+});
+
+// The agents' cursors are Cua's own (also for fast-lane actions); the overlay must not draw a second one.
+async function overlayTaps(cursors: "cua" | "overlay", actions: Array<{ via: "fast" | "cua" }>): Promise<any[]> {
+  const prev = process.env.STAGE_CURSORS;
+  if (cursors === "overlay") process.env.STAGE_CURSORS = "overlay"; else delete process.env.STAGE_CURSORS;
+  const driver: any = { ...fakeDriver, cuaCursors: undefined, onAction: undefined };
+  const srv = startPanel(0, TOKEN, { driver, run: fakeRun, onstage: fakeOnstage, locked: async () => false });
+  if (prev === undefined) delete process.env.STAGE_CURSORS; else process.env.STAGE_CURSORS = prev;
+  try {
+    const got: any[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${srv.port}/overlay?token=${TOKEN}`);
+    ws.onmessage = (e) => { const m = JSON.parse(String(e.data)); if (m.type === "tap") got.push(m); };
+    await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error("overlay socket failed")); });
+    for (const a of actions) driver.onAction({ agent: "Mint-3", frame: { x: 10, y: 20, w: 40, h: 30 }, kind: "press", via: a.via });
+    await Bun.sleep(150);
+    ws.close();
+    expect(driver.cuaCursors).toBe(cursors === "cua");
+    return got;
+  } finally {
+    srv.stop(true);
+  }
+}
+
+test("Cua look: Cua keeps its own cursor on, a Cua action sends the overlay nothing, a fast-lane action only the ring", async () => {
+  const taps = await overlayTaps("cua", [{ via: "cua" }, { via: "fast" }]);
+  expect(taps).toHaveLength(1);
+  expect(taps[0]).toMatchObject({ via: "fast", agent: "", x: 10, y: 20, w: 40, h: 30 });
+});
+
+test("STAGE_CURSORS=overlay restores the overlay's own named cursors for every action", async () => {
+  const taps = await overlayTaps("overlay", [{ via: "cua" }, { via: "fast" }]);
+  expect(taps).toHaveLength(2);
+  expect(taps.every((t) => t.agent !== "")).toBe(true);
+});
+
+// ---- web forms (Oni's form_* tools) ----
+test("form routes need the token like every other route", async () => {
+  expect((await fetch(`${base}/api/form/read`, { method: "POST", body: "{}" })).status).toBe(401);
+});
+
+test("form open: only public http(s) addresses; local, private and non-web addresses are refused before anything opens", async () => {
+  formCalls.length = 0;
+  for (const url of ["http://127.0.0.1:8765/f", "http://localhost/f", "http://192.168.1.5/f", "file:///etc/passwd", "javascript:alert(1)", "ftp://example.com/f", "", 5, "https://user:pw@example.com/f"]) {
+    const r = await post("/api/form/open", { url });
+    expect(r.status).toBe(400);
+    expect(r.json.ok).toBe(false);
+  }
+  expect(formCalls).toEqual([]);
+  const ok = await post("/api/form/open", { url: "https://docs.google.com/forms/d/e/abc/viewform" });
+  expect(ok.json.ok).toBe(true);
+  expect(ok.json.form.fields[0].label).toBe("Name");
+  expect(formCalls).toEqual(["open https://docs.google.com/forms/d/e/abc/viewform"]);
+});
+
+test("form open: a developer's own local page opens only with STAGE_FORMS_ALLOW_LOCAL=1", async () => {
+  process.env.STAGE_FORMS_ALLOW_LOCAL = "1";
+  try {
+    expect((await post("/api/form/open", { url: "http://127.0.0.1:8765/form3.html" })).json.ok).toBe(true);
+    expect((await post("/api/form/open", { url: "file:///etc/passwd" })).status).toBe(400); // still http(s) only
+  } finally { delete process.env.STAGE_FORMS_ALLOW_LOCAL; }
+});
+
+test("form fill: validates every answer and passes them on; read, press, login and close reach the browser", async () => {
+  formCalls.length = 0;
+  for (const answers of [undefined, [], "x", [{ field: "", value: "a" }], [{ field: "a", value: 5 }], [{ field: "a", value: [1] }], [{ value: "a" }], Array(81).fill({ field: "a", value: "b" })]) {
+    expect((await post("/api/form/fill", { answers })).status).toBe(400);
+  }
+  expect(formCalls).toEqual([]);
+  const r = await post("/api/form/fill", { answers: [{ field: "Name", value: "Mohit" }, { field: "Courses", value: ["A", "B"] }] });
+  expect(r.json.ok).toBe(true);
+  expect(r.json.results.map((x: any) => x.status)).toEqual(["filled", "filled"]);
+  expect((await post("/api/form/read", {})).json.form.title).toBe("F");
+  const done = await post("/api/form/press", { button: "submit" });
+  expect(done.json.form.confirmation).toBe("Your response has been recorded.");
+  expect((await post("/api/form/login", { url: "https://accounts.google.com/" })).json.window.title).toBe("Sign in");
+  expect((await post("/api/form/close", {})).json.ok).toBe(true);
+  expect(formCalls.map((c) => c.split(" ")[0])).toEqual(["fill", "view", "press", "front", "close"]);
+});
+
+test("form press / login: a bad button or address is a clear error, a failure inside the browser is reported, not thrown", async () => {
+  expect((await post("/api/form/press", {})).status).toBe(400);
+  expect((await post("/api/form/press", { button: "x".repeat(61) })).status).toBe(400);
+  const bad = await post("/api/form/press", { button: "nope" });
+  expect(bad.status).toBe(200);
+  expect(bad.json).toMatchObject({ ok: false });
+  expect(bad.json.error).toContain('no "nope" button');
+  expect((await post("/api/form/login", { url: "file:///x" })).status).toBe(400);
+  expect((await post("/api/form/unknown", {})).status).toBe(404);
 });

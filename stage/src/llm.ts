@@ -3,11 +3,11 @@ import Anthropic from "@anthropic-ai/sdk";
 
 /** USD per 1M tokens [input, output], as listed on Anthropic's models page (read 2 Oct 2026) */
 export const PRICES: Record<string, [number, number]> = {
-  "claude-haiku-4-5-20251001": [1, 5],
+  "claude-haiku-5-5": [0.1, 0.5],
   "claude-sonnet-5-5": [2, 10],
   "claude-opus-5-5": [4, 20],
 };
-export const HELPER_MODEL = "claude-haiku-4-5-20251001";
+export const HELPER_MODEL = "claude-haiku-5-5";
 export const LLM_BRAIN_MODEL = process.env.LLM_BRAIN_MODEL ?? "claude-sonnet-5-5";
 
 let client: Anthropic | null = null;

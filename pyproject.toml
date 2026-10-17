@@ -57,10 +57,18 @@ dependencies = [
     # made explicit now that POST /uploads uses them directly. Pillow is
     # new -- server-side downsampling of uploaded images to a 1568px long
     # edge before they're sent to Claude's vision API (a ~3x visual-token
-    # cost cut on claude-sonnet-5's high-resolution tier for a typical 4K
+    # cost cut on claude-sonnet-5-5's high-resolution tier for a typical 4K
     # screenshot).
     "python-multipart>=0.0.9",
     "Pillow>=10.0.0",
+    # Vault semantic search (backlog Section 3 feature, STEPS.md 150):
+    # torch was already an installed dependency of mlx-whisper (Phase 8),
+    # so the marginal new weight here is the sentence-transformers package
+    # itself plus a small (~90MB) embedding model downloaded once on first
+    # use, not a new heavy ML runtime. Local, offline after that first
+    # download -- no per-query API cost or external service, per the
+    # feature's own original framing.
+    "sentence-transformers>=3.0.0",
 ]
 
 [project.optional-dependencies]

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { nowIso } from "./logger.ts";
-import { asksQuestion, FIND_FIELD, goalValues, MESSAGE_FIELD, openOnly, SEARCH_FIELD, sendIntent } from "./compile.ts";
+import { asksQuestion, FIND_FIELD, goalValues, MESSAGE_FIELD, openOnly, SEARCH_FIELD, sendIntent, explicitText } from "./compile.ts";
 import { PLACEHOLDER, perceive, screenFromMarkdown, screenText, showsPrompt, signature, TEXT_INPUT } from "./perceive.ts";
 import { addressBarForbidden, clickBlocked, editAllowed, enterForbidden, typingForbidden } from "./safety.ts";
 
@@ -26,6 +26,17 @@ const refused = (why: string): ActionResult => ({ ok: false, channel: "ax", ms: 
 const blockedBy = (r: ActionResult) => (r.cli === "blocked" ? r.error?.detail ?? "blocked" : undefined);
 /** the fast lane could not tell whether its press / insert happened (it is not retried by the driver) */
 const uncertain = (r?: ActionResult) => !!r && !r.ok && r.effect === "uncertain";
+/**
+ * Apps measured to ignore key events posted in the background: the call reports success and nothing arrives (live, 6 Oct:
+ * "hi" into WhatsApp's compose box, then Return, left it empty and sent nothing). Their message boxes get the text again as
+ * real foreground keystrokes when it did not land. WhatsApp is the one measured; add others you see doing the same (the
+ * agent's step log shows a message box that stayed empty after "type ... (synthetic_events)") with
+ * STAGE_FOREGROUND_TYPING_APPS="Discord, Slack" (names, case-insensitive, matched anywhere in the app's name).
+ */
+export function ignoresBackgroundKeys(app: string, extra = process.env.STAGE_FOREGROUND_TYPING_APPS ?? ""): boolean {
+  const names = ["whatsapp", ...extra.split(",").map((n) => n.trim()).filter(Boolean)];
+  return names.some((n) => app.toLowerCase().includes(n.toLowerCase()));
+}
 
 /** a search box's OWN clear button: inside it, or right next to it on the same row (never a form's "Clear" that
  *  resets every field) */
@@ -92,6 +103,9 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   const uncertainTyped = new Set<string>(); // field|text whose insert may or may not have happened
   const retriedTyping = new Set<string>(); // ... and was retried once already
   const sendAsked = sendIntent(task.goal);
+  /** "send a message that says: hi" -> "hi": a goal that sends a message is not done until this task has sent one */
+  const sendText = sendAsked && /\b(send|reply)\b[^.]*\b(message|dm|text)\b/i.test(task.goal) ? explicitText(task.goal) : null;
+  let messageSent = false;
   // a text field is known by its POSITION, and what it is for by the FIRST label it had: some apps rename a field to
   // its contents (WhatsApp: "Name, number, @username" becomes "+91 83096 51677" once typed into)
   const firstLabel = new Map<string, string>();
@@ -126,6 +140,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   };
   const owns = (id: string, value: string) => wrote.has(id) && norm(wrote.get(id)) === norm(value);
   let lastTyped: { id: string; label: string; text: string; foreground: boolean } | undefined;
+  /** the step at which a message was sent by pressing the app's Send button (a Return right after must not send it again) */
+  let justSentAt = -99;
   const retyped = new Set<string>(); // one re-type per field and text (not one for the whole task)
   let baseline: string[] | undefined; // the screen text when the task started
   let waitedAfterSend = false;
@@ -321,6 +337,22 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   /** returns the finished task if the goal is achieved (or given up on), undefined to keep going */
   const checkDone = async (p: { screen: string[]; items: Item[] }, why: string): Promise<Task | undefined> => {
     update("checking the result");
+    // a goal that sends a message is not achieved until THIS task has sent one, whatever the page shows: new text on the
+    // inbox, or an older identical message in the chat. (Live, 6 Oct: the plan only opened Instagram's inbox, the verifier
+    // saw 65 new lines and said done; Oni told the user it was sent. Nothing was typed.)
+    if (sendText && !messageSent) {
+      const reason = "the message has not been sent yet: open the chat with the person, type the message and send it";
+      log.write({ type: "helper", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, what: "verify", detail: `${why} → NOT achieved: ${reason} (checked in code)`, costUsd: 0, ms: 0 });
+      notDone++;
+      notDoneReason = reason;
+      prev.push(`(checked: ${reason})`);
+      if (notDone >= 3) return finish("not_achieved", `the message was never sent: ${reason}`);
+      if (usePlan) {
+        if (llmHelper) { noteLlm("re-plan"); await makePlan(p.screen, p.items, reason).catch(() => {}); }
+        else if (!(await escalate(p, `not done yet: ${reason}`))) { freeMode = true; plan = []; planPos = 0; }
+      }
+      return undefined;
+    }
     // a planned save is part of the goal: not done until the file is saved
     if (!savedDoc && plan?.some((s, i) => s.action === "save_as" && i >= planPos)) return undefined;
     // a document saved in code is checked in code: the file exists and holds the text from the window
@@ -863,6 +895,13 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     }
     // Stop must stop the NEXT action too: a classifier call takes a while
     if (signal.aborted) return finish("stopped", "stopped by the user");
+    // A goal that sends a message is not done until THIS task has sent one. The chat can already show an earlier, identical
+    // message ("hi" sent a minute ago) and jev calls that done: nothing was typed or sent (live, 6 Oct: a second "hi" to
+    // Rishabh, three "done?" checks, nothing sent). The message goes into the open chat's message box instead.
+    if (dec.kind === "done" && sendText && !messageSent) {
+      const box = p.items.find((i) => isTextInput(i) && i.token && MESSAGE_FIELD.test(i.text) && !FIND_FIELD.test(i.text));
+      if (box) dec = { ...codeDecision("not-sent-yet", "type_text", box.i), text: sendText };
+    }
     const chosen: Item | undefined = dec.item === undefined ? undefined : p.items.find((i) => i.i === dec.item);
 
     const logStep = (acted: string, results: ActionResult[], actMs: number) =>
@@ -1133,6 +1172,21 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
             }
             landed = again.value;
           }
+          // a message box that still reads empty after typing, in an app that ignores background keys: the text again as
+          // real foreground keystrokes (WhatsApp reports no value at all while its box is empty)
+          if (messageField && mine?.token && (mine.value === undefined || !mine.value.trim()) && r.channel !== "foreground" &&
+              ignoresBackgroundKeys(task.app) && allowForeground && !signal.aborted) {
+            const fr = await typeInto(mine.token, typed, true, chosen.role);
+            results.push(fr);
+            task.counts.foreground++;
+            const again = (await driver.observe(agent, win)).elements.find((e) => fieldKey(e) === fieldKey(chosenEl));
+            landed = again?.value;
+            if (!fr.ok || !again?.value || !norm(again.value).includes(head)) {
+              desc = `typing did not land in '${chosen.text}', even as foreground keystrokes`;
+              break;
+            }
+            r = fr;
+          }
         }
         if (r.ok || uncertain(r)) {
           // ownership: the exact value the agent left (read back, or what it must be); blank text owns nothing
@@ -1147,11 +1201,28 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         // unlabeled single-line field when the goal is a search. Not when the plan's next step is Enter anyway; the
         // Enter safety rule still applies (submitSearch)
         if (r.ok || uncertain(r)) desc += await submitSearch();
+        // a message the goal asks to send, now confirmed in its box: the app's own Send button, pressed through accessibility.
+        // That works in the background where a Return does not (WhatsApp), and needs no key at all
+        if ((r.ok || uncertain(r)) && messageField && sendAsked && landed !== undefined && norm(landed).includes(norm(typed).slice(0, 16)) && !signal.aborted) {
+          const nowObs = await driver.observe(agent, win);
+          const sendBtn = nowObs.elements.find((e) => e.role === "AXButton" && e.token && compact(e.label ?? "") === "send");
+          if (sendBtn?.token) {
+            const sr = await guardedClick(sendBtn.token, sendBtn.label ?? "Send", sendBtn.role, nowObs.elements);
+            results.push(sr);
+            if (sr.ok || uncertain(sr)) { desc += ", then pressed Send"; justSentAt = step; lastTyped = undefined; messageSent = true; }
+          }
+        }
         break;
       }
       case "press_enter":
       case "press_escape": {
         const k = dec.kind === "press_enter" ? "return" : "escape";
+        if (k === "return" && step - justSentAt <= 3) {
+          desc = "skipped: the message was already sent with the Send button";
+          if (plan) planPos = Math.min(planPos + 1, plan.length);
+          holdPlan = true;
+          break;
+        }
         // SAFETY: never Enter in a browser's address bar (sites open with open_url): what it holds is navigated to or
         // Googled (live: it held a private message the agent had typed there by mistake)
         const barEnter = k === "return" && isTextInput(chosen) ? addressBarOf(chosen!.token, obs.elements) : null;
@@ -1206,7 +1277,9 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
             task.counts.foreground++;
           }
           desc = `press ${k}${isTextInput(chosen) ? ` in '${chosen!.text}'` : ""}${r.channel === "foreground" ? " (foreground)" : ""}`;
+          if (k === "return" && lastTyped && (r.ok || uncertain(r))) messageSent = true;
         }
+        if (k === "return" && lastTyped && results.some((x) => x.ok || uncertain(x))) messageSent = true;
         break;
       }
       case "scroll_down":

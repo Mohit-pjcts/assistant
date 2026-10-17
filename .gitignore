@@ -91,3 +91,11 @@ nova-superagent-agent-main/
 nova-superagent-agent-main.zip
 
 
+
+# Vault sync API bearer token (assistant/vault_sync.py) — a secret, like .env.
+.vault_token
+.vault_token.tmp
+
+# OniCore (iPhone app logic) build output
+ios/OniCore/.build/
+ios/OniCore/.swiftpm/

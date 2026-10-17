@@ -22,7 +22,10 @@ export function ToolCallTimeline({ entries }: ToolCallTimelineProps) {
     return <p className="text-xs text-muted-foreground">No tool activity yet this session.</p>;
   }
   return (
-    <div className="flex flex-col gap-2" data-testid="tool-call-timeline">
+    <div
+      className="flex max-h-64 flex-col gap-2 overflow-y-auto pr-1"
+      data-testid="tool-call-timeline"
+    >
       {entries.map((entry) => (
         <div
           key={entry.id}

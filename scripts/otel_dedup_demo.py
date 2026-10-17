@@ -80,7 +80,7 @@ async def _run(mode: str) -> None:
         else Langfuse(blocked_instrumentation_scopes=BLOCKED_SCOPES)
     )
     handler = CallbackHandler()
-    model = ChatAnthropic(model="claude-haiku-4-5", max_tokens=100)
+    model = ChatAnthropic(model="claude-haiku-5-5", max_tokens=100)
 
     with propagate_attributes(
         session_id=session_id, trace_name="otel-dedup-demo", tags=[f"demo:{mode}"]

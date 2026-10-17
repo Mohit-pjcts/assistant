@@ -14,9 +14,11 @@ import { RunLogger } from "./logger.ts";
 import { planTasks, runCommand, type PlannedTask } from "./manager.ts";
 import { Explainer, type ToOverlay } from "./explain.ts";
 import { perceive } from "./perceive.ts";
+import { askOni, localControl, speakable, stopOni, viaOni } from "./hotkey.ts";
 import { route } from "./router.ts";
 import { agentLabel, spokenSummary, tidyAnswer } from "./results.ts";
-import { LOCKED_MESSAGE, resolveAppStrict, screenLocked, suggestApps, windowsOf } from "./apps.ts";
+import { LOCKED_MESSAGE, checkUrl, resolveAppStrict, screenLocked, suggestApps, windowsOf } from "./apps.ts";
+import { AgentBrowser, type FieldAnswer } from "./webform.ts";
 import { fromThisComputer } from "./localonly.ts";
 import type { ServerWebSocket } from "bun";
 
@@ -137,6 +139,8 @@ export interface PanelDeps {
   onstage?: (send: (m: ToOverlay) => void) => Explainer;
   /** whether the Mac's screen is locked (the real check reads the login session) */
   locked?: () => Promise<boolean>;
+  /** the agent's own browser for web forms (tests pass a fake) */
+  forms?: Pick<AgentBrowser, "open" | "view" | "fill" | "press" | "front" | "close">;
 }
 
 export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", deps: PanelDeps = {}) {
@@ -144,7 +148,14 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
   const run = deps.run ?? runCommand;
   const isLocked = deps.locked ?? screenLocked;
   const helper = makeHelper();
-  const html = Bun.file(join(import.meta.dir, "..", "viewer", "index.html"));
+  const forms = deps.forms ?? new AgentBrowser();
+  const viewerDir = join(import.meta.dir, "..", "viewer");
+  // Oni's fonts are inlined into the page (not served from a route: every route needs the launch token, which a CSS font
+  // fetch can't send). Read per request so editing either file shows up on refresh, as it did when this was a Bun.file.
+  const page = async () => {
+    const fonts = await Bun.file(join(viewerDir, "oni-fonts.css")).text();
+    return (await Bun.file(join(viewerDir, "index.html")).text()).replace("/*ONI_FONTS*/", () => fonts);
+  };
   const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const enc = new TextEncoder();
   const runs: RunRecord[] = [];
@@ -263,9 +274,16 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
   // what to say and draw (Onstage), or start the agents and keep their widgets (bottom right) up to date (Backstage).
   const toOverlays = (m: object) => { const s = JSON.stringify(m); for (const ws of overlays) ws.send(s); };
   const onstage = deps.onstage ? deps.onstage((m) => toOverlays(m)) : new Explainer(driver, (m: ToOverlay) => toOverlays(m), join(import.meta.dir, "..", "runs"));
-  // every press / text insert flashes in the agent's colour where it happened (fast-lane actions have no Cua cursor)
-  driver.cuaCursors = false; // the overlay draws each agent's cursor (gliding to every action, at fast-lane speed)
-  driver.onAction = (n) => toOverlays({ type: "tap", agent: agentLabel(n.agent), colour: AGENT_COLOURS[n.agent] ?? "#2bb39a", kind: n.kind, via: n.via, x: n.frame.x, y: n.frame.y, w: n.frame.w, h: n.frame.h });
+  // Cursors: the agents' cursors are Cua's own (the look of the first, all-Cua prototypes), also for fast-lane actions
+  // (the driver glides Cua's cursor there first). So the overlay must not draw a second cursor: a Cua action needs no
+  // overlay mark at all (Cua animates its own click), and a fast-lane action gets just the ring (`agent` left empty =
+  // the overlay's ring without its cursor). STAGE_CURSORS=overlay restores the overlay's coloured, named cursors.
+  const cuaLook = process.env.STAGE_CURSORS !== "overlay";
+  driver.cuaCursors = cuaLook;
+  driver.onAction = (n) => {
+    if (cuaLook && n.via === "cua") return;
+    toOverlays({ type: "tap", agent: cuaLook ? "" : agentLabel(n.agent), colour: AGENT_COLOURS[n.agent] ?? "#2bb39a", kind: n.kind, via: n.via, x: n.frame.x, y: n.frame.y, w: n.frame.w, h: n.frame.h });
+  };
 
   /** the agents' widgets: the latest run's tasks */
   function dock() {
@@ -281,10 +299,64 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
     });
   }
 
-  /** the hotkey's words: a job for Backstage, or a question for Onstage */
+  let oniTurn: AbortController | undefined; // the hotkey request Oni is working on right now (one at a time)
+
+  /**
+   * the hotkey's words. EVERY request goes hotkey → Oni's supervisor → a sub-agent (STEPS.md 163): Stage sends the words
+   * and the screenshot it took at key-down, Oni decides what they mean and who does it (Backstage, Onstage, the vault,
+   * the calendar, ...), and Stage speaks the reply. Only words that control something already running (a lesson's
+   * next/back, "clear", "stop") are handled here, with no model. If Oni isn't running, the old local router answers.
+   */
   async function hotkey(text: string, cursor?: { x: number; y: number }) {
     const q = text.trim();
     if (!q) return onstage.ask(q, cursor);
+    const control = localControl(q, { lesson: onstage.inLesson, working: busy || !!oniTurn });
+    if (control === "stop") {
+      onstage.discard();
+      const hadTurn = !!oniTurn;
+      oniTurn?.abort();
+      if (hadTurn) void stopOni();
+      stop();
+      return onstage.say("Stopping.", 4000);
+    }
+    if (control === "lesson") return onstage.ask(q, cursor);
+    if (!viaOni()) return localHotkey(q, cursor);
+    if (oniTurn) {
+      onstage.discard();
+      return onstage.say("Still on your last request. Say stop to cancel it.", 5000);
+    }
+
+    const ctl = new AbortController();
+    oniTurn = ctl;
+    try {
+      const shot = await onstage.peekScreenshot();
+      onstage.say("On it.", 3000);
+      const spokeBefore = onstage.explained;
+      const res = await askOni({ text: q, screenshot: shot?.png, app: shot?.app, window: shot?.window }, ctl.signal);
+      if (!res.ok && res.unreachable) {
+        console.log(`[hotkey] Oni isn't answering (${res.error}) → local router`);
+        oniTurn = undefined;
+        return await localHotkey(q, cursor);
+      }
+      onstage.discard();
+      if (!res.ok) {
+        console.log(`[hotkey] Oni → error: ${res.error}`);
+        if (ctl.signal.aborted) return; // stopped: "Stopping." was already said
+        return onstage.say(`Oni couldn't do that: ${res.error.replace(/[.\s]+$/, "")}.`, 8000);
+      }
+      const r = res.reply;
+      // Onstage already spoke and drew its answer during the turn: a second spoken line would clear the drawing
+      const alreadySpoken = onstage.explained > spokeBefore && r.type === "message" && !r.declined_actions?.length;
+      console.log(`[hotkey] Oni → ${r.type}${alreadySpoken ? " (Onstage already spoke)" : ""} "${r.content.slice(0, 80)}"`);
+      if (alreadySpoken) return;
+      return onstage.say(speakable(r.content), 12000);
+    } finally {
+      if (oniTurn === ctl) oniTurn = undefined;
+    }
+  }
+
+  /** the old local router, kept for when Oni isn't running (or STAGE_HOTKEY_VIA_ONI=0): a job for Backstage, or a question for Onstage */
+  async function localHotkey(q: string, cursor?: { x: number; y: number }) {
     const r = await route(q, { lesson: onstage.inLesson, agentsBusy: busy });
     console.log(`[route] "${q.slice(0, 60)}" → ${r.to} (${r.via}${r.confidence !== undefined ? ` ${r.confidence.toFixed(2)}` : ""}, ${r.ms} ms)`);
     if (r.to === "explain") return onstage.ask(q, cursor);
@@ -354,7 +426,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
       }
       if (url.pathname === "/overlay") return srv.upgrade(req) ? undefined : new Response("websocket only", { status: 400 });
       const json = (o: unknown, status = 200) => Response.json(o, { status });
-      if (url.pathname === "/") return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      if (url.pathname === "/") return new Response(await page(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
       if (url.pathname === "/events") {
         let ctl!: ReadableStreamDefaultController<Uint8Array>;
         return new Response(
@@ -473,6 +545,55 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
         } catch (e: any) {
           return json({ ok: false, error: `couldn't read ${asked}: ${String(e?.message ?? e).slice(0, 200)}` });
         }
+      }
+
+      // ---- web forms (Oni's form_* tools): the agent's own browser window, driven through Cua's browser tools (webform.ts) ----
+      if (req.method === "POST" && url.pathname.startsWith("/api/form/")) {
+        const b = (await body(req)) ?? {};
+        const formReply = async (fn: () => Promise<object>) => {
+          try { return json({ ok: true, ...(await fn()) }); } catch (e: any) { return json({ ok: false, error: String(e?.message ?? e).slice(0, 500) }); }
+        };
+        // an address: public http(s) only, by the same rules as every other address Stage opens (no local or private-network host,
+        // no user:password@, no long text carried off to an unfamiliar site). STAGE_FORMS_ALLOW_LOCAL=1 lets a developer's own test page through.
+        const address = (raw: unknown): { ok: true; url: string } | { ok: false; error: string } => {
+          const u = typeof raw === "string" ? raw.trim() : "";
+          if (!u || u.length > 4000) return { ok: false, error: "send {url: string} (an http(s) address)" };
+          if (!/^https?:\/\//i.test(u)) return { ok: false, error: "only http(s) addresses open as forms" };
+          if (process.env.STAGE_FORMS_ALLOW_LOCAL === "1") {
+            try { new URL(u); return { ok: true, url: u }; } catch { return { ok: false, error: "not a valid web address" }; }
+          }
+          const c = checkUrl(u, "Brave Browser");
+          return c.ok ? { ok: true, url: c.url } : { ok: false, error: `not opened: ${c.why}` };
+        };
+        const op = url.pathname.slice("/api/form/".length);
+        if (op === "open") {
+          const a = address(b.url);
+          if (!a.ok) return json({ ok: false, error: a.error }, 400);
+          return formReply(async () => ({ form: await forms.open(a.url) }));
+        }
+        if (op === "read") return formReply(async () => ({ form: await forms.view() }));
+        if (op === "fill") {
+          const list = Array.isArray(b.answers) ? (b.answers as unknown[]) : null;
+          if (!list || !list.length || list.length > 80) return json({ ok: false, error: "send {answers: [{field, value}]} (1 to 80 answers)" }, 400);
+          const answers: FieldAnswer[] = [];
+          for (const x of list as any[]) {
+            const okValue = typeof x?.value === "string" || (Array.isArray(x?.value) && x.value.every((v: unknown) => typeof v === "string"));
+            if (typeof x?.field !== "string" || !x.field.trim() || x.field.length > 300 || !okValue || JSON.stringify(x.value).length > 6000) return json({ ok: false, error: "each answer is {field: string, value: string | string[]}" }, 400);
+            answers.push({ field: x.field, value: x.value });
+          }
+          return formReply(async () => await forms.fill(answers));
+        }
+        if (op === "press") {
+          if (typeof b.button !== "string" || !b.button.trim() || b.button.length > 60) return json({ ok: false, error: "send {button: string} (next, back, submit, or a button's text)" }, 400);
+          return formReply(async () => ({ form: await forms.press(b.button as string) }));
+        }
+        if (op === "login") {
+          let target: string | undefined;
+          if (b.url !== undefined) { const a = address(b.url); if (!a.ok) return json({ ok: false, error: a.error }, 400); target = a.url; }
+          return formReply(async () => ({ window: await forms.front(target), note: "the agent's browser is in front: sign in there once; the login is kept for next time" }));
+        }
+        if (op === "close") return formReply(async () => { await forms.close(); return {}; });
+        return json({ ok: false, error: "unknown form operation" }, 404);
       }
 
       // Onstage without the hotkey (Oni): ONLY ever explains — never routed to the agents, so a sentence that sounds like

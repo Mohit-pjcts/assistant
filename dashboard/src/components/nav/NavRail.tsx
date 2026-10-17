@@ -1,5 +1,6 @@
 import {
   Brain,
+  BookOpen,
   CalendarDays,
   DollarSign,
   History,
@@ -21,6 +22,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { value: "chat", label: "Chat", icon: MessageSquare },
   { value: "history", label: "History", icon: History },
+  { value: "journal", label: "Journal", icon: BookOpen },
   { value: "memory", label: "Memory", icon: Brain },
   { value: "cost", label: "Cost", icon: DollarSign },
   { value: "board", label: "Board", icon: Kanban },
@@ -33,14 +35,22 @@ const NAV_ITEMS: NavItem[] = [
 interface NavRailProps {
   activeTab: string;
   onChange: (tab: string) => void;
+  // App.tsx's live-wallpaper hero (2026-08-08 follow-up): true only while
+  // the active chat is a genuinely empty/new thread AND dark mode — see
+  // App.tsx's own `showHero` for the full condition. Swaps the solid
+  // `bg-void` for a translucent, blurred "glass" panel so the full-window
+  // video actually shows through the rail instead of being cropped out by
+  // it — same glass recipe ChatPanel.tsx's own landing dock already uses.
+  transparent?: boolean;
 }
 
 // PLAN.md Phase 29's own left icon rail (instrument/DESIGN.md §3/§5) —
 // replaces the horizontal TabsList entirely, not just restyles it. The
-// mockup's own rail only ever needed 5 icons; this app has 8 real
+// mockup's own rail only ever needed 5 icons; this app has 9 real
 // destinations (Home folded into Chat itself at the user's own request —
-// see ChatPanel.tsx's own `isNewChat` landing view), so the rail is a
-// vertical stack of 8 rather than 5 — same mechanism (hover-reveals a
+// see ChatPanel.tsx's own `isNewChat` landing view; Journal added later
+// for the daily-diary feature), so the rail is a vertical stack of 9
+// rather than 5 — same mechanism (hover-reveals a
 // floating mono label,
 // `position:absolute; left:60px`, DESIGN.md's own "four lines of CSS, no
 // JS positioning library"), just taller. `Tabs`/`TabsContent` (App.tsx)
@@ -52,10 +62,15 @@ interface NavRailProps {
 // Stage 4's job, not this one — lucide's stock icon paths don't carry a
 // normalized `pathLength`, and building that per-icon is real, separate
 // work; these render as plain static icons for now.
-export function NavRail({ activeTab, onChange }: NavRailProps) {
+export function NavRail({ activeTab, onChange, transparent = false }: NavRailProps) {
   return (
     <nav
-      className="flex h-screen w-[52px] shrink-0 flex-col items-center gap-1 border-r border-graphite/30 bg-void py-3"
+      className={cn(
+        "flex h-screen w-[52px] shrink-0 flex-col items-center gap-1 border-r py-3",
+        transparent
+          ? "border-graphite/20 bg-card/60 backdrop-blur-md"
+          : "border-graphite/30 bg-void",
+      )}
       aria-label="Views"
     >
       {NAV_ITEMS.map(({ value, label, icon: Icon }) => {

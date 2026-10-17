@@ -7,10 +7,19 @@ import type { CalendarData, CalendarEvent } from "@/lib/api";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
-  return { ...actual, fetchCalendar: vi.fn() };
+  return {
+    ...actual,
+    fetchCalendar: vi.fn(),
+    addCalendarEvent: vi.fn(),
+    updateCalendarEvent: vi.fn(),
+    deleteCalendarEvent: vi.fn(),
+  };
 });
 
 const mockedFetchCalendar = vi.mocked(api.fetchCalendar);
+const mockedAdd = vi.mocked(api.addCalendarEvent);
+const mockedUpdate = vi.mocked(api.updateCalendarEvent);
+const mockedDelete = vi.mocked(api.deleteCalendarEvent);
 
 function event(overrides: Partial<CalendarEvent>): CalendarEvent {
   return {
@@ -101,6 +110,9 @@ beforeEach(() => {
   vi.setSystemTime(new Date(2026, 9, 16, 12, 0)); // Fri 16 Oct 2026, local time
   mockedFetchCalendar.mockReset();
   mockedFetchCalendar.mockResolvedValue(sample);
+  mockedAdd.mockReset();
+  mockedUpdate.mockReset();
+  mockedDelete.mockReset();
 });
 
 afterEach(() => {
@@ -242,5 +254,108 @@ describe("CalendarPanel", () => {
   it("says so when a day has nothing on it", async () => {
     await renderPanel();
     expect(screen.getByText("Nothing scheduled.")).toBeInTheDocument();
+  });
+
+  describe("editing the calendar", () => {
+    it("adds an event on the selected day and reloads", async () => {
+      mockedAdd.mockResolvedValue(event({ id: "new", date: "2026-10-16", title: "Final exam" }));
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("add-event"));
+
+      // the day you were looking at is pre-filled
+      expect(await screen.findByLabelText("Date")).toHaveValue("2026-10-16");
+      await user.type(screen.getByLabelText("Title"), "COMP2119 Final exam");
+      await user.type(screen.getByLabelText("Course"), "comp2119");
+      await user.type(screen.getByLabelText("Starts (HKT)"), "09:30");
+      await user.type(screen.getByLabelText("Ends"), "12:30");
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      await waitFor(() => expect(mockedAdd).toHaveBeenCalledTimes(1));
+      expect(mockedAdd).toHaveBeenCalledWith({
+        title: "COMP2119 Final exam",
+        date: "2026-10-16",
+        kind: "exam",
+        course: "COMP2119",
+        start_time: "09:30",
+        end_time: "12:30",
+        end_date: null,
+        location: null,
+        weight: null,
+      });
+      await waitFor(() => expect(mockedFetchCalendar).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+    });
+
+    it("shows the backend's reason when it refuses an event and keeps the form open", async () => {
+      mockedAdd.mockRejectedValue(new Error("end_date is before date"));
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("add-event"));
+      await user.type(await screen.findByLabelText("Title"), "Bad");
+      await user.click(screen.getByRole("button", { name: "Save" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("end_date is before date");
+      expect(screen.getByLabelText("Title")).toHaveValue("Bad");
+      expect(mockedFetchCalendar).toHaveBeenCalledTimes(1);
+    });
+
+    it("will not submit without a title", async () => {
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("add-event"));
+      await screen.findByLabelText("Title");
+      expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    });
+
+    it("edits an event, sending only the fields that changed", async () => {
+      mockedUpdate.mockResolvedValue(event({ id: "quiz2", date: "2026-10-27", title: quiz.title }));
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("calendar-day-2026-10-27"));
+      await user.click(screen.getByRole("button", { name: "Edit In-class quiz" }));
+
+      const room = await screen.findByLabelText("Room (optional)");
+      expect(screen.getByLabelText("Title")).toHaveValue("In-class quiz");
+      expect(screen.getByLabelText("Starts (HKT)")).toHaveValue("13:00");
+      await user.type(room, "KK101");
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(1));
+      expect(mockedUpdate).toHaveBeenCalledWith("quiz", { location: "KK101" });
+    });
+
+    it("says where an event from another note came from before editing it", async () => {
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("calendar-day-2026-10-27"));
+      await user.click(screen.getByRole("button", { name: "Edit In-class quiz" }));
+      expect(await screen.findByText(/That note is left alone/)).toBeInTheDocument();
+    });
+
+    it("saving an untouched form changes nothing", async () => {
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("calendar-day-2026-10-27"));
+      await user.click(screen.getByRole("button", { name: "Edit In-class quiz" }));
+      await user.click(await screen.findByRole("button", { name: "Save" }));
+      await waitFor(() => expect(screen.queryByLabelText("Title")).not.toBeInTheDocument());
+      expect(mockedUpdate).not.toHaveBeenCalled();
+    });
+
+    it("asks before deleting, then deletes by id and reloads", async () => {
+      mockedDelete.mockResolvedValue(quiz);
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("calendar-day-2026-10-27"));
+      await user.click(screen.getByRole("button", { name: "Delete In-class quiz" }));
+
+      expect(await screen.findByText("Delete this event?")).toBeInTheDocument();
+      expect(mockedDelete).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "Delete" }));
+      await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("quiz"));
+      await waitFor(() => expect(mockedFetchCalendar).toHaveBeenCalledTimes(2));
+    });
+
+    it("keeps the confirmation open and says why when the delete fails", async () => {
+      mockedDelete.mockRejectedValue(new Error("no calendar event with id 'quiz'"));
+      const user = await renderPanel();
+      await user.click(screen.getByTestId("calendar-day-2026-10-27"));
+      await user.click(screen.getByRole("button", { name: "Delete In-class quiz" }));
+      await user.click(await screen.findByRole("button", { name: "Delete" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("no calendar event");
+    });
   });
 });

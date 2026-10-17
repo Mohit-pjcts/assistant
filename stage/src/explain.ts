@@ -29,8 +29,8 @@ const LISTED_CONTROLS = 70;
 const TEXTY = /^(StaticText|Heading|Image)$/;
 // lesson words: handled in code, no screenshot, no model call (the hotkey path also accepts looser words like "ok")
 const STOP_WORDS = DISMISS; // one list for both paths (router.ts)
-const NEXT_WORDS = /^(next|next step|continue|go on|ok|okay|done|got it|and then|then what)$/;
-const BACK_WORDS = /^(repeat|again|say that again|what|huh|sorry|come again|back|previous)$/;
+export const NEXT_WORDS = /^(next|next step|continue|go on|ok|okay|done|got it|and then|then what)$/;
+export const BACK_WORDS = /^(repeat|again|say that again|what|huh|sorry|come again|back|previous)$/;
 // from the API (Oni), only exact lesson commands: a stray "ok" or "what" in a request must not move the user's lesson
 const API_NEXT = /^(next|next step|continue)$/;
 const API_BACK = /^(back|previous|go back)$/;
@@ -131,6 +131,7 @@ export class Explainer {
   private pending?: Promise<Capture>;
   private lesson?: { question: string; steps: { say: string; shapes: Shape[] }[]; index: number };
   private hotkeyAsks = 0; // hotkey questions being answered right now: an API question waits its turn (busy) instead
+  private answered = 0;
   private journal: string;
   private seq = 0;
   readonly voice = new Voice();
@@ -152,6 +153,25 @@ export class Explainer {
   }
 
   get inLesson() { return !!this.lesson; }
+
+  /** how many questions Onstage has answered out loud so far (the hotkey tells whether Oni's turn made it speak, so the reply doesn't talk over the drawing) */
+  get explained() { return this.answered; }
+
+  /**
+   * the picture taken when the hotkey went down, for Oni (which reads it itself), WITHOUT consuming it: if Oni isn't
+   * there the local router still needs it. The caller discards it when the turn is over.
+   */
+  async peekScreenshot(): Promise<{ png: string; app?: string; window?: string } | undefined> {
+    const p = this.pending;
+    if (!p) return undefined;
+    try {
+      const c = await p;
+      if (!c.png || !existsSync(c.png)) return undefined;
+      return { png: readFileSync(c.png).toString("base64"), app: c.app, window: c.windowTitle };
+    } catch {
+      return undefined;
+    }
+  }
 
   /** move through a lesson (spoken words, or the overlay's keys: Option + arrow) */
   go(to: "next" | "back" | "repeat") {
@@ -229,6 +249,7 @@ export class Explainer {
       this.write({ t: new Date().toISOString(), question: q, app: cap.app, window: cap.windowTitle, steps: steps.map((s) => ({ say: s.say, shapes: s.shapes.length })), model: EXPLAIN_MODEL, usd: +answer.costUsd.toFixed(5), ms: answer.ms, captureMs: cap.ms, controls: cap.controls.length });
       console.log(`[onstage] "${q.slice(0, 60)}" → ${steps.length} step(s), ${steps.reduce((a, s) => a + s.shapes.length, 0)} shape(s) · ${answer.ms} ms · $${answer.costUsd.toFixed(4)} · ${cap.controls.length} controls from ${cap.app ?? "?"}`);
       this.step(0);
+      this.answered++;
       return { ok: true, steps: steps.map((s) => s.say), app: cap.app, window: cap.windowTitle, usd: +answer.costUsd.toFixed(5) };
     } catch (e: any) {
       return fail(String(e?.message ?? e).slice(0, 160));

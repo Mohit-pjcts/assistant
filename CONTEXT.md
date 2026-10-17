@@ -38,6 +38,28 @@ accepted by design, not treated as a defect — the Vault trades curation
 (which Facts have) for volume and connectivity.
 _Avoid_: fact, memory
 
+**Conflict copy**:
+A version of a Note that lost a sync race — the phone edited it while the
+Mac's copy had also changed. Kept in the Vault's `_conflicts/` folder until
+the user resolves it; Oni never searches, links to, or edits what is in that
+folder. Nothing is ever discarded automatically.
+_Avoid_: duplicate, backup
+
+**Trash**:
+The Vault's `_trash/` folder, where a Note deleted from the phone is moved
+instead of being removed. Oni never searches, links to, or edits what is in
+it, and nothing leaves it except the user restoring a Note or emptying it by
+hand. A Note edited elsewhere since the delete is restored, not trashed.
+_Avoid_: recycle bin, archive
+
+**Replica**:
+The phone app's own copy of the Vault's Notes — the Mac's Vault stays the
+source of truth. Holds only the top-level folders the user has switched on,
+and only Markdown Notes, never Obsidian's own settings. Edits made offline
+reach the Vault at the next sync. Not a second Vault: it has no
+independent identity.
+_Avoid_: vault (on the phone), mirror, backup
+
 **Thread**:
 A single conversation with Oni — the checkpointed unit `thread_store.py`
 (Phase 15) registers and `/chat`/`/resume` operate on. Predates this file;

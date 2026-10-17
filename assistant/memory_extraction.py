@@ -78,7 +78,7 @@ from assistant.compaction import is_genuine_human_turn, tag_recalled_facts
 # Self-contained on import, same reasoning as tools.py/agent.py.
 load_dotenv()
 
-EXTRACTOR_MODEL_NAME = "claude-haiku-4-5"
+EXTRACTOR_MODEL_NAME = "claude-haiku-5-5"
 
 # Structural cap, not left to the model's own judgment — mirrors
 # supervisor.py's MAX_HANDOFFS_PER_TURN (a red-team-required addition: an

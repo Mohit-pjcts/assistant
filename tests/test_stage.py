@@ -975,14 +975,19 @@ def test_supervisor_prompt_shows_a_message_goal_and_asks_for_the_persons_exact_n
     )
 
 
-def test_the_playbook_keeps_its_eight_numbered_rules_in_order():
+def test_the_playbook_keeps_its_nine_numbered_rules_in_order():
     prompt = sup.SUPERVISOR_SYSTEM_PROMPT_FALLBACK
     assert prompt.count("- backstage:") == 1
     playbook = prompt[prompt.index("- backstage:") : prompt.index("- onstage")]
-    assert re.findall(r"^  (\d+)\. ", playbook, re.MULTILINE) == list("12345678")
+    assert re.findall(r"^  (\d+)\. ", playbook, re.MULTILINE) == list("123456789")
     assert "\n  5. Agents write into a NEW document or note." in playbook
     assert "\n  6. Read every result." in playbook
     assert "\n  8. Finish by telling the user what was done" in playbook
+    # texting on WhatsApp / Instagram goes through Stage by the person's NAME (Contacts numbers go stale), once
+    rule9 = playbook[playbook.index("\n  9. ") :]
+    assert "app 'WhatsApp'" in rule9 and "Brave Browser" in rule9
+    assert "NAME, not a phone number" in rule9 and "Send each message once" in rule9
+    assert "NEW time" in rule9
 
 
 def test_a_wrong_token_or_foreign_server_is_reported(monkeypatch):
@@ -1014,3 +1019,141 @@ def test_a_wrong_token_or_foreign_server_is_reported(monkeypatch):
         monkeypatch.setattr(stage.httpx, "AsyncClient", Client)
         with pytest.raises(stage.StageUnavailable, match=expected):
             asyncio.run(stage._state())
+
+
+# --- web forms: form_open / form_read / form_fill / form_press / form_login -------------------------
+# The tools are plain @tools over Stage's /api/form/* (stage/src/server.ts, webform.ts); Stage's HTTP is a
+# recording fake here. The live run against a real browser is in STEPS.md 159.9.
+
+FORM = {
+    "title": "Society Registration",
+    "url": "https://docs.google.com/forms/d/e/abc/viewform",
+    "buttons": ["Next"],
+    "fields": [
+        {"id": "q1", "label": "Full name *", "kind": "text", "required": True, "value": ""},
+        {
+            "id": "q2",
+            "label": "Year of study *",
+            "kind": "choice",
+            "required": True,
+            "options": ["First year", "Second year"],
+            "value": "Second year",
+        },
+        {"id": "q3", "label": "Programme *", "kind": "dropdown", "required": True, "value": ""},
+        {
+            "id": "q4",
+            "label": "Courses",
+            "kind": "multi",
+            "required": False,
+            "options": ["COMP2119", "MATH2014"],
+            "value": ["COMP2119"],
+        },
+    ],
+}
+
+
+def _fake_forms(monkeypatch, reply=None, error=None, timeout=False):
+    calls: list[tuple[str, str, dict | None, float]] = []
+
+    async def fake_request(method, path, body, timeout_s):
+        calls.append((method, path, body, timeout_s))
+        if error is not None:
+            raise error
+        if timeout:
+            import httpx
+
+            raise httpx.ReadTimeout("slow")
+        return reply if reply is not None else {"ok": True, "form": FORM}
+
+    monkeypatch.setattr(stage, "_request", fake_request)
+    return calls
+
+
+def test_form_open_shows_every_question_with_kind_choices_and_current_answer(monkeypatch):
+    calls = _fake_forms(monkeypatch)
+    text = asyncio.run(stage.form_open.ainvoke({"url": "  https://docs.google.com/forms/d/e/abc/viewform "}))
+    assert calls == [
+        ("POST", "/api/form/open", {"url": "https://docs.google.com/forms/d/e/abc/viewform"}, stage._FORM_OPEN_TIMEOUT_SECONDS)
+    ]
+    assert 'Form "Society Registration" at https://docs.google.com/forms/d/e/abc/viewform' in text
+    assert "Buttons: Next" in text
+    assert "q1 [text, required] Full name *" in text
+    assert 'q2 [choose one, required] Year of study *: First year | Second year  = "Second year"' in text
+    assert "q3 [dropdown, required] Programme * (choices not listed)" in text
+    assert 'q4 [tick any] Courses: COMP2119 | MATH2014  = "COMP2119"' in text
+    assert text.endswith(stage._FORM_DATA_NOTE)
+
+
+def test_a_finished_form_reports_the_pages_confirmation(monkeypatch):
+    _fake_forms(monkeypatch, {"ok": True, "form": {"title": "T", "url": "u", "buttons": [], "fields": [], "confirmation": "Your response has been recorded."}})
+    text = asyncio.run(stage.form_press.ainvoke({"button": "submit"}))
+    assert 'The page says: "Your response has been recorded."' in text
+    assert "No questions on this page." in text
+
+
+def test_form_fill_says_what_landed_what_did_not_with_the_real_choices_and_what_is_still_required(monkeypatch):
+    reply = {
+        "ok": True,
+        "results": [
+            {"field": "Full name", "label": "Full name *", "status": "filled", "now": "Mohit Reddy Vuyyuru"},
+            {"field": "Year of study", "status": "no_option", "detail": 'no option "Fifth year"', "options": ["First year", "Second year"]},
+            {"field": "Shoe size", "status": "not_found", "detail": 'no question matching "Shoe size"'},
+        ],
+        "view": FORM,
+    }
+    calls = _fake_forms(monkeypatch, reply)
+    answers = [
+        {"field": "Full name", "value": "Mohit Reddy Vuyyuru"},
+        {"field": "Year of study", "value": "Fifth year"},
+        {"field": "Shoe size", "value": "42"},
+    ]
+    text = asyncio.run(stage.form_fill.ainvoke({"answers": answers}))
+    assert calls[0][1] == "/api/form/fill" and calls[0][2] == {"answers": answers}
+    assert calls[0][3] == stage._FORM_FILL_TIMEOUT_SECONDS
+    assert text.startswith("1 of 3 answers landed.")
+    assert '- Full name *: filled, the page now holds "Mohit Reddy Vuyyuru"' in text
+    assert "- Year of study: NOT filled (no_option)" in text and "Choices: First year | Second year" in text
+    assert '- Shoe size: NOT filled (not_found): no question matching "Shoe size".' in text
+    assert "Required and still empty: Full name *; Programme *" in text  # from the page's own view, not from what was sent
+
+
+def test_form_fill_takes_a_list_for_a_tick_any_question_and_needs_at_least_one_answer(monkeypatch):
+    calls = _fake_forms(monkeypatch, {"ok": True, "results": [{"field": "Courses", "label": "Courses", "status": "filled", "now": ["A", "B"]}], "view": {"fields": []}})
+    text = asyncio.run(stage.form_fill.ainvoke({"answers": [{"field": "Courses", "value": ["A", "B"]}]}))
+    assert calls[0][2] == {"answers": [{"field": "Courses", "value": ["A", "B"]}]}
+    assert '- Courses: filled, the page now holds "A, B"' in text
+    assert "Required and still empty" not in text
+    assert asyncio.run(stage.form_fill.ainvoke({"answers": []})).startswith("Error: give at least one answer")
+
+
+def test_form_press_and_login_reach_stage_and_login_says_what_to_do(monkeypatch):
+    calls = _fake_forms(monkeypatch, {"ok": True, "window": {"title": "Sign in", "url": "https://accounts.google.com/"}, "note": "sign in there once"})
+    text = asyncio.run(stage.form_login.ainvoke({"url": "https://accounts.google.com/"}))
+    assert calls[-1][1:3] == ("/api/form/login", {"url": "https://accounts.google.com/"})
+    assert 'in front, on "Sign in"' in text and "sign in there once" in text
+    asyncio.run(stage.form_login.ainvoke({}))
+    assert calls[-1][2] == {}  # no address: just bring the window forward
+    _fake_forms(monkeypatch)
+    asyncio.run(stage.form_press.ainvoke({"button": " next "}))
+
+
+def test_form_errors_are_text_the_model_can_read_not_exceptions(monkeypatch):
+    _fake_forms(monkeypatch, {"ok": False, "error": 'no "launch" button on this page (buttons: Next)'})
+    assert asyncio.run(stage.form_press.ainvoke({"button": "launch"})) == 'Error: no "launch" button on this page (buttons: Next)'
+    _fake_forms(monkeypatch, error=stage.StageUnavailable("Stage isn't running"))
+    assert asyncio.run(stage.form_open.ainvoke({"url": "https://x.example/f"})) == "Error: Stage isn't running"
+    _fake_forms(monkeypatch, timeout=True)
+    slow = asyncio.run(stage.form_read.ainvoke({}))
+    assert slow.startswith("Error:") and "form_read" in slow
+
+
+def test_the_supervisor_has_the_form_tools_and_the_rule_to_use_them():
+    source = Path(sup.__file__).read_text()
+    assert "*stage.FORM_TOOLS" in source
+    assert [t.name for t in stage.FORM_TOOLS] == ["form_open", "form_read", "form_fill", "form_press", "form_login"]
+    prompt = sup.SUPERVISOR_SYSTEM_PROMPT_FALLBACK
+    forms = prompt[prompt.index("- web forms") : prompt.index("- onstage")] if prompt.index("- web forms") < prompt.index("- onstage") else prompt[prompt.index("- web forms") :]
+    assert "the vault first" in forms and "never invent a personal detail" in forms
+    assert "ONLY when the user asked you to submit" in forms
+    assert "Never use backstage for a web form" in forms
+    assert "submitting a form is NOT one of the gated actions" in forms

@@ -23,13 +23,31 @@ count that disagrees with the expansion) rather than silently dropped, so a
 typo in a note is visible in the dashboard instead of showing up as a
 deadline on the wrong day.
 
-Nothing here writes to the vault.
+**Writes (added later, at the user's request — Oni can now add, move and
+remove calendar entries, and so can the dashboard):** every edit goes to ONE
+note, `Calendar — Added Events.md`, never into the three notes above. Those are
+hand-maintained tables (padded columns, multi-date cells, weekly rows that
+expand to a dozen sessions), and rewriting a row in place would mean guessing
+which source line produced a given event. Instead:
+
+  - an *added* event is a row in that note's dated table (same shape and
+    column headers the parser already reads, so a hand edit in Obsidian works);
+  - *deleting* an event from any other note records its id under a
+    `## Cancelled` heading, and `load_calendar` hides it;
+  - *editing* one of those = cancel the original + add the changed copy.
+
+So the original notes stay byte-for-byte untouched and every change is one
+visible, revertable file. Fully ungated, like the board and the vault
+(board_tools.py's docstring has the reasoning): local, in-app, reversible.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
+import tempfile
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -398,7 +416,12 @@ def _find_notes(suffix: str) -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(
-        p for p in root.rglob(f"*{suffix}") if p.name.startswith("Semester") and p.is_file()
+        p
+        for p in root.rglob(f"*{suffix}")
+        if p.name.startswith("Semester")
+        and p.is_file()
+        # A Conflict copy / trashed Note is not a live schedule source.
+        and not obsidian_tools.in_reserved_dir(p, root)
     )
 
 
@@ -439,6 +462,8 @@ def load_calendar() -> CalendarData:
 
     # The same session can appear in two notes (a class listed in both the
     # timetable and the tutorials note); keep the first.
+    _merge_added_events(data)
+
     seen: set[str] = set()
     unique: list[CalendarEvent] = []
     for e in data.events:
@@ -458,3 +483,291 @@ def load_calendar() -> CalendarData:
         for code in sorted({e.course for e in unique if e.course != "—"})
     ]
     return data
+
+
+# --- Writing: the "Added Events" note -------------------------------------------
+
+ADDED_TITLE = "Calendar — Added Events"
+_ADDED_COLUMNS = ["Date", "Time (HKT)", "Course", "Item", "Room", "Kind", "Weight"]
+_ADDED_INTRO = (
+    "Events added from Oni's Calendar tab or by asking Oni, plus the ids of "
+    "events hidden from the other calendar notes. Rows are safe to edit by "
+    "hand; everything outside the two sections below is regenerated on the "
+    "next change."
+)
+_CANCELLED_ID = re.compile(r"^\s*[-*]\s+`([^`]+)`")
+_ISO_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+MAX_TITLE = 200
+_REQUIRED = ("title", "date", "kind")
+
+# One lock for the read-modify-write of the note: the dashboard and Oni can
+# both save at once (the backend serves each request on a worker thread).
+_write_lock = threading.Lock()
+
+
+class CalendarEditError(ValueError):
+    """A request the calendar refuses (bad date, unknown id, ...). The message
+    is meant to be shown to the user or handed back to the model verbatim."""
+
+
+def added_note_path() -> Path:
+    return obsidian_tools.VAULT_DIR / f"{ADDED_TITLE}.md"
+
+
+def _cell(value: str | None) -> str:
+    """One table cell: a pipe would split the row and a newline would end it."""
+    return re.sub(r"\s+", " ", (value or "").replace("|", "/")).strip()
+
+
+def _date_cell(start: str, end: str | None) -> str:
+    def one(iso: str) -> str:
+        d = date.fromisoformat(iso)
+        # Month names from our own table, not strftime: %b follows the locale.
+        return f"{_WEEKDAYS[d.weekday()].title()} {d.day} {list(_MONTHS)[d.month - 1].title()} {d.year}"
+
+    return one(start) if not end or end == start else f"{one(start)} – {one(end)}"
+
+
+def _time_cell(start: str | None, end: str | None, tbc: bool) -> str:
+    if start and end:
+        return f"{start}–{end}"
+    if start:
+        return start
+    return "TBC" if tbc else ""
+
+
+def _read_added() -> tuple[list[dict[str, str]], list[str]]:
+    """The note's event rows (cells keyed by canonical header) and cancelled ids."""
+    path = added_note_path()
+    if not path.is_file():
+        return [], []
+    text = path.read_text(encoding="utf-8")
+    rows: list[dict[str, str]] = []
+    for header, body in _tables(text):
+        keys = _canonical_header(header)
+        if {"date", "course", "title"} <= {k for k in keys if k}:
+            rows.extend(_row_dict(keys, cells) for cells in body)
+    cancelled: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            in_section = line.lstrip("# ").strip().lower() == "cancelled"
+            continue
+        m = _CANCELLED_ID.match(line) if in_section else None
+        if m and m.group(1) not in cancelled:
+            cancelled.append(m.group(1))
+    return rows, cancelled
+
+
+def _write_added(rows: list[dict[str, str]], cancelled: list[str]) -> None:
+    path = added_note_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = date.today().isoformat()
+    if path.is_file():
+        m = re.search(r"^created:\s*(\S+)", path.read_text(encoding="utf-8"), re.MULTILINE)
+        created = m.group(1) if m else created
+    keys = ["date", "time", "course", "title", "room", "kind", "weight"]
+    lines = [
+        "---",
+        "oni: true",
+        f"created: {created}",
+        f"updated: {date.today().isoformat()}",
+        "type: calendar",
+        "tags: [calendar]",
+        "---",
+        "",
+        f"# {ADDED_TITLE}",
+        "",
+        _ADDED_INTRO,
+        "",
+        "## Events",
+        "| " + " | ".join(_ADDED_COLUMNS) + " |",
+        "|" + "---|" * len(_ADDED_COLUMNS),
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_cell(row.get(k)) for k in keys) + " |")
+    lines += ["", "## Cancelled", ""]
+    lines += [f"- `{cid}`" for cid in cancelled] or ["_Nothing hidden._"]
+    # Temp file + rename in the same directory: Obsidian (or a crash) never
+    # sees a half-written note.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".calendar-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _row_events(row: dict[str, str], source: str) -> list[CalendarEvent]:
+    return _dated_events(row, source, [], None)
+
+
+def _merge_added_events(data: CalendarData) -> None:
+    """Fold the Added Events note into `data`: hide the cancelled events from
+    the other notes, then add the note's own rows."""
+    path = added_note_path()
+    if not path.is_file():
+        return
+    source = path.stem
+    try:
+        text = path.read_text(encoding="utf-8")
+        _, cancelled = _read_added()
+    except (OSError, UnicodeDecodeError) as exc:
+        data.warnings.append(f"{source}: could not read ({exc})")
+        return
+    data.sources.append(source)
+    hidden = set(cancelled)
+    present = {e.id for e in data.events}
+    for cid in cancelled:
+        if cid not in present:
+            data.warnings.append(f"{source}: cancelled event {cid!r} no longer exists")
+    data.events = [e for e in data.events if e.id not in hidden]
+    _parse_note(text, source, data, None)
+
+
+# --- Public edit API -------------------------------------------------------------
+
+
+def _check_fields(
+    *, title: str, date_iso: str, end_date: str | None, kind: str,
+    start_time: str | None, end_time: str | None,
+) -> None:
+    if not title.strip():
+        raise CalendarEditError("an event needs a title")
+    if len(title) > MAX_TITLE:
+        raise CalendarEditError(f"title is longer than {MAX_TITLE} characters")
+    try:
+        start = date.fromisoformat(date_iso)
+        end = date.fromisoformat(end_date) if end_date else None
+    except ValueError as exc:
+        raise CalendarEditError(f"dates must be YYYY-MM-DD ({exc})") from exc
+    if end and end < start:
+        raise CalendarEditError("end_date is before date")
+    if kind not in KINDS:
+        raise CalendarEditError(f"kind must be one of {', '.join(KINDS)}")
+    for label, t in (("start_time", start_time), ("end_time", end_time)):
+        if t and not _ISO_TIME.match(t):
+            raise CalendarEditError(f"{label} must be HH:MM, 24-hour (got {t!r})")
+    if end_time and not start_time:
+        raise CalendarEditError("end_time needs a start_time")
+
+
+def _row_from(fields: dict[str, Any]) -> dict[str, str]:
+    return {
+        "date": _date_cell(fields["date"], fields.get("end_date")),
+        "time": _time_cell(fields.get("start_time"), fields.get("end_time"), bool(fields.get("tbc"))),
+        "course": _cell(fields.get("course")) or "—",
+        "title": _cell(fields["title"]),
+        "room": _cell(fields.get("location")) or "—",
+        "kind": fields["kind"],
+        "weight": _cell(fields.get("weight")),
+    }
+
+
+def _fields_of(event: CalendarEvent) -> dict[str, Any]:
+    """An event as editable fields. The title is the full item text when the
+    parser shortened it, so an edit that doesn't touch the title keeps it."""
+    return {
+        "title": event.detail or event.title,
+        "date": event.date,
+        "end_date": event.end_date,
+        "course": "" if event.course == "—" else event.course,
+        "kind": event.kind,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "location": event.location,
+        "weight": event.weight,
+        "tbc": event.tbc,
+    }
+
+
+def _validated_row(fields: dict[str, Any]) -> tuple[dict[str, str], CalendarEvent]:
+    _check_fields(
+        title=fields["title"], date_iso=fields["date"], end_date=fields.get("end_date"),
+        kind=fields["kind"], start_time=fields.get("start_time"), end_time=fields.get("end_time"),
+    )
+    row = _row_from(fields)
+    events = _row_events(row, added_note_path().stem)
+    if len(events) != 1:
+        raise CalendarEditError("could not store that event")
+    return row, events[0]
+
+
+def add_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
+    """Add events. `items` keys: title, date (YYYY-MM-DD) and optionally
+    kind (default "deadline"), course, start_time, end_time (HH:MM, HKT),
+    end_date, location, weight. All or nothing: one bad item adds none."""
+    if not items:
+        raise CalendarEditError("no events to add")
+    prepared = []
+    for i, item in enumerate(items, start=1):
+        try:
+            prepared.append(_validated_row({"kind": "deadline", **item}))
+        except (CalendarEditError, KeyError) as exc:
+            label = f"event {i}" if len(items) > 1 else "event"
+            detail = f"missing {exc}" if isinstance(exc, KeyError) else str(exc)
+            raise CalendarEditError(f"{label} ({item.get('title', '?')!r}): {detail}") from exc
+    with _write_lock:
+        rows, cancelled = _read_added()
+        rows.extend(r for r, _ in prepared)
+        _write_added(rows, cancelled)
+    return [e for _, e in prepared]
+
+
+def _find(event_id: str) -> CalendarEvent:
+    for e in load_calendar().events:
+        if e.id == event_id:
+            return e
+    raise CalendarEditError(f"no calendar event with id {event_id!r}")
+
+
+def update_event(event_id: str, changes: dict[str, Any]) -> CalendarEvent:
+    """Change fields of an event. An event from the Added Events note is
+    edited in place; one from any other note is hidden and re-added with the
+    change (see the module docstring)."""
+    allowed = set(_fields_of(CalendarEvent("", "", "", "", "class"))) - {"tbc"}
+    unknown = set(changes) - allowed
+    if unknown:
+        raise CalendarEditError(f"cannot change {', '.join(sorted(unknown))}")
+    # An explicit null for a required field means "unchanged", not "blank it".
+    changes = {k: v for k, v in changes.items() if v is not None or k not in _REQUIRED}
+    with _write_lock:
+        event = _find(event_id)
+        fields = _fields_of(event)
+        fields.update(changes)
+        if changes.get("start_time"):
+            fields["tbc"] = False
+        row, new = _validated_row(fields)
+        rows, cancelled = _read_added()
+        if event.source == added_note_path().stem:
+            idx = next(
+                (i for i, r in enumerate(rows) if any(e.id == event_id for e in _row_events(r, event.source))),
+                None,
+            )
+            if idx is None:
+                raise CalendarEditError(f"no calendar event with id {event_id!r}")
+            rows[idx] = row
+        else:
+            if event_id not in cancelled:
+                cancelled.append(event_id)
+            rows.append(row)
+        _write_added(rows, cancelled)
+    return new
+
+
+def delete_event(event_id: str) -> CalendarEvent:
+    """Remove an event: its row if it was added here, else hide it."""
+    with _write_lock:
+        event = _find(event_id)
+        rows, cancelled = _read_added()
+        if event.source == added_note_path().stem:
+            kept = [r for r in rows if not any(e.id == event_id for e in _row_events(r, event.source))]
+            if len(kept) == len(rows):
+                raise CalendarEditError(f"no calendar event with id {event_id!r}")
+            rows = kept
+        elif event_id not in cancelled:
+            cancelled.append(event_id)
+        _write_added(rows, cancelled)
+    return event

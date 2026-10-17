@@ -46,7 +46,12 @@ knowledge of (and no reason to participate in) that taxonomy.
 like `disk_tools.py`) — implemented as a directory-walk substring search,
 not Spotlight/`mdfind`, since a Note written moments earlier might not be
 Spotlight-indexed yet when immediately searched for (PLAN.md Phase 27,
-Decision 11).
+Decision 11). **Supplemented by semantic search (backlog Section 3
+feature, STEPS.md 150)** as the vault grows past keyword matching's own
+limits — `search_vault` runs the exact substring search first, then adds
+`assistant/vault_search.py`'s embedding-similarity results for any note
+the substring pass missed. See that module's own docstring for the local-
+embedding-model design (no external API, no per-query cost).
 
 **Active linking is mandatory, not optional** (Decision 8): `write_vault_note`
 itself searches existing Note titles for keyword overlap and appends a
@@ -61,17 +66,30 @@ hallucinated targets.
 calls per specialist invocation, but the cap was removed outright rather
 than fixed — it was scoped per specialist `ainvoke()`, not per true user
 turn, so Phase 25 workflow chaining could already exceed it in practice.
+
+**Reserved folders and the Trash** (PLAN.md Phase 30, `docs/adr/0004-*`):
+the Vault holds two folders that are not Notes — `_conflicts/` (a phone
+edit that lost a sync race) and `_trash/` (anything deleted). Every walker
+here skips them (`in_reserved_dir`), so Oni never searches, links to,
+updates or deletes what is in them. `delete_vault_note` no longer unlinks
+the file: it moves it into `_trash/` keeping its relative path, so a delete
+by Oni is as recoverable as one from the phone. The `oni: true` authorship
+check is unchanged and still the only guard.
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from langchain_core.tools import tool
 
 VAULT_DIR = Path.home() / "Documents" / "OniVault"
+
+CONFLICTS_DIR_NAME = "_conflicts"
+TRASH_DIR_NAME = "_trash"
+RESERVED_DIR_NAMES = (CONFLICTS_DIR_NAME, TRASH_DIR_NAME)
 
 _MAX_SEARCH_RESULTS = 20
 _MAX_READ_BYTES = 200_000
@@ -119,13 +137,49 @@ def _find_existing_note(title: str) -> Path | None:
     unique by construction (course-code-prefixed or otherwise distinct)."""
     target = _sanitize_title(title)
     for path in VAULT_DIR.rglob("*.md"):
-        if path.stem == target:
+        if path.stem == target and not in_reserved_dir(path, VAULT_DIR):
             return path
     return None
 
 
+def in_reserved_dir(path: Path, root: Path) -> bool:
+    """True if `path` sits under one of the Vault's reserved top-level
+    folders (`_conflicts/`, `_trash/`) relative to `root`. `root` is passed
+    in, not read from `VAULT_DIR`, because `vault_search.py` and
+    `calendar_store.py` each hold their own binding of the vault root."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return False
+    return bool(parts) and parts[0] in RESERVED_DIR_NAMES
+
+
+def move_to_trash(path: Path, root: Path | None = None) -> Path:
+    """Moves a Note into `<root>/_trash/`, keeping its relative path so a
+    restore knows where it came from. A name already in the Trash is not
+    overwritten: ` (deleted YYYY-MM-DD HHMMSS)` is added before the
+    extension. Returns the Trash path. Raises ValueError for a path outside
+    the Vault or already inside a reserved folder."""
+    base = VAULT_DIR if root is None else root
+    try:
+        rel = path.relative_to(base)
+    except ValueError as exc:
+        msg = f"'{path}' is not inside the vault"
+        raise ValueError(msg) from exc
+    if in_reserved_dir(path, base):
+        msg = f"'{rel}' is already in a reserved folder"
+        raise ValueError(msg)
+    dest = base / TRASH_DIR_NAME / rel
+    if dest.exists():
+        stamp = datetime.now().strftime("%Y-%m-%d %H%M%S")
+        dest = dest.with_name(f"{dest.stem} (deleted {stamp}){dest.suffix}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    path.replace(dest)
+    return dest
+
+
 def _iter_notes() -> list[Path]:
-    return sorted(VAULT_DIR.rglob("*.md"))
+    return sorted(p for p in VAULT_DIR.rglob("*.md") if not in_reserved_dir(p, VAULT_DIR))
 
 
 def _read_frontmatter_field(content: str, field: str) -> str | None:
@@ -190,9 +244,13 @@ def _frontmatter_block(*, created: str, updated: str | None = None) -> str:
 @tool
 def search_vault(query: str) -> str:
     """Search Oni's own note vault (title and content) for `query` —
-    substring match, case-insensitive. Scoped to the vault only (not the
-    whole disk). Use this to check whether something related already exists
-    before writing a new note, or to find a note to read/update/delete.
+    substring match, case-insensitive, plus a semantic supplement so a
+    paraphrase or synonym-shaped query (not just an exact phrase) can still
+    find a relevant note; a result marked "(semantic match...)" means it
+    didn't literally contain your search text but is topically related.
+    Scoped to the vault only (not the whole disk). Use this to check
+    whether something related already exists before writing a new note, or
+    to find a note to read/update/delete.
 
     Args:
         query: Search text.
@@ -201,6 +259,7 @@ def search_vault(query: str) -> str:
         return f"Error: vault directory '{VAULT_DIR}' does not exist."
     needle = query.lower()
     hits: list[str] = []
+    exact_titles: set[str] = set()
     for path in _iter_notes():
         try:
             content = path.read_text()
@@ -220,12 +279,35 @@ def search_vault(query: str) -> str:
                 end = min(len(body), body_idx + len(query) + _SNIPPET_RADIUS)
                 snippet = " — …" + body[start:end].replace("\n", " ").strip() + "…"
         hits.append(f"[[{title}]]{snippet}")
-    if not hits:
+        exact_titles.add(title)
+
+    # Semantic search supplements, never replaces, the exact substring
+    # search above — a course code or other exact term is still found
+    # precisely by it; this only adds notes a paraphrase/synonym-shaped
+    # query would otherwise miss entirely. Deferred import: vault_search.py
+    # imports VAULT_DIR from this module, so a module-level import here
+    # would be circular.
+    from assistant.vault_search import semantic_search
+
+    semantic_hits = [
+        (title, score) for title, score in semantic_search(query) if title not in exact_titles
+    ]
+
+    if not hits and not semantic_hits:
         return f"No notes found matching '{query}'."
+
     shown = hits[:_MAX_SEARCH_RESULTS]
-    lines = "\n".join(shown)
+    lines = "\n".join(shown) if shown else ""
     if len(hits) > len(shown):
         lines += f"\n... and {len(hits) - len(shown)} more (truncated)"
+
+    if semantic_hits:
+        semantic_lines = "\n".join(
+            f"[[{title}]] (semantic match, no exact text overlap, score={score:.2f})"
+            for title, score in semantic_hits
+        )
+        lines = f"{lines}\n{semantic_lines}" if lines else semantic_lines
+
     return lines
 
 
@@ -336,8 +418,9 @@ def update_vault_note(title: str, content: str) -> str:
 
 @tool
 def delete_vault_note(title: str) -> str:
-    """Delete a note from Oni's own note vault. Refuses to delete a note
-    that wasn't created by Oni (no `oni: true` marker) — this is the
+    """Delete a note from Oni's own note vault — it is moved to the vault's
+    trash folder, not erased, so the user can restore it. Refuses to delete
+    a note that wasn't created by Oni (no `oni: true` marker) — this is the
     standing protection for anything the user wrote themselves.
 
     Args:
@@ -358,8 +441,11 @@ def delete_vault_note(title: str) -> str:
             "refusing to delete a note the user may have written themselves."
         )
 
-    path.unlink()
-    return f"Deleted '{title}'."
+    try:
+        move_to_trash(path)
+    except OSError as exc:
+        return f"Error: could not move '{title}' to the trash: {exc}"
+    return f"Deleted '{title}' (moved to the vault's trash; the user can restore it)."
 
 
 TOOLS = [search_vault, read_vault_note, write_vault_note, update_vault_note, delete_vault_note]

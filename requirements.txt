@@ -25,6 +25,13 @@ langsmith>=0.10.0
 python-multipart>=0.0.9
 Pillow>=10.0.0
 
+# Vault semantic search (backlog Section 3 feature, STEPS.md 150): torch
+# was already an installed dependency of mlx-whisper (Phase 8), so the
+# marginal new weight here is the sentence-transformers package itself
+# plus a small (~90MB) embedding model downloaded once on first use, not a
+# new heavy ML runtime. Local, offline after that first download.
+sentence-transformers>=3.0.0
+
 # Phase 16 Part B: Langfuse v3 tracing (additive to LangSmith, not a
 # replacement). Pinned <4.0 deliberately -- this migration's target is v3,
 # not v4 (which ships a differently-shaped span-filter API confirmed NOT

@@ -349,3 +349,209 @@ def test_only_this_computer_may_read_the_calendar(vault):
         .status_code
         == 200
     )
+
+
+# --- writing: the "Added Events" note ---------------------------------------------
+
+EXAM = {
+    "title": "COMP2119 Final exam",
+    "date": "2026-12-12",
+    "kind": "exam",
+    "course": "COMP2119",
+    "start_time": "09:30",
+    "end_time": "12:30",
+    "location": "Hong Kong Stadium",
+}
+
+
+def _added_text(root=None):
+    return calendar_store.added_note_path().read_text(encoding="utf-8")
+
+
+def test_added_events_appear_in_the_calendar_and_land_in_one_note(vault):
+    vault("Semester 3 — Deadlines.md", DEADLINES)
+    before = (obsidian_tools.VAULT_DIR / SEM / "Semester 3 — Deadlines.md").read_bytes()
+
+    [added] = calendar_store.add_events([EXAM])
+
+    data = calendar_store.load_calendar()
+    final = next(e for e in data.events if e.title == "COMP2119 Final exam")
+    assert (final.date, final.start_time, final.end_time) == ("2026-12-12", "09:30", "12:30")
+    assert (final.kind, final.course, final.location) == ("exam", "COMP2119", "Hong Kong Stadium")
+    assert final.id == added.id and final.source == calendar_store.ADDED_TITLE
+    assert calendar_store.ADDED_TITLE in data.sources
+    assert data.warnings == []
+    # the hand-maintained note is never rewritten
+    assert (obsidian_tools.VAULT_DIR / SEM / "Semester 3 — Deadlines.md").read_bytes() == before
+    text = _added_text()
+    assert text.startswith("---\noni: true\n") and "Sat 12 Dec 2026" in text
+
+
+def test_a_multi_day_window_and_a_tbc_time_round_trip(vault):
+    calendar_store.add_events(
+        [
+            {"title": "Project week", "date": "2026-11-02", "end_date": "2026-11-06", "course": "AILT9009"},
+            {"title": "MATH2014 Final", "date": "2026-12-15", "kind": "exam", "course": "MATH2014"},
+        ]
+    )
+    events = {e.title: e for e in calendar_store.load_calendar().events}
+    assert (events["Project week"].date, events["Project week"].end_date) == ("2026-11-02", "2026-11-06")
+    assert events["Project week"].kind == "deadline"  # the default
+    assert events["MATH2014 Final"].start_time is None
+
+
+def test_a_bad_event_adds_nothing_and_names_the_culprit(vault):
+    with pytest.raises(calendar_store.CalendarEditError, match=r"event 2 \('Bad'\).*YYYY-MM-DD"):
+        calendar_store.add_events([EXAM, {"title": "Bad", "date": "12/12/2026"}])
+    assert not calendar_store.added_note_path().exists()
+
+
+@pytest.mark.parametrize(
+    "patch, message",
+    [
+        ({"kind": "party"}, "kind must be one of"),
+        ({"start_time": "9:30"}, "HH:MM"),
+        ({"end_date": "2026-12-01"}, "before date"),
+        ({"title": "  "}, "needs a title"),
+        ({"start_time": None, "end_time": "10:00"}, "needs a start_time"),
+    ],
+)
+def test_validation_messages(vault, patch, message):
+    with pytest.raises(calendar_store.CalendarEditError, match=message):
+        calendar_store.add_events([{**EXAM, **patch}])
+
+
+def test_pipes_and_newlines_in_text_cannot_break_the_table(vault):
+    calendar_store.add_events([{**EXAM, "title": "Exam | part A\nand B", "location": "Room 1 | 2"}])
+    [e] = [e for e in calendar_store.load_calendar().events if e.course == "COMP2119"]
+    assert e.title == "Exam / part A and B" and e.location == "Room 1 / 2"
+
+
+def test_editing_an_added_event_changes_its_row_in_place(vault):
+    [added] = calendar_store.add_events([EXAM])
+    new = calendar_store.update_event(added.id, {"date": "2026-12-14", "start_time": "14:30", "end_time": "17:30"})
+    events = [e for e in calendar_store.load_calendar().events if e.course == "COMP2119"]
+    assert [(e.date, e.start_time) for e in events] == [("2026-12-14", "14:30")]
+    assert new.date == "2026-12-14"
+    assert _added_text().count("Final exam") == 1
+
+
+def test_editing_an_event_from_another_note_hides_the_original_and_adds_a_copy(vault):
+    vault("Semester 3 — Deadlines.md", DEADLINES)
+    mid = next(e for e in calendar_store.load_calendar().events if e.title.startswith("Mid-term exam"))
+    new = calendar_store.update_event(mid.id, {"date": "2026-10-23", "location": "MWT2"})
+
+    mids = [e for e in calendar_store.load_calendar().events if e.title.startswith("Mid-term exam")]
+    assert len(mids) == 1
+    [moved] = mids
+    assert (moved.date, moved.location, moved.weight) == ("2026-10-23", "MWT2", "20%")
+    assert moved.title.startswith("Mid-term exam") and moved.start_time == "10:00"
+    assert moved.id == new.id and moved.source == calendar_store.ADDED_TITLE
+    assert f"`{mid.id}`" in _added_text()
+
+
+def test_an_edit_that_keeps_the_id_still_shows_once(vault):
+    # only the room changes, so the replacement has the cancelled original's id
+    vault("Semester 3 — Deadlines.md", DEADLINES)
+    quiz = next(e for e in calendar_store.load_calendar().events if e.title == "In-class quiz")
+    calendar_store.update_event(quiz.id, {"location": "KK101"})
+    quizzes = [e for e in calendar_store.load_calendar().events if e.title == "In-class quiz"]
+    assert [(q.location, q.source) for q in quizzes] == [("KK101", calendar_store.ADDED_TITLE)]
+
+
+def test_deleting_one_session_of_a_weekly_class_hides_only_that_session(vault):
+    vault("Semester 3 — Class Timetable.md", TIMETABLE)
+    sessions = [e for e in calendar_store.load_calendar().events if e.course == "COMP2119"]
+    gone = calendar_store.delete_event(sessions[2].id)
+    after = [e for e in calendar_store.load_calendar().events if e.course == "COMP2119"]
+    assert len(after) == len(sessions) - 1 and gone.id not in {e.id for e in after}
+
+
+def test_deleting_an_added_event_removes_its_row(vault):
+    [a, b] = calendar_store.add_events([EXAM, {**EXAM, "title": "Other", "date": "2026-12-13"}])
+    calendar_store.delete_event(a.id)
+    assert [e.title for e in calendar_store.load_calendar().events] == ["Other"]
+    assert b.id in {e.id for e in calendar_store.load_calendar().events}
+
+
+def test_unknown_ids_are_refused(vault):
+    with pytest.raises(calendar_store.CalendarEditError, match="no calendar event"):
+        calendar_store.delete_event("exam:X:2026-01-01:nope")
+    with pytest.raises(calendar_store.CalendarEditError, match="no calendar event"):
+        calendar_store.update_event("exam:X:2026-01-01:nope", {"title": "x"})
+
+
+def test_changing_an_unknown_field_is_refused(vault):
+    [a] = calendar_store.add_events([EXAM])
+    with pytest.raises(calendar_store.CalendarEditError, match="cannot change"):
+        calendar_store.update_event(a.id, {"id": "hacked"})
+
+
+def test_a_cancelled_id_that_no_longer_exists_is_a_warning(vault):
+    vault("Semester 3 — Deadlines.md", DEADLINES)
+    mid = next(e for e in calendar_store.load_calendar().events if e.title.startswith("Mid-term exam"))
+    calendar_store.delete_event(mid.id)
+    vault("Semester 3 — Deadlines.md", DEADLINES.replace("Mid-term exam", "Midterm"))
+    assert any("no longer exists" in w for w in calendar_store.load_calendar().warnings)
+
+
+def test_hand_edits_to_the_added_note_survive_the_next_change(vault):
+    calendar_store.add_events([EXAM])
+    path = calendar_store.added_note_path()
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("Hong Kong Stadium", "Rm 301"), encoding="utf-8"
+    )
+    calendar_store.add_events([{**EXAM, "title": "Other", "date": "2026-12-13"}])
+    locs = {e.title: e.location for e in calendar_store.load_calendar().events}
+    assert locs == {"COMP2119 Final exam": "Rm 301", "Other": "Hong Kong Stadium"}
+
+
+def test_the_added_note_keeps_its_created_date(vault):
+    calendar_store.add_events([EXAM])
+    path = calendar_store.added_note_path()
+    path.write_text(path.read_text(encoding="utf-8").replace(f"created: {date.today().isoformat()}", "created: 2026-01-02"), encoding="utf-8")
+    calendar_store.add_events([{**EXAM, "title": "Other", "date": "2026-12-13"}])
+    assert "created: 2026-01-02" in _added_text()
+
+
+# --- the edit endpoints -------------------------------------------------------------
+
+
+def _local():
+    return _client(base_url="http://127.0.0.1:8000")
+
+
+def test_post_patch_delete_round_trip_over_http(vault):
+    c = _local()
+    created = c.post("/calendar/events", json={"title": "Final", "date": "2026-12-12", "kind": "exam", "course": "COMP2119"})
+    assert created.status_code == 200
+    eid = created.json()["id"]
+
+    patched = c.patch("/calendar/events", params={"id": eid}, json={"start_time": "09:30", "end_time": "12:30"})
+    assert patched.status_code == 200 and patched.json()["start_time"] == "09:30"
+    assert [e["start_time"] for e in c.get("/calendar").json()["events"]] == ["09:30"]
+
+    assert c.delete("/calendar/events", params={"id": patched.json()["id"]}).status_code == 200
+    assert c.get("/calendar").json()["events"] == []
+
+
+def test_a_refused_edit_is_a_400_with_the_reason(vault):
+    c = _local()
+    r = c.post("/calendar/events", json={"title": "x", "date": "tomorrow"})
+    assert r.status_code == 400 and "YYYY-MM-DD" in r.json()["detail"]
+    assert c.delete("/calendar/events", params={"id": "nope"}).status_code == 400
+
+
+def test_a_patch_can_clear_a_time_with_an_explicit_null(vault):
+    c = _local()
+    eid = c.post("/calendar/events", json={"title": "Final", "date": "2026-12-12", "start_time": "09:30"}).json()["id"]
+    r = c.patch("/calendar/events", params={"id": eid}, json={"start_time": None})
+    assert r.status_code == 200 and r.json()["start_time"] is None
+
+
+def test_only_this_computer_may_edit_the_calendar(vault):
+    remote = _client(client=("203.0.113.9", 4242))
+    assert remote.post("/calendar/events", json={"title": "x", "date": "2026-12-12"}).status_code == 403
+    assert remote.patch("/calendar/events", params={"id": "a"}, json={}).status_code == 403
+    assert remote.delete("/calendar/events", params={"id": "a"}).status_code == 403
+    assert not calendar_store.added_note_path().exists()

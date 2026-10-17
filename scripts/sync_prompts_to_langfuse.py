@@ -12,10 +12,15 @@ Deliberately excludes assistant/memory_extraction.py's `_EXTRACTION_PROMPT`
 prompt backs a structural, not instruction-based, security guarantee and
 was deliberately kept local-only).
 
-Run: python scripts/sync_prompts_to_langfuse.py
+Run: python scripts/sync_prompts_to_langfuse.py [prompt-name ...]
+With names, only those prompts are pushed (e.g. `supervisor-system-prompt`),
+so an unrelated, still-uncommitted edit to another agent's prompt is not
+published along with it.
 """
 
 from __future__ import annotations
+
+import sys
 
 from dotenv import load_dotenv
 
@@ -50,11 +55,16 @@ def main() -> None:
         raise SystemExit(
             "LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY not configured — nothing to sync."
         )
-    for name, text in _PROMPTS:
+    only = set(sys.argv[1:])
+    unknown = only - {name for name, _ in _PROMPTS}
+    if unknown:
+        raise SystemExit(f"unknown prompt name(s): {', '.join(sorted(unknown))}")
+    prompts = [(n, t) for n, t in _PROMPTS if not only or n in only]
+    for name, text in prompts:
         client.create_prompt(name=name, prompt=text, type="text", labels=["production"])
         print(f"synced: {name} ({len(text)} chars)")
     client.flush()
-    print(f"Done — {len(_PROMPTS)} prompts synced to Langfuse (label=production).")
+    print(f"Done — {len(prompts)} prompts synced to Langfuse (label=production).")
 
 
 if __name__ == "__main__":

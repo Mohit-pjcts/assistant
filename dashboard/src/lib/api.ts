@@ -1079,6 +1079,42 @@ export async function deleteBoardTask(taskId: string): Promise<void> {
   }
 }
 
+// Daily diary — user-authored entries stored as plain Notes in Oni's own
+// Obsidian vault, under a Diary/ subfolder (assistant/diary_store.py). No
+// confirmation gate on any of these, same "curating your own data"
+// reasoning as the board tasks above; Oni itself never gets write/delete
+// access to these (it can only read/search them), see diary_store.py's own
+// module docstring.
+export interface DiaryEntry {
+  date: string; // ISO (YYYY-MM-DD)
+  content: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export async function fetchDiaryEntries(): Promise<DiaryEntry[]> {
+  const response = await fetchWithRetry(`${API_BASE_URL}/diary`);
+  if (!response.ok) {
+    throw new Error(`/diary failed (${response.status}): ${await response.text()}`);
+  }
+  const body = (await response.json()) as { entries: DiaryEntry[] };
+  return body.entries;
+}
+
+// Upsert — saving again for a day that already has an entry replaces it
+// whole (diary_store.py's own docstring). `date` defaults to today when
+// omitted.
+export async function saveDiaryEntry(content: string, date?: string): Promise<DiaryEntry> {
+  return postJSON<DiaryEntry>("/diary", date ? { content, date } : { content });
+}
+
+export async function deleteDiaryEntry(date: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/diary/${date}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`DELETE /diary/${date} failed (${response.status}): ${await response.text()}`);
+  }
+}
+
 // Unattended pre-approved automations (PLAN.md Phase 24) — a new,
 // deliberately narrow, explicitly-named exception to the standing
 // confirmation rule. `action` is server-validated against
@@ -1406,3 +1442,48 @@ export async function fetchCalendar(): Promise<CalendarData> {
   }
   return response.json() as Promise<CalendarData>;
 }
+
+// Calendar edits (POST/PATCH/DELETE /calendar/events). Everything lands in the
+// vault's "Calendar — Added Events" note (calendar_store.py); editing or
+// deleting an event that comes from another note hides the original and stores
+// the change there, so those notes are never rewritten.
+export interface CalendarEventInput {
+  title: string;
+  date: string; // YYYY-MM-DD
+  kind: CalendarEventKind;
+  course?: string;
+  start_time?: string | null; // HH:MM, HKT
+  end_time?: string | null;
+  end_date?: string | null;
+  location?: string | null;
+  weight?: string | null;
+}
+
+async function calendarEdit(
+  method: "POST" | "PATCH" | "DELETE",
+  eventId: string | null,
+  body?: unknown,
+): Promise<CalendarEvent> {
+  const query = eventId === null ? "" : `?id=${encodeURIComponent(eventId)}`;
+  const response = await fetch(`${API_BASE_URL}/calendar/events${query}`, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    // A refused edit carries the store's own sentence in `detail` — show that.
+    const detail = await response
+      .json()
+      .then((j: { detail?: unknown }) => (typeof j.detail === "string" ? j.detail : null))
+      .catch(() => null);
+    throw new Error(detail ?? `/calendar/events failed (${response.status})`);
+  }
+  return response.json() as Promise<CalendarEvent>;
+}
+
+export const addCalendarEvent = (event: CalendarEventInput) => calendarEdit("POST", null, event);
+
+export const updateCalendarEvent = (eventId: string, changes: Partial<CalendarEventInput>) =>
+  calendarEdit("PATCH", eventId, changes);
+
+export const deleteCalendarEvent = (eventId: string) => calendarEdit("DELETE", eventId);

@@ -10,7 +10,7 @@ an `AIMessageChunk` via `chat_models.py`'s `content_block_start`/
 signature` on that opening event. When Anthropic returns a thinking block
 whose visible text is empty (a real case with `thinking={"type":
 "adaptive"}` — the model "thought" but the reasoning shown back is blank;
-claude-sonnet-5's API default was to omit it ALWAYS, until `THINKING_CONFIG`
+claude-sonnet-5-5's API default was to omit it ALWAYS, until `THINKING_CONFIG`
 below asked for `display: "summarized"` (STEPS.md 158), after which it is rare:
 only an empty summary hits it) AND the opening event carries no signature yet
 either, no starter chunk is emitted at all. The block is then built purely from a later
@@ -18,7 +18,7 @@ either, no starter chunk is emitted at all. The block is then built purely from 
 key. The final merged message ends up with `signature` set but NO
 `thinking` key whatsoever (not just an empty string) — confirmed via direct
 `AIMessageChunk` construction and, live at this checkpoint, via a real
-streamed API call on `claude-sonnet-5` that hit this on the very first
+streamed API call on `claude-sonnet-5-5` that hit this on the very first
 attempt. When that malformed block is later replayed back to Anthropic
 (required for any multi-turn tool-calling loop, which is how every agent
 here works), the API rejects it: `messages.N.content.0.thinking.thinking:
@@ -57,7 +57,7 @@ from langchain_core.messages import BaseMessage
 
 # The `thinking` config every agent model is built with (supervisor.py and
 # sub_agents.py). `display: "summarized"` is what makes the reasoning's TEXT
-# come back: for claude-sonnet-5 the API's default is to omit it — thinking
+# come back: for claude-sonnet-5-5 the API's default is to omit it — thinking
 # blocks arrive with an empty `thinking` string and only a signature, whatever
 # the SDK docstring says — which left the History panel's thinking toggle blank
 # forever. Verified live (STEPS.md 158): the same call returns the summarized

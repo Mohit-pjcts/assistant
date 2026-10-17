@@ -1,8 +1,32 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
-import { fetchCalendar, type CalendarData, type CalendarEvent } from "@/lib/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  addCalendarEvent,
+  deleteCalendarEvent,
+  fetchCalendar,
+  updateCalendarEvent,
+  type CalendarData,
+  type CalendarEvent,
+} from "@/lib/api";
+import {
+  diffAgainst,
+  emptyForm,
+  EventFormDialog,
+  formFromEvent,
+  toInput,
+  type EventFormValue,
+} from "./EventFormDialog";
 import {
   addMonths,
   byImportance,
@@ -35,6 +59,9 @@ const GROUPS: { value: Group; label: string }[] = [
 function groupOf(event: CalendarEvent): Group {
   return event.kind === "exam" || event.kind === "deadline" ? "due" : event.kind;
 }
+
+// The vault note every add/edit/delete is stored in (calendar_store.ADDED_TITLE).
+const ADDED_SOURCE = "Calendar — Added Events";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const MAX_CHIPS_PER_DAY = 3;
@@ -81,7 +108,19 @@ function EventChip({ event, color }: { event: CalendarEvent; color: string }) {
   );
 }
 
-function AgendaItem({ event, color, day }: { event: CalendarEvent; color: string; day: string }) {
+function AgendaItem({
+  event,
+  color,
+  day,
+  onEdit,
+  onDelete,
+}: {
+  event: CalendarEvent;
+  color: string;
+  day: string;
+  onEdit: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+}) {
   const time = formatTimeRange(event);
   const ongoing = event.end_date != null && event.date !== day;
   return (
@@ -121,6 +160,24 @@ function AgendaItem({ event, color, day }: { event: CalendarEvent; color: string
         </div>
         {event.detail && <p className="mt-1 text-xs text-muted-foreground/80">{event.detail}</p>}
       </div>
+      <div className="flex shrink-0 items-start gap-0.5">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`Edit ${event.title}`}
+          onClick={() => onEdit(event)}
+        >
+          <Pencil />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`Delete ${event.title}`}
+          onClick={() => onDelete(event)}
+        >
+          <Trash2 />
+        </Button>
+      </div>
     </li>
   );
 }
@@ -130,8 +187,11 @@ function AgendaItem({ event, color, day }: { event: CalendarEvent; color: string
 // shown is parsed by the backend from the vault's timetable / deadlines /
 // tutorials notes on each fetch (assistant/calendar_store.py) — this panel
 // holds no schedule data of its own, so a date corrected in the vault is
-// corrected here the next time the tab is opened or refreshed. Read-only: the
-// notes are edited in Obsidian (or by asking Oni to update the note).
+// corrected here the next time the tab is opened or refreshed. Entries can be
+// added, edited and deleted here (or by asking Oni): every change goes to one
+// vault note, "Calendar — Added Events", and the timetable / deadlines notes
+// are never rewritten — an edit or delete of an event that comes from one of
+// them is stored there as an override.
 export function CalendarPanel() {
   const [data, setData] = useState<CalendarData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -145,6 +205,10 @@ export function CalendarPanel() {
     due: true,
   });
   const [hiddenCourses, setHiddenCourses] = useState<Set<string>>(new Set());
+  // null = closed; otherwise the event being edited, or "new".
+  const [editing, setEditing] = useState<CalendarEvent | "new" | null>(null);
+  const [deleting, setDeleting] = useState<CalendarEvent | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -179,6 +243,33 @@ export function CalendarPanel() {
   function goToDay(iso: string) {
     setSelected(iso);
     setMonth(monthKey(iso));
+  }
+
+  async function saveEvent(value: EventFormValue) {
+    if (editing === null) return;
+    if (editing === "new") {
+      const created = await addCalendarEvent(toInput(value));
+      goToDay(created.date);
+    } else {
+      const changes = diffAgainst(formFromEvent(editing), value);
+      if (Object.keys(changes).length > 0) {
+        const updated = await updateCalendarEvent(editing.id, changes);
+        goToDay(updated.date);
+      }
+    }
+    load();
+  }
+
+  async function confirmDelete() {
+    if (!deleting) return;
+    setDeleteError(null);
+    try {
+      await deleteCalendarEvent(deleting.id);
+      setDeleting(null);
+      load();
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function toggleCourse(code: string) {
@@ -217,6 +308,9 @@ export function CalendarPanel() {
         </Button>
         <Button variant="outline" size="sm" onClick={() => goToDay(today)}>
           Today
+        </Button>
+        <Button size="sm" onClick={() => setEditing("new")} data-testid="add-event">
+          <Plus /> Add event
         </Button>
         <div className="ml-auto flex flex-wrap items-center gap-1.5" role="group" aria-label="Show">
           {GROUPS.map(({ value, label }) => (
@@ -354,6 +448,11 @@ export function CalendarPanel() {
                     event={e}
                     color={courseColor(e.course, codes)}
                     day={selected}
+                    onEdit={setEditing}
+                    onDelete={(ev) => {
+                      setDeleteError(null);
+                      setDeleting(ev);
+                    }}
                   />
                 ))}
               </ul>
@@ -418,12 +517,53 @@ export function CalendarPanel() {
 
           {data && (
             <p className="px-1 font-mono text-[0.6rem] text-muted-foreground/70">
-              Read from {data.sources.join(" · ") || "no notes found"}. Edit the notes to change
-              this view.
+              Read from {data.sources.join(" · ") || "no notes found"}. Changes made here are saved
+              in “Calendar — Added Events”; the other notes are left as they are.
             </p>
           )}
         </aside>
       </div>
+
+      <EventFormDialog
+        open={editing !== null}
+        onOpenChange={(open) => !open && setEditing(null)}
+        title={editing === "new" ? "Add event" : "Edit event"}
+        note={
+          editing !== null && editing !== "new" && editing.source !== ADDED_SOURCE
+            ? `From “${editing.source}”. That note is left alone; your change is saved in “${ADDED_SOURCE}”.`
+            : undefined
+        }
+        initial={
+          editing === null || editing === "new" ? emptyForm(selected) : formFromEvent(editing)
+        }
+        courseCodes={codes}
+        onSubmit={saveEvent}
+      />
+
+      <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogTitle>Delete this event?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {deleting
+              ? `“${deleting.title}” on ${formatDayShort(deleting.date)} will be removed from the calendar.` +
+                (deleting.source !== ADDED_SOURCE
+                  ? ` It comes from “${deleting.source}”, which is left as it is; the event is hidden instead.`
+                  : "")
+              : ""}
+          </AlertDialogDescription>
+          {deleteError && (
+            <p role="alert" className="text-sm text-destructive">
+              {deleteError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={confirmDelete}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

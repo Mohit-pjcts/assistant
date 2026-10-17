@@ -514,3 +514,25 @@ test("a conversation picked by the person's name, with the noun after it ('click
   // the noun has to be that word on its own ("chatbot", "threads")
   expect(targets("click on the 'Rishabh Jain' chatbot")).toEqual([]);
 });
+
+// Live, 6 Oct (Oni's Instagram DM goals, each typed into Google whole): an address in the goal is where the task starts, a goal
+// about using a page is never a search query, and Instagram DM goals belong on the inbox.
+const INBOX = "https://www.instagram.com/direct/inbox/";
+test("web plan: an Instagram DM goal opens the inbox, not the home feed or a Google search", () => {
+  expect(webPlan("Go to instagram.com, open the direct messages inbox, find the chat with Rishabh, and send a message that says: hi")![0]!.text).toBe(INBOX);
+  expect(webPlan("Go to instagram.com")![0]!.text).toBe("https://instagram.com");
+});
+test("web plan: 'go to the URL <address>' and 'type <address> and press Enter' open that address", () => {
+  const goal1 = "In the Brave window already on instagram.com, go to the URL https://www.instagram.com/direct/inbox/ to open the direct messages inbox, click on the search field for chats, type Rishabh, click the chat that appears for Rishabh, and send a message that says: hi";
+  expect(webPlan(goal1)![0]!.text).toBe(INBOX);
+  const goal2 = "Click the browser address bar, clear it, type https://www.instagram.com/direct/inbox/ and press Enter to navigate there, and tell me what the page shows";
+  expect(webPlan(goal2)![0]!.text).toBe(INBOX);
+  expect(webPlan("open https://example.com/pricing and tell me the price")![0]!.text).toBe("https://example.com/pricing");
+});
+test("web plan: a goal about using the page is not sent to Google as one long query", () => {
+  expect(webPlan("open the chat with Rishabh Jain and send a message that says: hi")).toBeNull();
+  expect(webPlan("click on the search field for chats and type Rishabh")).toBeNull();
+  // real searches are unchanged
+  expect(webPlan("search for the population of Hong Kong")![0]!.text).toContain("google.com/search?q=the%20population");
+  expect(webPlan("search for flights and click the cheapest")![0]!.text).toContain("google.com/search?q=");
+});

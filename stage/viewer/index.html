@@ -5,60 +5,79 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Stage · Backstage</title>
 <style>
-  :root{--bg:#f5f5f7;--card:#fff;--ink:#1d1d1f;--mute:#6e6e73;--line:#e2e2e7;--accent:#0071e3;
-    --ok:#1a7f37;--okbg:#e7f6ec;--bad:#b42318;--badbg:#fdecea;--warn:#8a5a00;--warnbg:#fff4d6}
-  @media (prefers-color-scheme: dark){:root{--bg:#111214;--card:#1b1c1f;--ink:#f2f2f4;--mute:#9a9aa3;--line:#2c2d31;--accent:#4aa3ff;
-    --ok:#4cd07d;--okbg:#12301f;--bad:#ff8b7e;--badbg:#38191a;--warn:#ffc857;--warnbg:#3a2f12}}
+/*ONI_FONTS*/
+  /* Stage's panel wears Oni's theme (dashboard/src/index.css): same violet accent, same void/paper/graphite/moss/rust
+     tokens, same three type roles (Instrument Serif display · Instrument Sans body · IBM Plex Mono labels), same
+     hairline-edged 6px "instrument" cards and left-rail grammar. Dark is the default, as in Oni; light via the toggle. */
+  :root{--bg:#161619;--side:#1b1b1f;--card:#232328;--ink:#dcdde1;--mute:#97979e;--line:#2a2a30;--edge:#4a4a50;--accent:#9b87f5;--accent-ink:#1c1533;
+    --ok:#7ec9a6;--bad:#e0788a;--warn:#e0a93a;color-scheme:dark;
+    --serif:"Instrument Serif",Georgia,serif;--sans:"Instrument Sans",ui-sans-serif,system-ui,sans-serif;--mono:"IBM Plex Mono",ui-monospace,monospace}
+  :root[data-theme=light]{--bg:#f2f1f6;--side:#ece8f2;--card:#fff;--ink:#1c1a24;--mute:#67626f;--line:#e3dff2;--edge:#8f7bc4;--accent:#6d4fd1;--accent-ink:#fff;
+    --ok:#2c6b4d;--bad:#b03d4f;--warn:#7a5207;color-scheme:light}
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
-  header{padding:14px 20px;background:var(--card);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
-  h1{margin:0;font-size:19px}.sub{color:var(--mute);font-size:13px}
-  .pill{display:inline-flex;gap:6px;align-items:center;padding:3px 10px;border-radius:99px;border:1px solid var(--line);font-size:12.5px;font-weight:600;background:var(--bg)}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans)}
+  header{padding:16px 24px;background:var(--side);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+  header .grow{flex:1;min-width:260px}
+  h1{margin:0;font:400 28px/1.15 var(--serif);letter-spacing:.005em}.sub{color:var(--mute);font-size:13px}
+  .pill{display:inline-flex;gap:6px;align-items:center;padding:3px 10px;border-radius:99px;border:1px solid var(--edge);font:500 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--mute);background:transparent}
   .pill.off{color:var(--bad);border-color:var(--bad)}
-  main{padding:16px 20px;display:grid;gap:16px}
-  section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
-  h2{margin:0 0 10px;font-size:12.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--mute)}
-  textarea{width:100%;min-height:62px;resize:vertical;border-radius:10px;border:1px solid var(--line);padding:10px 12px;background:var(--bg);color:var(--ink);font:15px/1.4 inherit}
-  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
-  button{padding:8px 14px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:14px;cursor:pointer}
-  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  #theme{padding:4px 10px;font:500 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--mute);background:transparent}
+  main{padding:20px 24px;display:grid;gap:16px;max-width:1280px;margin:0 auto}
+  section{background:var(--card);border:1px solid var(--edge);border-radius:6px;padding:16px 18px}
+  h2{margin:0 0 12px;font:500 11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+  textarea{width:100%;min-height:68px;resize:vertical;border-radius:6px;border:1px solid var(--line);padding:10px 12px;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);outline:none}
+  textarea:focus{border-color:var(--accent)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  button{padding:7px 14px;border-radius:6px;border:1px solid var(--edge);background:transparent;color:var(--ink);font:500 13.5px var(--sans);cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+  button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+  button.primary:hover:not(:disabled){color:var(--accent-ink);opacity:.9}
   button.danger{color:var(--bad);border-color:var(--bad)}
-  button:disabled{opacity:.45;cursor:not-allowed}
-  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
-  .seg label{padding:7px 12px;font-size:13.5px;cursor:pointer}.seg input{display:none}.seg input:checked+span{font-weight:700;color:var(--accent)}
-  .chip{display:inline-block;padding:4px 10px;border-radius:99px;background:var(--bg);border:1px dashed var(--line);font-size:12.5px;cursor:pointer;margin:6px 6px 0 0}
+  button.danger:hover:not(:disabled){background:color-mix(in srgb,var(--bad) 14%,transparent);color:var(--bad);border-color:var(--bad)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .seg{display:inline-flex;border:1px solid var(--edge);border-radius:6px;overflow:hidden}
+  .seg label{padding:6px 12px;font-size:13px;cursor:pointer;color:var(--mute)}.seg input{display:none}.seg input:checked+span{font-weight:600;color:var(--accent)}
+  .chip{display:inline-block;padding:4px 11px;border-radius:99px;background:transparent;border:1px solid var(--edge);color:var(--mute);font-size:12.5px;cursor:pointer;margin:8px 6px 0 0;transition:color .15s,border-color .15s}
+  .chip:hover{color:var(--accent);border-color:var(--accent)}
   .err{color:var(--bad);font-size:13.5px;margin-top:6px}
   .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
-  .agent{border:1px solid var(--line);border-radius:12px;padding:12px;border-top:5px solid var(--c);background:var(--bg)}
+  /* the left rail is Oni's one recurring structural device; here it carries the agent's own colour */
+  .agent{border:1px solid var(--line);border-left:3px solid var(--c);border-radius:6px;padding:12px 14px;background:var(--bg)}
   .agent .t{display:flex;justify-content:space-between;align-items:center;gap:8px}
-  .badge{display:inline-flex;align-items:center;gap:6px;font-weight:700}.badge i{width:11px;height:11px;border-radius:50%;background:var(--c);display:inline-block}
-  .st{font-size:12px;font-weight:700;padding:2px 9px;border-radius:99px}
-  .st.running{background:var(--warnbg);color:var(--warn)}.st.done{background:var(--okbg);color:var(--ok)}.st.failed{background:var(--badbg);color:var(--bad)}.st.queued{border:1px solid var(--line);color:var(--mute)}
-  .goal{margin:6px 0;font-size:13.5px}.now{font-size:12.5px;color:var(--mute)}
+  .badge{display:inline-flex;align-items:center;gap:7px;font-weight:600}.badge i{width:9px;height:9px;border-radius:50%;background:var(--c);display:inline-block}
+  .st{font:500 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:99px;border:1px solid currentColor}
+  .st.running{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}.st.done{color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent)}.st.failed{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}.st.queued{color:var(--mute)}
+  .goal{margin:8px 0 6px;font-size:13.5px}.now{font-size:12.5px;color:var(--mute)}
   .ans{margin-top:6px;font-size:13.5px}.ans.ok{color:var(--ok)}.ans.bad{color:var(--bad)}
   .plan{margin-top:6px;font-size:12px;color:var(--mute)}
   .last{margin-top:8px;font-size:12.5px}
-  .bars{display:flex;flex-wrap:wrap;gap:10px;margin-top:4px;font-size:12px;color:var(--mute)}
-  .bar{display:flex;align-items:center;gap:5px}.bar i{width:58px;height:6px;background:var(--line);border-radius:3px;overflow:hidden;display:block}.bar i b{display:block;height:100%;background:var(--accent)}
+  .bars{display:flex;flex-wrap:wrap;gap:10px;margin-top:4px;font:400 11.5px var(--mono);color:var(--mute)}
+  .bar{display:flex;align-items:center;gap:5px}.bar i{width:58px;height:5px;background:var(--line);border-radius:3px;overflow:hidden;display:block}.bar i b{display:block;height:100%;background:var(--accent)}
   .bar.low i b{background:var(--bad)}
-  .meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--mute)}
+  .meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font:400 11.5px var(--mono);color:var(--mute)}
   table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-  th{color:var(--mute);font-weight:600;font-size:12px}td.num{font-variant-numeric:tabular-nums;text-align:right}th.num{text-align:right}
-  .tag{font-size:11.5px;padding:1px 7px;border-radius:6px;border:1px solid var(--line)}
+  th{color:var(--mute);font:500 10.5px var(--mono);letter-spacing:.08em;text-transform:uppercase}td.num{font:400 12.5px var(--mono);text-align:right}th.num{text-align:right}
+  .tag{font:500 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:1px 7px;border-radius:99px;border:1px solid var(--edge)}
   .tag.jev{color:var(--accent);border-color:var(--accent)}.tag.llm{color:var(--warn);border-color:var(--warn)}
   #feed{max-height:52vh;overflow:auto;font-size:13px}
-  .ln{padding:6px 0 6px 10px;border-left:4px solid var(--c);margin-bottom:5px}
-  .ln .h{display:flex;justify-content:space-between;gap:8px;color:var(--mute);font-size:12px}
+  .ln{padding:6px 0 6px 12px;border-left:3px solid var(--c);margin-bottom:6px}
+  .ln .h{display:flex;justify-content:space-between;gap:8px;color:var(--mute);font:400 11.5px var(--mono)}
   .grid2{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}@media (max-width:1000px){.grid2{grid-template-columns:1fr}}
-  .callout{font-size:13px;color:var(--mute);margin-top:8px}
-  .verdict{margin-top:10px;padding:10px 12px;border-radius:10px;background:var(--okbg);color:var(--ok);font-weight:600;font-size:14px;display:none}
+  .callout{font-size:12.5px;color:var(--mute);margin-top:10px}
+  .verdict{margin-top:12px;padding:10px 12px;border-radius:6px;border:1px solid var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent);color:var(--ok);font-weight:600;font-size:14px;display:none}
   td.cmd{max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}::-webkit-scrollbar-thumb:hover{background:var(--edge)}
 </style>
+<script>
+// Theme is applied before first paint (no light flash). ?theme= wins, then the saved choice, then Oni's own default: dark.
+(function(){var t=new URLSearchParams(location.search).get("theme");try{t=t||localStorage.getItem("stage-theme")}catch(e){}
+document.documentElement.dataset.theme=t==="light"?"light":"dark"})();
+</script>
 </head>
 <body>
 <header>
-  <div><h1>Stage · Backstage</h1><div class="sub">Tell it what to do. Coloured agents work in your apps' windows in the background. A cheap classifier decides every step instead of an LLM.</div></div>
-  <span class="pill" id="kTs">TypeSafe</span><span class="pill" id="kAn">Anthropic</span><span class="pill" id="speed" style="display:none"></span>
+  <div class="grow"><h1>Stage · Backstage</h1><div class="sub">Tell it what to do. Coloured agents work in your apps' windows in the background. A cheap classifier decides every step instead of an LLM.</div></div>
+  <span class="pill" id="kTs">TypeSafe</span><span class="pill" id="kAn">Anthropic</span><span class="pill" id="speed" style="display:none"></span><button id="theme" title="Switch between Oni's dark and light themes">Light</button>
 </header>
 <main>
   <section>
@@ -109,6 +128,10 @@ document.querySelectorAll(".chip").forEach((c) => c.onclick = () => { $("cmd").v
 $("run").onclick = async () => { $("err").textContent = ""; const r = await post("/api/run", { command: $("cmd").value, brain: brain(), source: "panel" }); if (!r.ok) $("err").textContent = r.error; else $("feed").innerHTML = ""; };
 $("cmp").onclick = async () => { $("err").textContent = ""; const r = await post("/api/compare", { command: $("cmd").value }); if (!r.ok) $("err").textContent = r.error; else $("feed").innerHTML = ""; };
 $("stop").onclick = () => post("/api/stop");
+const root = document.documentElement;
+const syncTheme = () => { $("theme").textContent = root.dataset.theme === "light" ? "Dark" : "Light"; };
+$("theme").onclick = () => { root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light"; try { localStorage.setItem("stage-theme", root.dataset.theme); } catch {} syncTheme(); };
+syncTheme();
 $("cmd").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("run").click(); });
 
 const col = (h) => (S && S.colours[h]) || "#888";

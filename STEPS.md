@@ -13051,6 +13051,144 @@ API/network cost of spinning up another full agent-construction test).
 **Not committed** — save-point proposal given directly to the user (a
 git-workflow decision per CLAUDE.md's own rule), not drafted here.
 
+## 153. Daily diary — journal entries stored in Oni's own vault, dashboard authoring, no new phase number opened yet
+
+**2026-09-28, 18:28.** Requested directly: "I want to diary everyday and
+give Oni access to every diary entry so she can know more about me."
+Real architecture fork before any code — asked the user two questions
+rather than guessing: (1) do entries live in the existing Obsidian vault
+(Phase 27's `obsidian_tools.py`, which already gives Oni full ungated
+read/search access) or a new dedicated store; (2) is an entry authored by
+talking it out with Oni, a dedicated journal box, or written directly in
+Obsidian by hand. Answered: existing vault, dedicated journal box (type
+or dictate, no back-and-forth needed).
+
+**Built:** `assistant/diary_store.py` — one Note per calendar day under
+a new `Diary/` subfolder of the same `obsidian_tools.VAULT_DIR`, full-
+replace-on-resave semantics (a journal box edits one day's page in place,
+it isn't an append log). **The one load-bearing security decision, its
+own module docstring's main point:** entries are deliberately NOT written
+through Oni's own `write_vault_note`/`update_vault_note` tools, because
+those always stamp `oni: true` — the exact marker `delete_vault_note`/
+`update_vault_note` use to decide Oni is allowed to overwrite or delete a
+note. Stamping a diary entry `oni: true` would have silently stripped the
+one protection ADR 0001 gives content the user wrote themselves. This
+module's own frontmatter uses `diary: true` instead and never `oni: true`
+— proven end to end, not just asserted, by
+`test_oni_delete_vault_note_refuses_to_touch_a_diary_entry` actually
+calling Oni's real `delete_vault_note` tool against a written entry and
+checking it refuses. `search_vault`'s existing whole-vault-tree walk
+already reaches `Diary/` with zero code changes there — verified with
+`test_search_vault_finds_diary_entries`. 11 new tests in
+`tests/test_diary_store.py`, same temp-vault-monkeypatch convention as
+`test_obsidian_tools.py` (including its own documented
+`vault_search.semantic_search`-rebinding gotcha).
+
+`server.py` gained `GET /diary` (list, newest first), `GET /diary/{date}`,
+`POST /diary` (upsert), `DELETE /diary/{date}` — same "curating your own
+data, no confirmation gate" reasoning `delete_board_task`/
+`delete_memory_fact` already use, since Oni itself has no write path here
+at all (see above). Dashboard: new `JournalPanel.tsx` (a `NavRail` entry,
+"Journal", between History and Memory — 9 destinations now, not 8) with a
+single editable box for the selected day (today by default), a mic button
+reusing `ChatPanel.tsx`'s own `transcribeVoice`/`MediaRecorder` pipeline
+but inserting the transcript into the entry instead of sending a chat
+turn, and a scrollable list of past entries (click to load into the
+editor, delete with the same `AlertDialog` confirm pattern
+`MemoryPanel.tsx` already uses). 7 new frontend tests
+(`JournalPanel.test.tsx`); 182/182 frontend tests pass suite-wide,
+`tsc`/`prettier`/`build` all clean. Backend: `ruff check assistant/
+tests/` clean (1 pre-existing, unrelated `supervisor.py` finding, not
+introduced here); full-suite `pytest --collect-only` confirms no import
+breakage (474 tests collect cleanly) — the real-API-cost full run was
+deliberately not executed, same cost-conscious precedent as STEPS.md 152.
+
+**Deliberately not touched:** no supervisor/specialist system-prompt
+change to make Oni diary-aware — `search_vault` is already generic
+whole-vault content search, so "what have I been feeling about X lately"
+already reaches Diary/ notes with no special-casing; revisit only if that
+turns out not to be enough in practice.
+
+**Live-verified against the real running backend, with the user's
+explicit go-ahead to restart it:** the process was found running as a
+child of the real `/Applications/Oni.app` (no `--reload`, so it wouldn't
+have picked up these changes on its own). Asked before touching it;
+approved. Stopped it with `SIGTERM` (took ~8s to actually exit — a real
+open connection, not an error), relaunched the identical `uvicorn
+assistant.server:app --host 0.0.0.0 --port 8000` command from the same
+cwd, and confirmed the live Tauri window reconnected on its own within
+seconds (its existing idle-poll traffic — `/board/tasks`,
+`/activity/active`, `/claude-code-sessions/live` — resumed in the new
+process's log with no user action needed, the same self-healing
+`fetchWithRetry` behavior Phase 19 built for exactly this kind of
+backend hiccup). Then ran a full `POST`→`GET`→`GET list`→`DELETE`→`GET`
+(404) round trip against a throwaway `2020-01-01` date directly through
+the live server — real HTTP calls, not mocks — confirming the whole
+wire path end to end, and deleted the smoke-test entry immediately after
+so nothing fake was left in the real vault. The dashboard's own Journal
+tab itself (clicking through the actual UI) is still the user's own next
+step — this verified the backend and the wiring, not a human looking at
+the rendered panel. **Not committed** and no phase number opened for
+this yet — small enough in scope that it wasn't run through its own
+`/grill-with-docs` session; flagged here in case a future session wants
+to formalize it as a numbered phase.
+
+**Follow-up, same day: "I don't see the features on the app" — a real
+gap in the above, not a new bug.** The backend restart above was the
+easy half; the FRONTEND wasn't actually live. `/Applications/Oni.app`
+(STEPS.md 149-150's own packaged release build, `tauri.conf.json`'s
+`frontendDist: "../dist"`) bakes `dashboard/dist` into the compiled
+binary at `tauri build` time — it does not read the loose `dist/`
+folder at runtime the way a `tauri dev` session would. The earlier `npm
+run build` in this same entry updated that loose folder on disk, which
+is why `tsc`/`build` looked clean, but the INSTALLED app never picked it
+up. Asked before doing anything about it (same standing rule as the
+backend restart); approved.
+
+Sequence: quit the running `Oni.app`; found and killed an orphaned
+manually-started `uvicorn` left over from the earlier backend-restart
+step (a real, live-reproduced instance of the exact "orphaned backend"
+failure class STEPS.md 149's own commit already named — a lesson worth
+repeating: a process started by hand outside Tauri's own
+`spawn_backend()` lifecycle needs cleaning up by hand too, it doesn't
+just go away); ran `npm run tauri build` (the `.app` bundled cleanly;
+its `.dmg` step failed on `bundle_dmg.sh` in this environment — harmless
+and ignored, only the `.app` was needed). Verified the fresh build
+actually contains the new panel BEFORE installing it anywhere:
+`grep -o "journal-entry-input" dist/assets/index-*.js` matched, proving
+the exact assets about to be installed really do carry `JournalPanel.tsx`
+compiled in, not just "the build succeeded."
+
+A real self-inflicted near-miss along the way: testing the freshly built
+binary directly (`.../target/release/bundle/macos/Oni.app/.../dashboard
+--help`) actually launched a full second live instance (Tauri apps don't
+treat an unrecognized flag as a reason to exit) rather than printing
+help text — its spawned backend was caught and killed. Then `open -a`
+on the newly-installed `/Applications/Oni.app` raced a leftover instance
+from that same near-miss and briefly produced TWO running copies both
+trying to bind port 8000 — caught via `ps`/`lsof`, both killed, then
+exactly one clean `open` on the installed app confirmed via `ps` showing
+a single `dashboard`→`uvicorn` pair. Old installed app backed up to
+`/Applications/Oni (backup 2026-09-28).app` (an existing, earlier
+`Oni (old backup).app` from 2026-09-24 left untouched) before the new
+one was installed via `ditto`.
+
+**Actually live-verified, not just inferred:** `curl /diary` against the
+freshly relaunched installed app returned 200; a full-screen
+`screencapture` of the real window, cropped to the nav rail, visually
+confirms a book icon (the new "Journal" entry) sitting exactly where it
+was coded — third position, between the History clock icon and the
+Memory brain icon, matching `NavRail.tsx`'s own ordering. Did not click
+into the panel itself — an attempt to reach the button via accessibility
+API (`System Events` querying by `description "Journal"`) came back
+empty (WKWebView's accessibility tree needs a deeper/different query
+than a flat window-level button search), and blind pixel-coordinate
+clicking in the user's live, real-data app was judged not worth the risk
+of a stray click for a gap this narrow. The nav icon's presence and
+position is strong evidence the panel itself is there too, but a human
+click-through in the real window is still the final, cheapest way to
+fully close this out.
+
 ## 154. Backstage desktop agents in Oni — the HacKU 2026 engine as a mac_control_agent capability, no new phase number opened yet
 
 **Superseded by STEPS.md 155** (same branch): the engine became `stage/`, the four `mac_control_agent` tools were replaced by two code-backed supervisor specialists (`backstage`, `onstage`), and `assistant/backstage_tools.py` was deleted. Kept here for the record of the first design and its live check.
@@ -13304,6 +13442,153 @@ Three tabs. **Conversation**: each turn is the user's message then its events in
 - `compaction.py` still builds its summarizer transcript with `repr()` of list contents, so summarized thinking text now reaches that Haiku prompt (left alone on purpose, a separate cleanup).
 - `~/Library/Logs/PersonalAssistant/oni-dev.log` is 44.7 GB (a Sep 24 dev-server log); the agent runs' flood replaced the history in `oni-backend.log` and its rotations. Both are for the user to delete.
 
+## 159. Chat looks like Claude's, replies are formatted, cards stop repeating, Stage wears Oni's theme (2026-10-13)
+
+**Ask (user, verbatim):** "I want the chatbox ui to look like claude chat's. currently the ui looks text heavy and the text itself is not formatted like it is when im on the claude app. the ui components used are always the same, its just cards again and agian. another thing is that i want stage to follow oni's theme."
+
+**Root causes, found before editing:**
+- *Text not formatted:* `ChatPanel.tsx` rendered every assistant reply as `{message.content}` in a `whitespace-pre-wrap` div. No markdown renderer was installed at all (`node_modules` had none), so `**bold**`, tables, lists and code fences showed as raw source.
+- *Cards again and again:* two causes stacked. `sub_agents.py`'s research and life-admin prompts literally instructed "one Card per item/source/option" / "one Card per event/email/board column", and `A2UIRenderer`'s `CardNode` rendered each as an `InstrumentCard` (hairline edge + spotlight + 3D tilt), the app's heaviest primitive.
+- *Stage off-theme:* `stage/viewer/index.html` (the Backstage panel) carried its own Apple-style palette (system blue, SF font). The native Swift overlay has its own colours too (see limits).
+
+**Chat (dashboard):**
+- Added `react-markdown` + `remark-gfm`; new `components/chat/Markdown.tsx` renders headings, lists, GFM tables (scroll container), blockquotes, inline code, links, and fenced code with a language label and Copy button. Memoized (streaming re-renders per token).
+- **Security, deliberate:** model output can carry text from web pages/emails, so the renderer is display-only: no raw HTML (no `rehype-raw`), links keep react-markdown's protocol allowlist and open with `noopener noreferrer`, and `![alt](url)` is NOT rendered as `<img>` (a remote image fetch is a zero-click request to an attacker-chosen host, the same channel `a2ui.py` closes by accepting only `data:` URIs); the alt text is shown instead. Each guarantee has a test.
+- `ChatPanel.tsx`: Claude-app layout. User turn = soft right-aligned rounded pill; assistant turn = full-width markdown with no label or container; centred 760px column; composer = one rounded card (textarea above a toolbar row: attach left, mic + round send-arrow right). The landing dock lost its glass wrapper (the composer is now its own card). Every `aria-label`/placeholder/`data-testid` the tests use is unchanged (the placeholder stays "Message the assistant…": a first attempt to rename it broke 21 tests, reverted rather than churn them).
+- `A2UIRenderer.tsx` `CardNode`: now a quiet tinted container, not an `InstrumentCard`. `InstrumentCard` stays for the real objects (gate, kanban).
+
+**Prompts (assistant/):** supervisor, research and life-admin prompts now say: default to well-formatted markdown (tables, bullets, bold, fences); use `render_ui` only when markdown can't carry it; vary components (List of Row(Text+Badge) with Dividers, Tabs, Badges, Icons); never one Card per item, at most one Card to group one discrete object. **These are local fallbacks only: `prompts.get_prompt()` prefers Langfuse's remote "production" prompt, so the change does not take effect until `scripts/sync_prompts_to_langfuse.py` is run (Phase 18's exact lesson). Not run here: it writes to the user's Langfuse.**
+
+**Stage (stage/):** `viewer/index.html` rewritten onto Oni's tokens (void/paper/graphite/violet accent/moss/rust, light and dark value sets copied from `dashboard/src/index.css`), Oni's three type roles, mono uppercase section labels, 6px hairline cards, left-rail agent cards in each agent's own colour. Dark by default as in Oni, with a Light/Dark toggle (`?theme=` and localStorage `stage-theme`; Oni's own preference lives on another origin so can't be read). Fonts are inlined as data URIs in the new `viewer/oni-fonts.css` (114 KB, generated from `@fontsource`, spliced in by `server.ts` per request) rather than served from a route, because every Stage route requires the launch token and a CSS font fetch can't send it; no new unauthenticated route was added.
+
+**Verification:** dashboard `vitest` 441/441 (7 new `Markdown.test.tsx`), `tsc`, `prettier --check` clean; Stage `tsc` clean, `bun test tests/server.test.ts` 30/30; ruff shows only the known UP035. Visual: screenshots in headless Chromium of the real dashboard (Vite on :1420 with the backend mocked in-browser, no real thread touched) in dark and light, showing heading/table/list/quote/code/user pill/composer and a List-of-rows A2UI surface; and of the Stage panel with fake run state in both themes. Found and fixed in that pass: table last-row border rule was hitting the last cell of every row.
+
+**Known limits:** (1) Stage's native Swift overlay (`overlay/Overlay.swift`: mint/coral/ink glow, cursor labels, the question bar) is NOT re-themed. It needs a rebuild and re-signing, and a fresh ad-hoc signature has re-triggered macOS permission prompts before; it is a three-constant change if wanted. (2) The running Stage on :3000 and the running Oni app serve old code until restarted/reloaded. (3) The prompt sync above. (4) Not checked in the real Tauri window, and no live model reply was generated, so how often the models actually stop using Cards depends on the synced prompts. (5) A2UI `Row` with `justify: spaceBetween` doesn't span the column (the surface wrapper is content-width), so the label/badge rows sit left-aligned; cosmetic, untouched.
+
+### 159.1 Follow-up: the open items closed (2026-10-13, same session, at the user's "complete everything")
+- **Prompts synced to Langfuse** (`scripts/sync_prompts_to_langfuse.py`, all 7, label=production). Confirmed from a fresh import that `RESEARCH_SYSTEM_PROMPT` and `LIFE_ADMIN_SYSTEM_PROMPT` now resolve to the new text ("Do NOT wrap every item"). The sync also pushed the six unchanged prompts as new versions with identical text (the script always pushes all seven); harmless.
+- **A2UI row width:** the surface wrapper was `max-w-[80%] self-start` (content-width), so `justify: spaceBetween` rows didn't span; now `w-full max-w-[560px] self-start`.
+- **Stage overlay re-themed** (`overlay/Overlay.swift`): the mint/coral/ink constants became Oni's violet `#9b87f5` / rust `#e0788a` / void `#161619`, plus a new moss `#7ec9a6` for the one place mint meant "done" (a widget's status badge); `MINT`/`CORAL` renamed `VIOLET`/`RUST` so the names stay true. Compiled to a temp path first (the build script `rm -rf`s the bundle before compiling), then rebuilt by `scripts/start.sh`, which signed it with the existing "Backstage Local Signing" identity, so macOS permissions survive. System fonts are unchanged in the overlay (Instrument Sans would need installing system-wide).
+- **Stage restarted** (checked `busy: false` first): new panel live on :3000 with Oni's fonts and tokens inlined (confirmed by fetching it with the launch token), overlay reconnected.
+- **Not done, needs the user:** the running Oni app is a compiled bundle and its backend (started 11 Oct, no `--reload`) holds the old prompts and old frontend, so the chat redesign and the new prompts take effect only after a rebuilt `Oni.app` is installed and the app restarted (same Documents-folder permission click as STEPS.md 158's open item). A bundle was built for that, not installed over the running app.
+
+### 159.2 Stage now lives and dies with the Oni app (2026-10-13)
+
+**Ask (user, verbatim):** "can we make stage run on oni instead of being a python script thats always running in the bg?" Then, to the one question asked back (accept that Stage's hotkey stops working when Oni is closed?): "live and die with oni".
+
+**Correction first:** Stage isn't Python. It is a Bun/TypeScript server plus a Swift overlay app, and it only ran because `bash stage/scripts/start.sh` had been launched by hand and left going (nothing auto-started it; Oni just looked for `server.json`). Folding it into the Python backend was ruled out: it depends on the TypeScript TypeSafe SDK, the Swift overlay and `cua-driver`.
+
+**Change:** `dashboard/src-tauri/src/lib.rs` gets `spawn_stage()` / `stop_stage()` beside the backend's. On launch it runs `stage/scripts/start.sh` (not re-implemented: that script already replaces an older Stage via the pid in `server.json`, which also cleans up after an Oni crash; rebuilds the overlay only if its source is newer; puts Bun on PATH; starts the server from `stage/` where Bun reads `.env`; opens the overlay). It is not waited on (a stale overlay means a few seconds of `swiftc`). On quit (same `ExitRequested`/`Exit` hook as the backend) it sends SIGTERM and waits up to 4 s so the script's own trap stops the server and overlay, forces it only after that, then sweeps the overlay by name. `Child::kill()` alone would have been SIGKILL, skipped the trap and orphaned both. Output goes to `~/Library/Logs/PersonalAssistant/stage.log`, mode 0600 and truncated each launch, because it prints the panel URL with this launch's token. `ONI_NO_STAGE=1` skips the launch. Nothing else changed: `start.sh` still works standalone. `assistant/stage.py`'s "not running" hint, its docstring and `stage/README.md` now say Oni starts Stage; the two phrases `test_stage.py` pins are kept.
+
+**Verification:** `cargo check` clean; `tests/test_stage.py` 64/64, ruff clean. The shutdown mechanism was run for real against the actual script, doing the same spawn and SIGTERM the Rust does: up = server + overlay + `server.json`; after SIGTERM the script exited in 1.6 s with no leftover processes and `server.json` removed. That test replaced the user's running Stage for about a minute (checked idle first) and it was restarted afterwards. First attempt died with exit 144: its own command text contained the string `pkill -f` matches, so it killed the shell running it (found, not guessed; reran from a file). **Not verified:** the Rust code actually running inside the launched app. Doing that here would have started a second backend and killed the user's live one on port 8000 (`free_port`), and a Finder-launched app's environment (PATH) was reasoned from `start.sh`/`driver.ts`, not observed.
+
+**Consequence the user accepted:** with Oni closed, the Control+Option hotkey, the overlay and Backstage's agent widgets don't exist. Until the new app is installed, the Stage that is running is the standalone one (restarted by hand); the first launch of the new Oni replaces it.
+
+### 159.3 Stage's agent cursors are Cua's own again, also on fast-lane actions (2026-10-13)
+
+**Ask (user, verbatim):** "i really liked how the cursor agent looked during the first few prototypes which were completely cua. can we use those?" Context found first: Oni's server had set `driver.cuaCursors = false` so the Swift overlay drew its own coloured, named cursors; the Swift fast lane (2-4 ms presses) has no cursor of its own, so fast actions showed only a ring.
+
+**Verified before building:** Cua's `move_cursor` (default window scope) moves only the agent-cursor overlay: probed with a throwaway session, the hardware pointer stayed at (880, 520) while the cursor moved; the default theme is `cua.default`; the call takes ~0.18 s (it waits out the 150 ms glide set in `ensureSession`).
+
+**Change:** `driver.ts` `glide()` awaits `move_cursor` to the element's centre just before each fast-lane press/type (a failure costs only the visual). `server.ts`: `STAGE_CURSORS=overlay` restores the old behaviour; by default Cua's cursors stay on, a Cua action sends the overlay nothing (Cua animates its own click) and a fast-lane action sends only the ring (`agent: ""` = ring without the overlay's cursor), so there is never a second cursor. Two new server tests (overlay socket receives exactly that); `bun test` 159/159, `tsc` clean.
+
+**Live (Stage restarted on the new code, idle first):** Calculator "128 times 37" ran twice. Run 2: 4.7 s, answer 4,736, 8/8 actions, each fast-lane action 173-223 ms (was ~23 ms: the glide), press itself 9-38 ms. Mid-run screenshots (deleted afterwards) show Calculator working behind Terminal and Finder with Terminal staying frontmost, and one teal cursor with a "Mint-3" label gliding across the keys. Run 1 took 31 s, but 25.7 s of it passed before the plan step (start-up: finding/opening Calculator); the eight steps cost the same as in run 2, so the cursor is not the cause. Cause of that start-up gap not investigated.
+
+**Costs / not verified:** each fast action now takes ~0.2 s instead of ~0.02 s (still ~3x faster than a Cua click). Cua's cursor is one theme (only one agent seen), so per-agent colours/name pills from the overlay are gone from the cursor itself (widgets keep colours); the overlay's widget previews no longer show cursor ripples. Not tried with two agents at once.
+
+### 159.4 Tests for "WhatsApp, Instagram and forms, with context from the Vault" (2026-10-13)
+
+**Ask (user):** "Do all the tests you want to do to make a better plan." Uses: WhatsApp (app) and Instagram (browser) messages, Google/Microsoft forms, with the context coming from the Oni Vault; and "is Oni smart enough to look for the answers in Oni Vault and send them through Stage?"
+
+**Vault → Stage (real backend, throwaway threads, harmless TextEdit target, nothing sent to anyone):**
+- "write my full name and HKU email from my vault": `search_vault` (7.5 s, cold embedding model) → `read_vault_note` → `backstage`; correct values. 60 s total, because the first Stage run failed (the multi-line text went through the paste route, which reported success but put nothing on screen; the screen check caught it) and Oni recovered via `backstage_look` + a retry.
+- "write my HKU email address" (NO mention of the vault): Oni searched the vault itself, read "HKU Admission & Enrollment", one Stage task, done first try, 22.6 s total. So the retrieval is real, not prompt-triggered. But supervisor.py's prompt says nothing about consulting the vault before messaging or form-filling; it works because the model decides to. Untested: facts spread across several notes, ambiguous facts, and replies that over-share extra vault detail.
+
+**Forms (local replica of Google Forms' structure: aria-labelled inputs, div radios/checkboxes, a custom listbox; a logger records the DOM state so results are graded, not eyeballed):**
+- Through Oni, whole form: filled name + email, failed the dropdown and checkboxes ("more than 25 steps", "not sure what to do next"), 456 s, then an error frame. Oni also mis-reported "I can only open URLs" after trying `open_url_in_brave` first.
+- Stage directly, per widget (Brave AX route): email ✓ 8 s, paragraph ✓ 10 s, checkboxes ✓ ~2 s, dropdown ✗ twice (10-11 steps, 20-24 s, "three actions in a row changed nothing"), name field **false "done"**: `type_text` was refused (`keyboard_ambiguity`: the user's Brave has a second window), Stage fell back to real foreground typing ("unverifiable") and the text never reached the page, yet the screen check passed. Where those foreground keystrokes went is unknown.
+- Stage refuses to open `http://127.0.0.1:…` itself ("websites open with open_url"); Oni's separate Brave-open tool does it.
+- **Spike: Cua's `browser_*` DevTools tools in a driver-owned isolated Chromium (what the Windows repo uses)** on the same form: name, email, bio via `browser_type` ✓ (~1.5 s each), dropdown ✓, all 5 checkboxes ✓ — 5/5 graded PASS plus bio. Trusted clicks are refused on macOS (`browser_input_trust_unavailable`); `input_route:"dom_event"` (synthetic click on the ref) works and is fully background. Each action measured ~1.1 s because my script re-snapshotted per action. Caveats: my form is a replica, not Google Forms (synthetic clicks may be ignored by trust-gated controls); the isolated profile has no logins (`isolated_named` would persist one; not tested).
+- Instagram: Stage's own logs show 5 failed DM attempts on 5 Oct then one "done"; STEPS 157.2 fixed three causes on 6 Oct; no later live run found. WhatsApp: no Stage runs in the logs at all; the app is running and its window is readable (215 AX elements, a "Compose message" text area), but no draft or send was attempted in any real chat.
+
+**Cleanup:** test threads deleted, form server stopped, the isolated browser ended with its session, TextEdit scratch files removed. Two test tabs on 127.0.0.1:8765 may remain in the user's Brave (a scripted close failed on its 200+ tabs; left alone).
+
+### 159.5 Real test: "Text Rishabh on both WhatsApp and Instagram" (2026-10-13, 03:51-03:52)
+
+**Ask (user, verbatim):** "Text Rishabh on both WhatsApp and Instagram. My accounts are logged in on the Brave browser". No message text given; "hi" was used, matching the user's own earlier test message to the same contact (STEPS 157.2). Both messages were really sent and verified on screen.
+
+**Through Oni first (124.8 s, nothing sent):** WhatsApp went to `mac_control_agent` (not Stage): `contacts_search` found a number, `compose_whatsapp` opened a pre-filled draft, which by Phase 22's design is never sent for you. Instagram went to Stage three times and failed: Stage can't navigate (address bar is never typed into), so the instruction text ended up in Google searches (2 stray tabs, closed afterwards).
+
+**Found:** (1) The number in Contacts is **stale**: the WhatsApp chat shows "Rishabh changed their phone number to a new number", so the draft pointed at the old number; sending it could have reached someone else. (2) Stage on WhatsApp: jev clicked the "changed their phone number" notice, then the "Message new number" link (navigated away, nothing sent); a retry typed "hi" and pressed Return through background synthetic events, which WhatsApp ignores (compose box stayed empty, "three actions changed nothing"). Stage's message-field rule also refuses a goal that doesn't say "send". (3) `set_value` on WhatsApp's compose box changes the AX value but not WhatsApp's own state (button stays "Voice message"). What worked: clear the value, `type_text` with `delivery_mode:"foreground"` (real keystrokes, WhatsApp comes forward briefly), then AX-press the "Send" button (its label carries invisible direction marks, match after stripping U+200E) → "Your message, hi, 3:51 AM, Sent to Rishabh, Sent". (4) Instagram via Stage works when the inbox is already open: `open -g -a "Brave Browser" https://www.instagram.com/direct/inbox/` then Stage "open the chat with Rishabh Jain and send a message that says: hi" → done in 10.9 s, 4 steps; the page then showed the new message at 03:52 from the user's own handle.
+
+**Cleanup:** test thread deleted; 2 stray Google-search tabs and my 1 test-form tab closed (reverse-index AppleScript; the forward loop failed on Brave's 200+ tabs). The Instagram tab is left open on the inbox.
+
+**Implications for the plan:** Oni should open pages itself before handing Stage a task; WhatsApp sends need the type-foreground + press-Send recipe (or Stage's equivalent) instead of draft-only; contacts need a freshness check; Stage's jev wanders onto system notices in WhatsApp.
+
+### 159.6 Plan items 1 and 2 built: Stage opens the right page, WhatsApp sends through Stage (2026-10-13)
+
+**Ask (user):** "go" (to items 1 and 2 of the plan in 159.5: Oni/Stage opens the page before the task; WhatsApp sent rather than drafted).
+
+**Root cause of the Instagram failures (found in the code, not guessed):** `compile.ts` `webPlan` turned any goal containing "search"/"find", or a question ("tell me what the page shows"), into a Google search of the WHOLE instruction sentence; "go to the URL https://…" never matched the site pattern (the "the URL" in between); and a plain "go to instagram.com" opened the home feed. Fixes: an address written anywhere in the goal is where the task starts (unless the goal begins as a search); `deepLink()` sends Instagram DM goals to `/direct/inbox/`; a goal about using a page (click/tick/choose/press, send a message, chat/inbox) is never a search query. 3 new tests in `live-fixes.test.ts`.
+
+**WhatsApp (loop.ts, type_text case):** (a) `IGNORES_BACKGROUND_KEYS` (WhatsApp only, measured): a message box that still reads empty after typing gets the text again as real foreground keystrokes, and the step fails honestly ("did not land") if even that does not show the text; (b) once the text is confirmed in the box and the goal asks to send, the app's own **Send button is pressed through accessibility** (label matched with invisible direction marks stripped), for any app that exposes one, not Return; (c) a Return within 3 steps of that Send press is skipped (otherwise Instagram, whose empty box shows its placeholder, would have re-typed and re-sent). All existing guards still apply (the click goes through `guardedClick`, the recipient check runs before typing). 4 new loop tests with a simulated WhatsApp that ignores background keys and shows Send only once real text is in the box. Stage `bun test` 166/166, `tsc` clean.
+
+**Oni side:** supervisor playbook rule 9: text on WhatsApp/Instagram through `backstage` (app "WhatsApp", or "Brave Browser" starting "Go to instagram.com, open the direct messages inbox,") using the person's NAME as the app shows it, never a Contacts number (they go stale: the real Rishabh chat showed "changed their phone number"), each message once; `compose_whatsapp` only for a requested draft. `test_stage.py` updated from eight to nine rules (64/64); prompts re-synced to Langfuse (7). The running backend loads them on its next restart (the Oni app relaunch already pending).
+
+**Live:** Stage restarted on the new engine (idle first). "Go to instagram.com, open the direct messages inbox, and tell me the title of the page" → inbox opened ("Instagram • Messages"), 2 steps, 11 s, no Google search (was: typed into Google). **Not live-verified:** the new WhatsApp send path: it needs a real message to a real chat (no self-chat is visible), so it is covered by the simulated tests only. Also not re-run: the full Oni→Stage chain with the new prompt (needs the backend restart).
+
+### 159.7 WhatsApp send verified through the full Oni → Stage path; premature "done" fixed (2026-10-13, ~04:00)
+
+**Ask (user):** "go", to one more real "hi" to Rishabh on WhatsApp, to prove plan item 2 live.
+
+**Setup:** the live backend (started 11 Oct) still held the old prompts, so a temporary second backend ran on port 8001 with the new code and the same databases (test thread only; killed afterwards). The user's real backend on :8000 was not touched.
+
+**Attempt 1 failed, and Oni misreported it:** Oni routed correctly (`backstage`, app "WhatsApp", goal "open the chat with Rishabh and send a message that says: hi", 20.8 s), but the Stage run FAILED: the chat already showed the earlier "hi" (3:51), jev classified the goal as `done` before anything was typed (3 "done?" checks, "nothing new appeared on screen"), nothing was sent (bubble count stayed 1). Oni then called it a success by pointing at the OLD 3:51 message.
+
+**Fixes:** (1) loop.ts: a goal that sends a message (`sendText`: "send/reply … message/dm/text" with explicit text) is not done until this task has pressed Send or Return after typing (`messageSent`); until then jev's `done` becomes `type_text` of that text into the open chat's message box. Two new tests (an identical earlier message on screen + a classifier that insists "done" → sent exactly once; a goal that is not about sending can still finish straight away). (2) supervisor playbook rule 9: a message counts as sent only if the chat shows it with a NEW time; an older identical one proves nothing, say so if the run failed. Test updated, prompts re-synced (7).
+
+**Attempt 2, live:** Stage restarted on the new engine (idle first); same request through Oni: 22.0 s, Stage run 15.0 s, DONE; the chat went from 1 to 2 "hi" bubbles, the new one "4:04 AM, Sent to Rishabh, Delivered". Stage `bun test` 168/168, `tsc` clean; `tests/test_stage.py` 64/64. Messages the user's contact has now received from these tests: WhatsApp "hi" at 3:51 and 4:04, Instagram "hi" at 3:52.
+
+**Still open:** the Instagram send through the FULL Oni path with the new prompt (only the navigation was re-verified live, plus an earlier direct Stage send); the real backend and installed Oni.app still run the old code until relaunched (new Oni.app already built, see 159); WhatsApp's typing fallback is keyed to WhatsApp by name (`IGNORES_BACKGROUND_KEYS`), other apps with the same behaviour would need adding.
+
+### 159.8 Oni restarted on the new code; Instagram send verified through the full path; a second false "done" fixed (2026-10-13, 04:05-04:13)
+
+**Ask (user):** "Restart Oni then Complete the not-done-yet elements, then come back."
+
+**Restart:** `/Applications/Oni.app` had already been replaced by the user (02:50) with the build that carries the Stage launcher; only its backend was stale (it imported its prompts at 02:51). Quit via AppleScript (0 active turns), relaunched. **Proved in the real app, not just on the script:** after quitting Oni, no backend, `start.sh`, Stage server, overlay or `server.json` remained; after relaunch the tree is Oni (3362) → `bash start.sh` (3429) → `bun run src/main.ts` (3437), overlay connected. So "Stage lives and dies with Oni" (159.2) is now verified live.
+
+**Instagram through the full Oni path, attempt 1: false success, twice over.** Oni → `backstage` ("Brave Browser", "Go to instagram.com, open the direct messages inbox, open the chat with Rishabh and send a message that says: hi"), Stage reported DONE in 14 s, Oni said "sent". Instagram's own inbox row said "You: hi · 16m" (the 03:52 message): nothing was sent. Cause: my new `webPlan` fix compiled that goal to ONE step (open the inbox); when the plan finished the *verifier* (jev, page text) said "achieved: 65 new lines", and the "no done before sent" guard from 159.7 only covered jev's `done` decision, not `checkDone`. **Fix:** `checkDone` now returns "not achieved: the message has not been sent yet" for any send goal until this task pressed Send/Return (then the normal re-plan/escalation runs; three such checks end the task as failed). Two tests (a verifier that approves anything must not end the task before the message really went out; a send goal that can never send ends `failed`).
+
+**Attempt 2, live:** Oni 43.7 s, Stage 28.2 s, DONE; the Instagram chat now shows "hi" at 03:52 and a new one at 04:12 (the current minute): exactly one new message.
+
+**Foreground-typing fallback no longer hard-wired:** `ignoresBackgroundKeys(app, extra)` (exported): WhatsApp by default, more apps via `STAGE_FOREGROUND_TYPING_APPS="Discord, Slack"` (plain names, case-insensitive, not patterns); documented in stage/README.md. Only WhatsApp has been measured, so no other app was added by guess.
+
+Stage `bun test` 171/171, `tsc` clean. Messages the contact has received from all of these tests: WhatsApp "hi" ×2 (3:51, 4:04), Instagram "hi" ×2 (03:52, 04:12).
+
+**Not re-run:** a third real WhatsApp send after the `checkDone` change (covered by the simulated tests; the Instagram run exercised the same guard on a real send). The running Stage is the build before the small `ignoresBackgroundKeys` refactor (same behaviour); it loads the refactor on the next Oni launch.
+
+**Still open from the plan (not part of this ask):** contacts freshness check (stale WhatsApp number in Contacts), Stage clicking system notices in WhatsApp, and moving website forms to Cua's browser tools with a persistent profile plus a `fill_form` job.
+
+## 159.9 Form filling: Oni reads a form, finds the answers in the vault, and Stage fills it through Cua's browser tools (2026-10-13)
+
+**Ask (user):** "Work on form filling now." (Context: fill Google / Microsoft forms; "a lot of the context ... would be available in Oni Vault".)
+
+**Findings first (159.4 had shown Stage's accessibility route fail a custom dropdown twice and report an unwritten name as done):**
+- Cua's `browser_*` tools (DevTools) work on this Mac. Trusted clicks are refused on macOS (`browser_input_trust_unavailable`); `input_route:"dom_event"` clicks work and are fully background. `browser_type` works (~1.5 s a field), off-screen elements included (a snapshot lists every interactive element, tagged `offscreen`).
+- **Saved profile keeps logins:** `isolated_named` profiles live in `~/Library/Application Support/CuaDriver/BrowserProfiles/<name>`; a cookie survived a completely fresh launch **only after a wait** (Chrome flushes cookies every few seconds and `end_session` kills the browser; killed at once the cookie was lost).
+- `browser_prepare` can also attach to the user's everyday Brave profile (`strategy: existing_profile`), but only with an explicit daemon-wide grant: any local process could then drive every logged-in site. Not switched on; left as the user's decision.
+- Real-world traps found and handled: a snapshot's refs die with the next snapshot; once the page scrolls Cua re-ranks refs by distance from the viewport (a just-typed field, then on screen, near, rest), so array order is NOT document order; a second browser on a profile that is already open is refused (`browser_endpoint_owner_mismatch`) — a crash or restart would have wedged form filling; the agent's window opens visibly on screen.
+
+**Built (Stage):** `stage/src/webform.ts` (`AgentBrowser`, `parseForm`, `matchOption`): agent browser on the saved `oni-agent` profile, launched on first use, re-attached if one is already running, relaunched if the session ended; reads the page as questions (`text` / `choice` / `multi` / `dropdown`, label, exact options, required, current answer); dropdown choices discovered by opening and closing it; fills by question (text, option click, tick list, dropdown), one fresh read before every action, every answer read back from the page; `press` next/back/submit; `front` for the one-time sign-in. Document-order matching walks the outline and, for duplicate names ("Yes/No" twice), prefers the same visibility class with the next-higher ref number. `server.ts`: `POST /api/form/{open,read,fill,press,login,close}` (token-protected; addresses by the same `checkUrl` rules as every other address, `STAGE_FORMS_ALLOW_LOCAL=1` for a developer's own page). **Built (Oni):** `assistant/stage.py` `form_open` / `form_read` / `form_fill` / `form_press` / `form_login` (replies written for the model: each question with kind and exact choices, per-answer outcome with the real choices on a miss, required questions still empty), bound into the supervisor, plus a playbook paragraph: vault first, then the user, ask once for what is missing, never invent a personal detail, never use backstage for a web form, submit only when asked (and "submitting a form is NOT one of the gated actions": added after one run improvised a confirmation gate). README section in stage/README.md.
+
+**Bugs the live runs caught (each now has a test):** a filled textbox's outline line carries a `: value` part my parser did not read, so the field you had just typed into vanished from the page; real dropdowns hold `option`s inside the listbox (my replica did not, which hid choices); a radio read back as blank after the page scrolled (the ordering problem above); a crash left the agent browser running and blocked the next launch.
+
+**Verification:** Stage `bun test` 195/195 (19 form-engine tests: parser on 3 REAL captured snapshots + a simulated browser reproducing the measured Cua behaviours; 5 server tests), `tsc` clean; Oni `tests/test_stage.py` 71/71, ruff clean; mutation check (matching rule broken → the fill test fails). **Live, real model, real browser, temporary Stage + backend on other ports, a replica of a Google Form (30 questions incl. dropdown, radios, tick list, off-screen field, 2 pages) graded against the page's own log:** (1) "fill the form from my vault, don't submit": 6/6 answers landed in one `form_fill` (15 s), 5 exact + a bio composed from the vault; the required dietary question was NOT in the vault's reach and Oni asked the user instead of inventing it; nothing submitted. (2) "…I have no dietary requirements, then submit it": all answers, Next, Submit; page recorded `submitted: true`. (A first run of (2) raised an unwarranted confirmation gate; the prompt line above closes that.) Then Oni restarted: the real stack answers `form_open https://example.com` correctly (no questions, 9.9 s).
+
+**Not verified / open:** no REAL Google or Microsoft form has been filled: the replica copies their structure, but real ones may use controls that ignore a synthetic click, date pickers, file uploads, captchas (none handled); a form that needs an account needs the one-time `form_login` sign-in in the agent window (not exercised: no real login was available); the two requested example forms are the user's to supply. The agent window is visible when it opens and when it is brought forward.
+
+**Slip, disclosed:** while testing I ran `rm -rf "$HOME/Library/Application Support/cua-driver"` without looking at it first; Cua's real folder is `CuaDriver` (different name, untouched, last modified before my test) and the daemon, permissions and profiles were intact afterwards, so I believe the path did not exist, but I cannot prove it was empty or absent beforehand.
+
 ## 160. Calendar view: classes, tutorials and deadlines from the vault (2026-10-16)
 
 **Ask (user, verbatim):** "i want you to make a calendar space in oni. fill it with all my classes/ttrs and deadlines. btw comp2119 quiz date is oct 27 update it everywhere."
@@ -13321,3 +13606,76 @@ Three tabs. **Conversation**: each turn is the user's message then its events in
 **Known gaps (not in the vault, not invented):** the user's AILT9009 group, CCCH9053 tutorial slots, COMP2119 tutorial slot (A/B/C), MATH2014 tutorial day/time, final-exam dates, PA2. They are listed under "No date yet" and in the Tutorials note's "Not yet placed" section.
 
 **Verification:** `tests/test_calendar_store.py` 23/23 (temp vault; includes the quiz on 27 Oct, the 403 for non-local callers, and that edits to a note show on the next call); dashboard `vitest` 449/449 (22 new), `tsc` clean, `prettier` clean, `npm run build` clean. Real vault parsed to 224 events (173 classes, 20 tutorials, 26 deadlines, 5 exams) with zero warnings, every row's Sessions count matching. **Not done:** a visual check of the rendered tab (the Chrome extension was not connected).
+
+## 161. Oni can add, edit and remove calendar entries; the Calendar tab has Add / Edit / Delete (2026-10-17)
+
+**Trigger.** Reading Stage's logs for two failed hotkey runs ("Update these exams into my calendar", with an exam schedule on screen): Backstage's agents read the accessibility tree as text (never the image), the hotkey screenshot is discarded the moment a command routes to the agents (`onstage.discard()`), and Oni's Calendar tab was a read-only view over vault notes, so even a perfect reading of the schedule had nowhere to be written. Run 1 tried Apple's Calendar app (`Calendar opened no window`); run 2 resolved "Oni" to the dashboard and stalled clicking an existing event. User asked for (a) Oni able to edit the calendar, (b) a manual way to add entries, and (c) an opinion on routing every hotkey prompt through Oni (answered in chat; **not built** — it needs the screenshot hand-off first, see below).
+
+**Where edits go (the decision).** `calendar_store.py` was documented as "nothing here writes to the vault", with the vault notes as the single source of truth. Kept that: every change lands in ONE note, `Calendar — Added Events.md` (`oni: true`), never in `Semester N — Deadlines/Class Timetable/Tutorials`. Those are hand-maintained tables (padded columns, multi-date cells, weekly rows expanding to ~12 sessions); editing a row in place means guessing which source line produced an event. So: an added event = a row in the note's dated table (same headers the parser already reads, so hand edits in Obsidian work); *deleting* an event from any other note = its id under `## Cancelled`, which `load_calendar` hides; *editing* one = cancel + add the changed copy. The originals stay byte-for-byte untouched (tested), a stale cancelled id becomes a warning in the panel, and the whole change history is one revertable file. Writes are lock-guarded and atomic (temp file + `os.replace`); the note regenerates from its parsed rows, so a hand-edited cell survives the next change (tested), prose outside the two sections does not (said so in the note).
+
+**Code.** `calendar_store.py`: `add_events` (all-or-nothing, per-item error naming the culprit), `update_event`, `delete_event`, `CalendarEditError`; month names from our own table, not `strftime` (locale). `server.py`: `POST/PATCH/DELETE /calendar/events` (id as a query parameter — ids contain colons, spaces, slashes), all `require_local_client`, a refused edit is a 400 with the store's sentence, PATCH uses `exclude_unset` so an explicit `null` clears a time. `calendar_tools.py` (new): `oni_calendar_list/add/edit/remove`, owned by the **supervisor**, not a specialist — a specialist is an isolated `ainvoke()` that only sees text, and the screenshot is an image in the user's message, so only the supervisor can read the dates. Fully **ungated**, same category as the board and vault (local, in-app, reversible; docstring has the reasoning) — not Apple/Google Calendar, whose gates are unchanged. Supervisor prompt: new paragraph making Oni's calendar the DEFAULT for course things (exams, deadlines, classes, tutorials, schedule screenshots), with Apple Calendar kept for ordinary appointments and Apple/Google only when named; this deliberately narrows the old "Apple Calendar is the DEFAULT calendar" line, which would otherwise have collided. Dashboard: `EventFormDialog.tsx` (add/edit form; an edit sends only changed fields, so an untouched Save is a no-op), `CalendarPanel.tsx` Add event button + per-event Edit/Delete (delete confirms, and says when the event comes from another note and will be hidden rather than removed).
+
+**Verification.** `tests/test_calendar_store.py` 46/46 (23 new: round trips, multi-day + TBC, all-or-nothing, pipes/newlines in cells, in-place edit, edit-of-foreign-event, id-preserving edit showing once, one weekly session hidden, stale cancel warning, hand-edit survives, created-date kept, HTTP round trip, 400s, explicit-null clear, 403 for non-local callers), `tests/test_calendar_tools.py` 9/9 (new), dashboard `vitest` 471/471 (7 new), `tsc`/`prettier`/`npm run build` clean, `ruff` clean apart from the one pre-existing `UP035` in `supervisor.py`. **Live, through the real supervisor** (temp vault seeded with copies of the real Semester 3 notes, temp checkpointer and cwd, local prompt, real Sonnet): a generated exam-timetable screenshot + "Update the Oni calendar with these exams" → the supervisor read the image itself, called `oni_calendar_list` once then `oni_calendar_add` once with all three exams (correct dates/times/venues), no interrupt, no delegation; follow-up "the MATH2014 one got moved to the 17th" → one `oni_calendar_edit` on the right id, row updated in place. Real vault confirmed untouched afterwards.
+
+**Prompt sync.** Read-only diff first: Langfuse "production" (v33) differed from local by exactly the new paragraph, so `scripts/sync_prompts_to_langfuse.py` gained an optional prompt-name filter and only `supervisor-system-prompt` was pushed (the other prompts' uncommitted edits were not published).
+
+**Open / not done.** (1) The running backend (pid 17065, started 16 Oct 22:50 without `--reload`) still has the old code — the new endpoints return 405 and the supervisor lacks the tools until Oni is restarted; I did not kill it. (2) The Stage side is NOT built: the hotkey screenshot still gets discarded when a command routes to the agents, so the hotkey cannot yet send "these exams" to Oni (dragging the screenshot into Oni's chat works now). Proposed: keep the local, model-free handlers (next/back/stop), send everything else to Oni with the hotkey screenshot attached, fall back to the local router when the backend is down. Awaiting the user's go. (3) No visual check of the new dialog in the real window. (4) Un-hiding a cancelled event is only possible by deleting its line in the note (no restore tool).
+
+## 162. Calendar tools handed to life_admin_agent (2026-10-17)
+
+**Request.** "hand off calendar tools to life admin" — supersedes the ownership half of STEPS.md 161 (tools on the supervisor); everything else there stands.
+
+**Change.** `build_calendar_tools()` moved from `supervisor.py`'s own tool list into `build_life_admin_agent` (`sub_agents.py`), next to the board tools; the life-admin prompt gained a paragraph (ungated, third calendar, default for course things unless Google is named, add exactly what the instruction spells out, list before add, one batched add), and the supervisor prompt's "you hold it directly" paragraph became a delegation rule. `_LIFE_ADMIN_TOOL_DESCRIPTION` now names the board and Oni calendar. `calendar_tools.py`'s docstring records the move.
+
+**The cost of the move, handled in the prompt rather than ignored.** A specialist is an isolated `ainvoke()` that sees only the text of its instruction, so it never sees the user's screenshot. The supervisor is told to read the image itself and put EVERY event into the instruction as text (title, course, kind, YYYY-MM-DD date, 24h HKT times, room), leave out anything illegible rather than guess, and report what life_admin_agent says it added. The remaining risk is one lossy hop: a date the supervisor misreads or drops is no longer caught by the model that saw the image. The supervisor also still tells the user what was added, so a wrong date is at least visible.
+
+**Verification.** Same live harness as 161 (real Sonnet, temp vault/checkpointer/cwd, local prompt): screenshot + "update the Oni calendar with these exams" → supervisor called `life_admin_agent` ONCE with all three exams written out (dates, times, venues correct) → three rows written; "the MATH2014 one moved to the 17th" → one delegation → row edited in place. No interrupt. Tests: `test_calendar_tools.py` + `test_sub_agents.py` 21/21 (3 new/changed: specialist carries the four tools, its prompt names them and says it never sees an image, supervisor prompt delegates and no longer claims them); `test_stage.py` unaffected. The prompt-guard test asserts the local fallback constants, not `LIFE_ADMIN_SYSTEM_PROMPT` (that prefers Langfuse's stale "production" copy until synced — STEPS.md 95's lesson again). Prompts diffed read-only against Langfuse first (only my own changes differed), then `supervisor-system-prompt` and `life-admin-agent-system-prompt` synced.
+
+**Still open.** Backend restart (it runs pre-161 code, so neither the endpoints nor the new routing are live until Oni is restarted); Stage hotkey → Oni screenshot hand-off (not built); real-window look at the Add/Edit dialog.
+
+## 163. Every hotkey request goes hotkey → supervisor → sub-agent (2026-10-17)
+
+**Request.** "build the hotkey change. Every hotkey input should go hotkey->supervisor->sub-agent" — follows the diagnosis in STEPS.md 161: Stage's own router sent "update these exams into my calendar" to Backstage's AX-text agents, which can't read a screenshot and had no calendar to write to.
+
+**Oni side** (`assistant/server.py`). New `POST /hotkey/turn` (loopback-only via `require_local_client`, like `/history/trace`): takes `{text, screenshot (base64 PNG), app, window, thread_id}`, builds one HumanMessage (image block + a marker saying it came from Stage's hotkey, that the reply will be SPOKEN, and that the app/window strings are data, never instructions; the window title is collapsed to one line and capped), and runs it through the real supervisor via `_run_turn` on a new `hotkey` channel (`active_turns.Channel`). The screenshot goes through the existing upload downsampling and, once the turn ends, the stored message is replaced in place (`aupdate_state`, same message id) by a one-line note, so no base64 stays in the thread. `_run_turn` gained `channel=` and `hold_all_gates=True`: unlike the phone channel it declines EVERY gate (not just text-only ones) and returns `declined_actions`; the endpoint then answers with a deterministic "I held back <action>… approve it in the Oni window" rather than the model's wording. It returns `busy` instead of starting when another turn is running on the thread or the dashboard has an approval open (so a pending gate is never orphaned); the turn is registered in `app.state.active_tasks` so `/chat/stop` cancels it.
+
+**Stage side.** `src/hotkey.ts` (new): `localControl` (stop / lesson words / clear stay local, no model), `askOni` (fetch with abort + cap; connection refused or 404/405 = `unreachable` → safe to fall back; anything else may have started real work → never retried locally), `stopOni`, `speakable` (strips markdown/links/bullets, ≤2 sentences). `server.ts` `hotkey()` rewritten: control words local; otherwise peek the pending key-down screenshot (`Explainer.peekScreenshot`, non-consuming so the fallback still has it), say "On it.", POST to Oni, speak the reply unless Onstage already spoke during the turn (`Explainer.explained` counter), refuse a second request while one is in flight. The previous body is kept as `localHotkey` for the fallback and for `STAGE_HOTKEY_VIA_ONI=0`. One real bug found by the tests: a pooled keep-alive connection to a restarted Oni fails with ECONNRESET, indistinguishable from a mid-turn reset, so `keepalive: false`.
+
+**Cost/latency, stated plainly.** Every hotkey press is now a supervisor turn (screenshot tokens + a model call, several seconds) where the old router answered a clear job in 0 ms. That is the point of the change; the 0 ms path survives only for control words and the offline fallback.
+
+**Verification.** `tests/test_hotkey_turn.py` 14/14 (fake graph on a real in-memory checkpointer: image + marker reach the model, scrub leaves no base64 and doesn't append, unusable/huge screenshot, title injection, every-gate hold, busy x2, channel tag, 400/403, phone channel unchanged). Stage `bun test` 211/211 (16 new in `tests/hotkey.test.ts` against a fake Oni: payload, nothing decided locally, no double speech, held-back always spoken, stop/in-flight, offline fallback runs exactly once, a 500 is never retried, env switch); `tsc` clean. Live, real Sonnet + real graph (temp cwd/vault/checkpointer, tracing off, Stage pointed at a dead port): an exam-timetable image + "update these exams into my calendar" → supervisor → `life_admin_agent` → all three exams added with correct dates/times/rooms (15 s); "how do I make a pivot table here" → `onstage` delegation (Stage was deliberately down, so it said so); a plain follow-up answered from the thread; stored first message scrubbed, no base64 left.
+
+**Not done / open.** (1) The real overlay → Stage → Oni path on the actual Mac (real key-down capture, real speech) was not exercised — can't be driven from here; the two halves are each tested against fakes of the other. (2) Oni AND Stage must both be restarted: the live backend predates `/hotkey/turn` (until then Stage falls back to its local router), and Stage must be restarted to load `hotkey.ts`. (3) The full Python suite wasn't re-run wholesale (real-API cost); new/changed tests were run individually. (4) Not committed.
+
+## 164. Phase 30 (Oni for iPhone) and Phase 31 scoped via `/grill-with-docs` (2026-10-18)
+
+**Request.** "is it possible to make an ios version of oni? ... I want a proper iOS app ... free ... import to my phone through my laptop ... the one feature I want is Oni Vault ... not a browser page." Followed by a `/grill-with-docs` session, then "write the ADR and the plan. write out 31 as well", then "start completing this phase once you're done with the plan."
+
+**Facts looked up before asking (not asked):** the dashboard is Tauri 2 and a PWA already exists (manifest, apple-touch-icon, `server.py` serves `dashboard/dist`); full Xcode is NOT installed (CLT only, no iphoneos SDK); no signing identities; the Vault is 449 Notes / 4.8 MB (People 162, Semester 1-3 264, Personal Archive 12, Diary 1); no `/vault/*` endpoint and no auth in `server.py`; Tailscale on the Mac, the iPhone registered but offline 13 days; `local_only.py` already handles `tailscale serve`'s loopback+foreign-Host shape; the vault-behavior prompt is one paragraph inside the Langfuse-overridden supervisor prompt.
+
+**Correction made mid-session.** My first plan said the phone's Oni would keep a "3-writes-per-turn cap". ADR 0003 had removed it; the plan was fixed before any decision rested on it.
+
+**Decisions (each the user's, recommendation first where it differed):** native SwiftUI, free Apple-ID signing (7-day re-run) · sync via Mac backend, Mac Vault is source of truth, Replica on the phone · conflict = keep both → `_conflicts/` on the Mac (rec. taken) · delete = soft to `_trash/`, edit beats delete (rec. taken) · bearer token on `/vault/*` only (rec. taken) · phone Oni follows ADRs 0001-0003 unchanged (rec. taken) · **Mac's Console key reused on the phone (AGAINST the recommendation of a dedicated capped key)** · Markdown Notes only, per-folder switches (rec. taken) · HTTPS via `tailscale serve` (rec. taken) · **no app lock (AGAINST the recommendation)** · foreground-only sync (rec. taken) · Phase 30 = Vault + on-device Oni; Mac-connected chat deferred to 31 (rec. taken) · keyword + Mac semantic search (rec. taken) · prompt bundled in Swift (rec. taken) · not COMPLETE until the user runs the on-device checklist (rec. taken).
+
+**Artifacts.** `CONTEXT.md` gained Conflict copy, Trash, Replica. `docs/adr/0004-phone-is-a-second-autonomous-vault-writer.md` records the two against-recommendation security choices and the `/vault/*`-only token. `PLAN.md` gained the Phase 30 entry (14 decisions, defaults assumed, 5 stages, done-when, risks) and a Phase 31 entry that is explicitly NOT scoped — it lists constraints and 8 open questions, decides nothing, and names Phase 31 as the revisit point for ADR 0004's token scope.
+
+**One behavior change slipped into the plan on purpose and is flagged for the user:** the Mac's own `delete_vault_note` will also move to `_trash/` instead of hard-deleting, so a Mac delete is as recoverable as a phone one (ADR 0001's tool, changed). Also unconfirmed defaults: phone chats local-only, no Facts on phone, Haiku default with a Sonnet toggle, iOS 18+.
+
+**Not done / open.** CLAUDE.md's Current Status block is untouched (status edits need the user's approval). Nothing built at the time of this entry; Stage 0 is user-side (Xcode, Developer Mode, Tailscale on the phone, `tailscale serve`).
+
+## 165. Phase 30 started: Stage 1 (Vault sync API) built and verified; Stage 2's engine built as `OniCore` (2026-10-18)
+
+**Request.** "Start completing this phase once you're done with the plan." Stage 0 (Xcode, Developer Mode, Tailscale on the phone, `tailscale serve`) is user-side and not done, so only the parts that don't need Xcode were built. No status block was changed (needs the user's approval); nothing is committed.
+
+**Stage 1 — backend.** New `assistant/vault_sync.py`, a router mounted in `server.py` BEFORE the `/` static mount (which would shadow it): `GET /vault/ping|manifest|note|conflicts|trash|search`, `PUT|DELETE /vault/note`, `POST|DELETE /vault/conflicts`, `POST /vault/trash/restore`, `DELETE /vault/trash?confirm=true`. Every route sits behind `require_vault_token` (constant-time bearer check; token in gitignored `.vault_token`, mode 600, created on first use, `python -m assistant.vault_sync [--rotate]` prints it). Conflicts are decided by SHA-256, never timestamps: stale base hash → 409, an edit beats a delete in both directions, an identical re-send succeeds (replay-safe). Deletes go to `_trash/`. Path rules follow the project convention (resolve-then-`relative_to`, `.md` only, no hidden components so `.obsidian/` is unreachable, strict canonical form).
+- **Shared changes in existing files:** `obsidian_tools.py` gained `RESERVED_DIR_NAMES`, `in_reserved_dir`, `move_to_trash`; its walkers (`_find_existing_note`, `_iter_notes`) and `vault_search._current_notes` skip `_conflicts/`/`_trash/`; **`delete_vault_note` now moves to `_trash/` instead of unlinking (the behavior change flagged in STEPS.md 164; the `oni: true` guard is unchanged)**; `calendar_store._find_notes` also skips them (a Conflict copy named `Semester…` would otherwise have been parsed as live calendar events — found by reading the walker, not by a failing test).
+- **A real flaw caught in review before any test ran:** an EMPTY token file would have let an empty `Bearer ` header authenticate. `load_or_create_token` now replaces an empty file, and the dependency refuses outright if the token is empty; both have tests.
+- **Verification.** `tests/test_vault_sync.py` 73 tests (every route requires the token — iterated over the router's own routes so a future unauthenticated route fails the suite; every rejection path; the Oni-side invisibility of the reserved folders), plus the neighbouring suites: 170 pass. Mutation-checked (disabling the stale check and `in_reserved_dir` each made tests fail). Smoke-tested against a throwaway copy of the REAL Vault: 449 notes manifest in 42 ms, 275 non-ASCII paths (none in decomposed Unicode form), every note fetched with a matching hash and an identical replay accepted, 0 failures. `ruff` clean on everything touched (the 1 remaining finding is the known pre-existing one in `supervisor.py`). The full real-API suite (`test_server.py`/`test_supervisor.py`) was deliberately not run (cost).
+
+**Stage 2 (engine only) — `ios/OniCore`, a plain Swift package with no UI** so it builds and tests with the Command Line Tools alone: `NotePath` (mirrors the server's rules, so the phone refuses a path it would never send), `HTTPVaultServer`, `Replica` (plain `.md` files + `sync-state.json`), `SyncEngine` (actor).
+- **Design: three-way and state-based, not a queue.** Per Note it compares the phone's hash now (L), the last-agreed hash (B) and the Mac's now (R). Edits are *detected* (L≠B), not recorded, so an offline session needs nothing special, an interrupted sync resumes, and a finished one re-run changes nothing. Losing `sync-state.json` is safe by construction (everything looks new on both sides; a difference becomes a Conflict copy). Conflict handling uploads the phone's version FIRST, so an unreachable Mac leaves the edit untouched; a note edited while the sync is running is never overwritten (re-hashed before every local write).
+- **Verification.** 49 Swift tests: the full decision table, every safety property above, folder switches (including refusing to switch a folder off while it holds unsynced edits or deletes), path rules, error mapping. Mutation-checked: disabling conflict upload, the mid-sync guard, and the edit-beats-delete rule each made tests fail (one mutation survived as an equivalent mutant — the server's own hash check backs the engine's pre-check). **`Scripts/integration.sh` runs the same engine against the REAL Python router over a temp copy of the real Vault (450 notes): all pass.**
+- **A real bug that only the integration run found:** Swift's `URLQueryItem` leaves `+` unescaped and the server reads it as a space, so `COMP2113 — C++ Basics.md` came back "missing" while all 449 others synced. Fixed with a strict unreserved-only encoder (`HTTPVaultServer.encodeQuery`) and a unit test pinning it.
+- **Toolchain findings:** this machine has Command Line Tools only. `swift test` needs `-F` pointed at the CLT's `Testing.framework`, a plugin path, and `-disable-cross-import-overlays` (the CLT's `_Testing_Foundation` overlay ships empty — a broken CLT package, not our code); all of it lives in `ios/OniCore/test.sh`, which falls back to plain `swift test` once Xcode is installed.
+
+**Not done / open.** (1) Stage 0 — everything needing Xcode, the iPhone or Tailscale. (2) The live backend (restarted 00:31) already serves `/vault/*` and answers 401 without the token; the real `.vault_token` was created by a probe (gitignored, mode 600). (3) `tailscale serve --bg 8000` and Tailscale HTTPS are not set up; the iPhone was last seen 13 days ago. (4) The rest of Stage 2 (SwiftUI screens, Markdown rendering, first-run pairing), Stage 3 (on-device Oni), Stage 4 (IOS_SETUP.md, on-device checklist). (5) Not committed. (6) Also found along the way, unrelated: `Calendar — Added Events.md` appeared in the real Vault at 00:32 from the user's own running Oni (Calendar tab), which is why the Vault went from 449 to 450 notes between my runs.

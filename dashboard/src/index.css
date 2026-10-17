@@ -541,6 +541,70 @@
   }
 }
 
+/* CostTrace.tsx — the cost view's decorative "signal trace" beside each
+   dollar figure. Same draw-on mechanics as `.brand-mark` immediately
+   above (pathLength-normalized stroke-dashoffset, reuses its
+   `instrument-brand-draw` keyframe rather than a near-duplicate), on an
+   abstract waveform path that carries no real data — see
+   CostTrace.tsx's own comment for why it's deliberately NOT a literal
+   sparkline. */
+.cost-trace {
+  width: 40px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--accent-signal);
+  opacity: 0.55;
+  overflow: visible;
+}
+.cost-trace path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.5;
+  stroke-dasharray: 100;
+  stroke-dashoffset: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .cost-trace.draw path {
+    stroke-dashoffset: 100;
+    animation: instrument-brand-draw 900ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation-delay: var(--cost-trace-delay, 0ms);
+  }
+}
+
+/* RateLimitCountdown.tsx — a live-ticking "resets in" readout, each
+   digit its own small odometer reel (fixed-height, overflow-hidden slot;
+   anime.js rolls a changed digit up from below on every tick, see that
+   component's own comment for why anime.js specifically). Mono figures,
+   same data-typeface convention as every other number in this app. */
+.rate-limit-countdown {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+.rate-limit-countdown-segment {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+}
+.rate-limit-countdown-digit {
+  display: inline-block;
+  width: 0.62em;
+  overflow: hidden;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+.rate-limit-countdown-unit {
+  margin-right: 5px;
+  margin-left: 1px;
+  font-size: 0.65rem;
+  color: var(--muted-foreground);
+}
+
 /* PLAN.md Phase 29 Stage 4 — the global trailing cursor (DESIGN.md's own
    §2): an exact-tracking dot plus a rAF-lerped ring that lags it,
    TrailingCursor.tsx. Renders ADDITIVELY on top of the real cursor —
@@ -589,4 +653,66 @@
   height: 42px;
   margin: -21px;
   opacity: 0.9;
+}
+
+/* Landing view's "dialogue cloud" greeting (2026-08-08 follow-up,
+   OniGreetingCloud.tsx) — a classic thought-bubble motif: one rounded
+   cloud plus a trail of three shrinking, sideways-drifting circles
+   pointing down toward the hero artwork below it. Shape/layout only —
+   every bit of motion (pop-in, idle float, hover wiggle) is real
+   anime.js, not CSS animation, so there are deliberately no `animation`/
+   `@keyframes` rules here (contrast `.brand-mark`/`.reveal` above, which
+   ARE CSS-driven). Base state below IS the fully-settled, fully-visible
+   appearance — anime.js only ever animates FROM it and back TO it, so a
+   `prefers-reduced-motion` user who never gets the JS entrance still
+   sees a normal, static, fully legible greeting (see the component's
+   own docstring). */
+.oni-cloud-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+}
+.oni-cloud {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--graphite);
+  background: var(--card);
+  color: var(--paper);
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.35);
+}
+.oni-cloud-text {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 15px;
+  white-space: nowrap;
+}
+.oni-cloud-dot {
+  position: absolute;
+  left: 50%;
+  border-radius: 999px;
+  border: 1px solid var(--graphite);
+  background: var(--card);
+  pointer-events: none;
+}
+.oni-cloud-dot-1 {
+  width: 14px;
+  height: 14px;
+  top: calc(100% + 6px);
+  transform: translateX(-50%);
+}
+.oni-cloud-dot-2 {
+  width: 9px;
+  height: 9px;
+  top: calc(100% + 22px);
+  transform: translateX(-65%);
+}
+.oni-cloud-dot-3 {
+  width: 5px;
+  height: 5px;
+  top: calc(100% + 34px);
+  transform: translateX(-80%);
 }

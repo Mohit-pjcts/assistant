@@ -391,9 +391,14 @@ function ListNode({ node, ...rest }: NodeProps) {
 function CardNode({ node, ...rest }: NodeProps) {
   const childId = str(node.child);
   return (
-    <InstrumentCard className="max-w-[448px] p-3">
+    // Deliberately NOT <InstrumentCard>: that primitive (hairline edge,
+    // spotlight, 3D tilt) is for the app's few real "objects" — a gate, a
+    // kanban task. A model-composed Card is just grouping, and a chat full of
+    // spotlight-tilting boxes reads as the same card repeated. This is a
+    // quiet tinted container instead, so grouping doesn't shout.
+    <div className="rounded-2xl bg-muted/50 p-4">
       {childId && <RenderNode id={childId} {...rest} />}
-    </InstrumentCard>
+    </div>
   );
 }
 
@@ -979,7 +984,7 @@ export function A2UIRenderer({ surface, onAction, disabled }: A2UIRendererProps)
 
   if (!nodes.has("root")) return null;
   return (
-    <div data-testid="a2ui-surface" className="max-w-[80%] self-start">
+    <div data-testid="a2ui-surface" className="w-full self-start">
       <RenderNode
         id="root"
         nodes={nodes}

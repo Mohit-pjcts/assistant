@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Menu, PanelRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -8,6 +8,7 @@ import { BrandMark } from "@/components/nav/BrandMark";
 import { TrailingCursor } from "@/components/nav/TrailingCursor";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { HistoryPanel } from "@/components/history/HistoryPanel";
+import { JournalPanel } from "@/components/journal/JournalPanel";
 import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { CostPanel } from "@/components/cost/CostPanel";
 import { CostSummaryCard } from "@/components/cost/CostSummaryCard";
@@ -26,6 +27,35 @@ import { ToolCallTimeline } from "@/components/activity/ToolCallTimeline";
 import { StatusPill } from "@/components/activity/StatusPill";
 import { useAgentActivity } from "@/components/activity/useAgentActivity";
 import { ActiveTurnBanner } from "@/components/activity/ActiveTurnBanner";
+// Live-wallpaper hero (2026-08-08, at the user's own direct follow-up —
+// their first version, confined to ChatPanel's own ~800px column, cropped
+// their actual wide wallpaper shot down; this one spans the whole window
+// instead, and is a real LOOPING VIDEO rather than a still frame). Both
+// assets are the user's own actual live desktop wallpaper (Wallspace,
+// `savedWallpaperKey` 869900687149436 in its own preferences plist) —
+// `landing-hero.mp4` is `ffmpeg`-transcoded from Wallspace's own full-
+// quality master file (originally 3840x2160/60fps/15Mbps/9.4MB) down to
+// 1920x1080/30fps/~2Mbps/~1.2MB, a size worth bundling directly into this
+// app rather than depending on Wallspace (or any other process) being
+// installed or running — "one single entity," the user's own words.
+// `landing-hero.jpg` (STEPS.md 142's own still-frame capture) doubles as
+// the `<video>` element's `poster` (visible before the video decodes) and
+// its `prefers-reduced-motion` fallback, below.
+import landingHeroVideo from "@/assets/landing-hero.mp4";
+import landingHeroPoster from "@/assets/landing-hero.jpg";
+
+// The user's own direct follow-up to the video above: `object-contain`
+// (see the hero layer's own comment) can letterbox top/bottom OR
+// left/right depending on window aspect ratio — those bars used to be
+// filled with this app's own `--void` token (#161619, a deliberately
+// slightly-lit charcoal), which reads as a visible seam against the
+// wallpaper's own much darker edge. Sampled directly from the real
+// asset (`landing-hero.jpg`, `PIL`: averaged the outer ~10px band on
+// each of the top/bottom edges) rather than eyeballed or rounded to a
+// clean value — #050105, near-black with a whisper of the source art's
+// own faint magenta cast. Letterbox bars filled with this instead of
+// `bg-void` disappear into the footage instead of bordering it.
+const LANDING_HERO_LETTERBOX_COLOR = "#050105";
 
 // PLAN.md Phase 9's initial panel set, all four now wired: chat (step 3),
 // history (step 4), memory (step 5), cost (step 6). Phase 15 added the
@@ -82,8 +112,78 @@ function App() {
     max: 480,
   });
 
+  // Live-wallpaper hero: `landingActive` mirrors ChatPanel's own
+  // `isNewChat` (reported up via its `onLandingViewChange` prop — see that
+  // prop's own docstring for why this has to live here rather than inside
+  // ChatPanel itself). ANDed with `activeTab === "chat"` because Base UI
+  // unmounts inactive tab panels — ChatPanel's unmount-time cleanup already
+  // reports `false`, but gating on the active tab too means the hero can
+  // never survive a moment where Chat isn't even the visible panel.
+  const [landingActive, setLandingActive] = useState(false);
+  const showHero = activeTab === "chat" && landingActive;
+  // Computed once, not live-updated — same convention
+  // AgentActivityGraph.tsx/RadialChatSelector.tsx already use for this
+  // exact media query.
+  const prefersReducedMotion = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    [],
+  );
+
   return (
     <div className="flex h-screen bg-background">
+      {/* Live-wallpaper hero: fixed, full-VIEWPORT (not just this flex
+          row's own box), so it's genuinely full-width regardless of how
+          narrow any one column is — the direct fix for the user's own
+          "you shrinked to fit" follow-up. `object-contain` rather than
+          `object-cover`: contain guarantees NOTHING is ever cropped off
+          the sides (cover would still crop somewhat at most window
+          aspect ratios); the letterbox bars this trades for are filled
+          with `LANDING_HERO_LETTERBOX_COLOR` (sampled from the real
+          footage, see that constant's own comment) rather than this
+          app's own `--void`, closing a real visible-seam bug the user
+          caught live — `bg-void` was legible as a distinct border where
+          it met the footage. `key={landingHeroVideo}` forces a fresh
+          `<video>` mount (restarting playback from frame 0) if the hero
+          ever re-shows after being hidden, rather than resuming a paused
+          decode mid-loop. Only rendered at all while `showHero` — no
+          decode/paint cost the rest of the time. */}
+      {showHero && (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-0 hidden dark:block"
+          style={{ backgroundColor: LANDING_HERO_LETTERBOX_COLOR }}
+        >
+          {prefersReducedMotion ? (
+            <img src={landingHeroPoster} alt="" className="h-full w-full object-contain" />
+          ) : (
+            <video
+              key={landingHeroVideo}
+              className="h-full w-full object-contain"
+              src={landingHeroVideo}
+              poster={landingHeroPoster}
+              autoPlay
+              loop
+              muted
+              playsInline
+            />
+          )}
+          {/* Vignette: darkens just the very top/bottom edges (behind the
+              greeting and the now app-wide translucent chrome) without
+              touching the middle, where the artwork itself lives — same
+              hand-tuned, non-evenly-spaced stop reasoning STEPS.md 142
+              used for the panel-local version this replaces. */}
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background:
+                "linear-gradient(to bottom, rgba(0,0,0,0.4) 0%, transparent 14%, transparent 86%, rgba(0,0,0,0.5) 100%)",
+            }}
+          />
+        </div>
+      )}
       {/* PLAN.md Phase 29 Stage 4 — mounted once, app-wide; the component
           itself no-ops entirely on touch/reduced-motion (see its own
           guard), so this is never forced on anyone it shouldn't be. */}
@@ -101,7 +201,7 @@ function App() {
       {/* PLAN.md Phase 29's own left icon rail — always visible, even on
           mobile (52px is thin enough not to need the slide-over-drawer
           treatment the wider thread list/right rail still get below). */}
-      <NavRail activeTab={activeTab} onChange={setActiveTab} />
+      <NavRail activeTab={activeTab} onChange={setActiveTab} transparent={showHero} />
       <div
         className={cn(
           // iPhone-access feature, PWA fix: `top-[env(safe-area-inset-top)]`
@@ -115,7 +215,11 @@ function App() {
           mobileNav === "sidebar" && "translate-x-0",
         )}
       >
-        <ThreadSidebar onActiveThreadChange={setActiveThreadId} width={sidebarWidth} />
+        <ThreadSidebar
+          onActiveThreadChange={setActiveThreadId}
+          width={sidebarWidth}
+          transparent={showHero}
+        />
       </div>
       <ResizeHandle
         ariaLabel="Resize thread sidebar"
@@ -168,10 +272,14 @@ function App() {
               greetingName="Mohit"
               onActivity={handleActivity}
               onStreamEnded={resetActivity}
+              onLandingViewChange={setLandingActive}
             />
           </TabsContent>
           <TabsContent value="history" className="min-h-0">
             <HistoryPanel key={activeThreadId ?? "pending"} />
+          </TabsContent>
+          <TabsContent value="journal" className="min-h-0">
+            <JournalPanel />
           </TabsContent>
           <TabsContent value="memory" className="min-h-0">
             <MemoryPanel />
@@ -206,7 +314,13 @@ function App() {
           // PLAN.md Phase 29: 384px (w-96) -> 260px, matching
           // instrument/DESIGN.md §3's own frame-body proportions — now
           // just the default until dragged (see useResizableWidth above).
-          "fixed top-[env(safe-area-inset-top)] bottom-0 right-0 z-50 flex w-[260px] max-w-[85vw] translate-x-full flex-col gap-3 overflow-y-auto border-l border-sidebar-border bg-sidebar p-3 text-sidebar-foreground transition-transform duration-200 md:static md:top-0 md:z-auto md:h-screen md:max-w-none md:translate-x-0 md:shrink-0",
+          "fixed top-[env(safe-area-inset-top)] bottom-0 right-0 z-50 flex w-[260px] max-w-[85vw] translate-x-full flex-col gap-3 overflow-y-auto border-l p-3 transition-transform duration-200 md:static md:top-0 md:z-auto md:h-screen md:max-w-none md:translate-x-0 md:shrink-0",
+          // Live-wallpaper hero — same glass recipe as NavRail/ThreadSidebar
+          // above; this one's inline (rather than a `transparent` prop)
+          // since the `<aside>` is already local JSX here, not a component.
+          showHero
+            ? "border-sidebar-border/40 bg-card/60 text-sidebar-foreground backdrop-blur-md"
+            : "border-sidebar-border bg-sidebar text-sidebar-foreground",
           mobileNav === "rail" && "translate-x-0",
         )}
         style={{ width: railWidth }}

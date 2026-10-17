@@ -25,7 +25,7 @@ that leakage is gone rather than kept as now-redundant defense.
 
 Extended thinking is enabled on every model here and in supervisor.py
 (`thinking_repair.THINKING_CONFIG`: adaptive, `display: "summarized"` — without
-that last key claude-sonnet-5 returns thinking blocks with no text, STEPS.md
+that last key claude-sonnet-5-5 returns thinking blocks with no text, STEPS.md
 158), paired with `ThinkingBlockRepairMiddleware` in
 every middleware list (assistant/thinking_repair.py) — STEPS.md 28/73/74: a
 confirmed bug in langchain-anthropic==1.4.8 (still the latest available) can
@@ -89,6 +89,7 @@ from langgraph.graph.state import CompiledStateGraph
 from assistant import prompts
 from assistant.a2ui import build_render_form_tool, build_render_ui_tool
 from assistant.board_tools import build_board_tools
+from assistant.calendar_tools import build_calendar_tools
 from assistant.circuit_breaker import RepeatedToolFailureCircuitBreaker
 from assistant.claude_code_tool import build_claude_code_tools
 from assistant.disk_tools import GATED_TOOLS as DISK_GATED_TOOLS
@@ -116,7 +117,7 @@ class GatedAgentState(AgentState):
 
 # --- Coding sub-agent --------------------------------------------------
 
-CODING_MODEL_NAME = "claude-sonnet-5"
+CODING_MODEL_NAME = "claude-sonnet-5-5"
 
 # Langfuse prompt name: "coding-agent-system-prompt" (scripts/
 # sync_prompts_to_langfuse.py). Mandatory local fallback — rewritten
@@ -242,7 +243,7 @@ def build_coding_agent(extra_tools: list[BaseTool] | None = None) -> CompiledSta
 # step-3 follow-up cost pass once real LangSmith trace data exists. Left on
 # Sonnet 5 for this build: switching models and standing up the new graph
 # architecture at the same time would be two unverified variables at once.
-RESEARCH_MODEL_NAME = "claude-sonnet-5"
+RESEARCH_MODEL_NAME = "claude-sonnet-5-5"
 
 # Langfuse prompt name: "research-agent-system-prompt". Mandatory local
 # fallback — extended at Phase 18 (PLAN.md) with render_ui guidance; the
@@ -258,11 +259,17 @@ RESEARCH_SYSTEM_PROMPT_FALLBACK = (
     "Use render_form instead for a few labeled fields plus a submit button "
     "— a simpler flat field-list contract for the same kind of form. "
     "Neither tool ever performs an action or has any effect outside the "
-    "dashboard. When you do render_ui: give it a clear one-line title, one "
-    "Card per item/source/option, Badge for short tags (a date, a rating, "
-    "a count) instead of prose, and Row for a side-by-side comparison vs. "
-    "Column/List for a longer list — you hold the raw results, so make "
-    "the structure worth rendering.\n\n"
+    "dashboard. Most answers should simply be well-formatted markdown prose "
+    "(short paragraphs, bullet lists, a markdown table for a comparison, "
+    "bold for key terms) — the chat renders it like the Claude app does, "
+    "so reach for render_ui only when interactivity or a genuinely visual "
+    "layout earns it. When you do render_ui: give it a clear one-line "
+    "title and VARY the components to fit the content — a List of "
+    "Row(Text + Badge) lines separated by Dividers for sources, Tabs for "
+    "alternatives, a Row of Badges for tags, Icons for status. Do NOT "
+    "wrap every item in its own Card: use at most one Card, only to "
+    "group one discrete object. You hold the raw results, so make the "
+    "structure worth rendering.\n\n"
     "Call render_web_media (not a raw http(s) URL in render_ui's Image/"
     "Video field, which is rejected — only base64 data is accepted, so a "
     "surface can never phone home on its own) when the user wants to "
@@ -312,7 +319,7 @@ def build_research_agent() -> CompiledStateGraph:
 
 # --- Life-admin sub-agent (Gmail + Calendar via MCP) ----------------------
 
-LIFE_ADMIN_MODEL_NAME = "claude-sonnet-5"
+LIFE_ADMIN_MODEL_NAME = "claude-sonnet-5-5"
 
 # Langfuse prompt name: "life-admin-agent-system-prompt". Mandatory local
 # fallback — extended at Phase 18 (PLAN.md) with render_ui guidance, same
@@ -348,11 +355,18 @@ LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK = (
     "flat field list rather than a full component tree. Either way a "
     "submission arrives as a normal new user message, and neither tool "
     "ever performs an action or substitutes for a confirmation gate — a "
-    "write always still goes through its own gated tool as above. When "
-    "you do render_ui: one Card per event/email/board column, Badge for "
-    "short tags (time, priority, sender, unread count) instead of prose, "
-    "Row for a few cards side by side vs. Column/List for a longer list — "
-    "you hold the raw data, so make the structure worth rendering.\n\n"
+    "write always still goes through its own gated tool as above. Most "
+    "answers should simply be well-formatted markdown (bullets, a "
+    "markdown table for a schedule or a set of emails, bold for key "
+    "details) — reach for render_ui only when interactivity or a "
+    "genuinely visual layout earns it. When you do render_ui: VARY the "
+    "components to fit the content — a List of Row(Text + Badge) lines "
+    "separated by Dividers for events or emails, Tabs for alternatives or "
+    "board columns, Badge for short tags (time, priority, sender, unread "
+    "count) instead of prose, Icons for status. Do NOT wrap every item in "
+    "its own Card: use at most one Card, only to group one discrete "
+    "object. You hold the raw data, so make the structure worth "
+    "rendering.\n\n"
     "You also have full, UNGATED access to the kanban board — "
     "list_board_tasks, render_board_ui, create_board_task, "
     "update_board_task, move_board_task, delete_board_task. Unlike email/"
@@ -360,6 +374,20 @@ LIFE_ADMIN_SYSTEM_PROMPT_FALLBACK = (
     "act on them directly the same turn. Refer to tasks by their ref (e.g. "
     "'ONI-3'). Call render_board_ui (no args) to show the board's real "
     "current state instead of retyping it yourself.\n\n"
+    "You also own ONI'S OWN semester calendar (the dashboard's Calendar "
+    "tab: classes, tutorials, exams, deadlines) — oni_calendar_list, "
+    "oni_calendar_add, oni_calendar_edit, oni_calendar_remove. It is a "
+    "third calendar, separate from Google Calendar (above) and Apple "
+    "Calendar (not yours), and like the board it is fully UNGATED: act on "
+    "it directly, no confirmation. Use it for anything about the user's "
+    "courses unless the instruction says GOOGLE Calendar. You only see "
+    "the text of your instruction, never an image: add exactly the events "
+    "it spells out (dates as YYYY-MM-DD, 24h Hong Kong times). If the "
+    "instruction leaves a date or time out, leave it out too — never "
+    "guess one. Call oni_calendar_list first to avoid duplicates, then "
+    "oni_calendar_add ONCE with every event; to move or fix one, list for "
+    "its id, then oni_calendar_edit; remove only what was asked. Reply "
+    "with exactly what was added/changed/removed.\n\n"
     "Oni's own persistent note vault (search_vault/write_vault_note/etc.) "
     "moved to the supervisor itself — it isn't one of your tools. If a "
     "request is really about saving/finding a vault note, say so rather "
@@ -483,6 +511,9 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
     card/list directly instead of the supervisor reconstructing one from
     its prose summary. See build_render_ui_tool's own docstring for the
     live verification this extension rested on.
+
+    Oni's own semester calendar (calendar_tools.py) is also this agent's,
+    next to the board: the same local, ungated, reversible category.
     """
     model = ChatAnthropic(model=LIFE_ADMIN_MODEL_NAME, thinking=THINKING_CONFIG)
     system_prompt = LIFE_ADMIN_SYSTEM_PROMPT + _life_admin_unavailable_integrations_note(mcp_tools)
@@ -493,6 +524,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
             build_render_ui_tool(),
             build_render_form_tool(),
             *build_board_tools(),
+            *build_calendar_tools(),
         ],
         system_prompt=system_prompt,
         middleware=[
@@ -509,7 +541,7 @@ def build_life_admin_agent(mcp_tools: list[BaseTool]) -> CompiledStateGraph:
 
 # --- Mac-control sub-agent (Phase 4) ---------------------------------------
 
-MAC_CONTROL_MODEL_NAME = "claude-sonnet-5"
+MAC_CONTROL_MODEL_NAME = "claude-sonnet-5-5"
 
 # Langfuse prompt name: "mac-control-agent-system-prompt". Mandatory local
 # fallback, byte-for-byte identical to the pre-Phase-16 text.
@@ -629,7 +661,7 @@ def build_mac_control_agent() -> CompiledStateGraph:
 
 # --- Phone sub-agent (PLAN.md Phase 21) ------------------------------------
 
-PHONE_MODEL_NAME = "claude-sonnet-5"
+PHONE_MODEL_NAME = "claude-sonnet-5-5"
 
 # Langfuse prompt name: "phone-agent-system-prompt". Mandatory local
 # fallback, same convention as every other specialist's own prompt.

@@ -150,15 +150,14 @@ describe("ChatPanel", () => {
     render(<ChatPanel greetingName="Mohit" />);
     await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
 
-    expect(await screen.findByText(/hi, mohit/i)).toBeInTheDocument();
-    expect(screen.getByText("Where should we start?")).toBeInTheDocument();
+    expect(await screen.findByText(/hey, mohit/i)).toBeInTheDocument();
 
     await user.type(screen.getByPlaceholderText(/message the assistant/i), "ping");
     await user.click(screen.getByRole("button", { name: /send/i }));
 
     expect(await screen.findByText("pong")).toBeInTheDocument();
     // The landing view is gone the instant a real message exists.
-    expect(screen.queryByText("Where should we start?")).not.toBeInTheDocument();
+    expect(screen.queryByText(/hey, mohit/i)).not.toBeInTheDocument();
   });
 
   it("sends a suggestion card's prompt directly, without needing the composer at all", async () => {
@@ -167,7 +166,7 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel />);
     await waitFor(() => expect(mockedFetchHistory).toHaveBeenCalled());
-    await screen.findByText("Where should we start?");
+    await screen.findByText(/hey, mohit/i);
 
     await user.click(screen.getByRole("button", { name: /coding/i }));
     const card = await screen.findByText(/debug my code/i);

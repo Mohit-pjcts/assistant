@@ -1,3 +1,7 @@
+// Stage (Bun server + Swift overlay) is owned the same way, added 2026-10-13
+// at the user's request ("make stage run on oni instead of ... always running
+// in the bg"): it starts with the app and stops with it — see `spawn_stage`.
+//
 // Phase 14 packaging step (STEPS.md 71/72): the Tauri shell owns the
 // Python backend's process lifecycle instead of it being started by hand
 // in a terminal (the Phase 10 park note's "backend lifecycle" deferred-
@@ -13,9 +17,11 @@
 // relocated/packaged .app bundle, which is an accepted limitation of the
 // chosen scope, not an oversight.
 
+use std::fs::OpenOptions;
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -24,6 +30,9 @@ const BACKEND_PORT: u16 = 8000;
 
 struct ManagedProcesses {
     backend: Mutex<Option<Child>>,
+    /// `bash stage/scripts/start.sh` — Stage's Bun server + Swift overlay,
+    /// which live and die with this app (see `spawn_stage`).
+    stage: Mutex<Option<Child>>,
 }
 
 fn project_root() -> PathBuf {
@@ -157,10 +166,95 @@ fn wait_for_backend(port: u16, timeout: Duration) {
     eprintln!("[assistant] backend not ready after {timeout:?}, showing window anyway");
 }
 
+/// Start Stage (Backstage's agents + Onstage's hotkey/overlay) with the app,
+/// so it no longer has to be left running by hand in the background.
+///
+/// This runs `stage/scripts/start.sh` rather than re-implementing it: that
+/// script already stops any older Stage (found via the pid in Stage's
+/// `server.json`, which also cleans up after an Oni crash that never got to
+/// stop its own Stage), rebuilds the overlay only when its source is newer,
+/// puts Bun on PATH, starts the server from `stage/` (where Bun finds
+/// `.env`), then opens the overlay. It is NOT waited on: a stale overlay
+/// triggers a few-second `swiftc` build, and nothing in the dashboard needs
+/// Stage up to appear (`assistant/stage.py` reports "not running" cleanly).
+///
+/// Its output goes to `~/Library/Logs/PersonalAssistant/stage.log` (mode
+/// 0600, truncated each launch) — it prints the panel URL including this
+/// launch's token, which must not land in a world-readable file.
+/// `ONI_NO_STAGE=1` skips this entirely (tests, a second dev instance).
+fn spawn_stage() -> std::io::Result<Option<Child>> {
+    if std::env::var_os("ONI_NO_STAGE").is_some() {
+        eprintln!("[assistant] ONI_NO_STAGE set, not starting Stage");
+        return Ok(None);
+    }
+    let root = project_root();
+    let script = root.join("stage/scripts/start.sh");
+    if !script.exists() {
+        eprintln!("[assistant] {} not found, not starting Stage", script.display());
+        return Ok(None);
+    }
+    let mut stdio = (Stdio::null(), Stdio::null());
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = PathBuf::from(home).join("Library/Logs/PersonalAssistant");
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(log) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dir.join("stage.log"))
+        {
+            if let Ok(err) = log.try_clone() {
+                stdio = (Stdio::from(log), Stdio::from(err));
+            }
+        }
+    }
+    eprintln!("[assistant] starting Stage: {}", script.display());
+    Command::new("bash")
+        .arg(&script)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(stdio.0)
+        .stderr(stdio.1)
+        .spawn()
+        .map(Some)
+}
+
+/// Stop Stage cleanly. `Child::kill()` is SIGKILL, which would skip
+/// `start.sh`'s own `trap` (the thing that stops the Bun server and the
+/// overlay) and leave both orphaned — so send SIGTERM first and let the
+/// script clean up, give it a moment, and only then force it. The overlay is
+/// then swept by name either way (the same match `start.sh` uses), since it
+/// is launched through `open` and is not a child of the script.
+fn stop_stage(mut child: Child) {
+    let pid = child.id().to_string();
+    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if matches!(child.try_wait(), Ok(None)) {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let _ = Command::new("pkill")
+        .args(["-f", "Stage Overlay.app/Contents/MacOS/StageOverlay"])
+        .status();
+}
+
 fn kill_managed_processes(app_handle: &tauri::AppHandle) {
     let Some(state) = app_handle.try_state::<ManagedProcesses>() else {
         return;
     };
+    // Stage first: it talks to nothing in the backend, but it is the slower
+    // of the two to stop (SIGTERM + the script's own cleanup).
+    if let Some(child) = state.stage.lock().unwrap().take() {
+        eprintln!("[assistant] stopping Stage");
+        stop_stage(child);
+    }
     if let Some(mut child) = state.backend.lock().unwrap().take() {
         eprintln!("[assistant] stopping backend");
         let _ = child.kill();
@@ -188,8 +282,19 @@ pub fn run() {
                     None
                 }
             };
+            let stage = match spawn_stage() {
+                Ok(child) => child,
+                Err(err) => {
+                    // Same stance as the backend: a failed spawn must not
+                    // stop Oni opening; Backstage/Onstage just report that
+                    // Stage isn't running.
+                    eprintln!("[assistant] failed to start Stage: {err}");
+                    None
+                }
+            };
             app.manage(ManagedProcesses {
                 backend: Mutex::new(backend),
+                stage: Mutex::new(stage),
             });
             Ok(())
         })

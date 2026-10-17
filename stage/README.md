@@ -12,7 +12,7 @@ Backstage, in short:
 * Every step is decided by **TypeSafe jev**, a calibrated classifier: about **$0.00007 and 0.6 s per decision**, against about **$0.004 and 2 s for Claude Sonnet** on the same input (measured below).
 * An LLM is used **only where it's needed**: when jev is stuck, when a check is borderline, or for creative text. Every LLM call is logged with its reason.
 * If jev isn't confident, the agent **stops and says so** instead of guessing.
-* **One hotkey for everything.** Hold **Control + Option** and say it (or tap to type): a job ("compute 128 times 37 in Calculator") goes to Backstage, and a question about your screen ("how do I…?") goes to Onstage.
+* **One hotkey for everything, and it goes through Oni.** Hold **Control + Option** and say it (or tap to type): your words and a screenshot of your screen go to Oni's supervisor, which decides who does it — Backstage for a job in your apps, Onstage for a question about the screen, or any of Oni's other agents (calendar, vault, email…) — and Stage speaks the answer.
 
 ## Inside Oni
 
@@ -73,8 +73,24 @@ before the cards were removed.
   token, pid). Every API route and the overlay's socket need that token, so another local process or a sandboxed app
   can't start agents or get your screen described through Stage. Oni and the overlay read the file themselves.
 
-Run it alongside Oni: copy `stage/.env.example` to `stage/.env` and add your keys, then `bash stage/scripts/start.sh`
-(it prints the panel's address, token included). The hotkey and the overlay keep working on their own.
+## Web forms (Google Forms, Microsoft Forms, any page of questions)
+
+Oni fills forms through `form_open` / `form_read` / `form_fill` / `form_press` / `form_login` (Stage's `/api/form/*`, `src/webform.ts`). Oni does the thinking: it reads the questions, finds each answer itself (the vault first, then the user; it asks for what it cannot find and does not invent personal details) and calls `form_fill` once with everything it has. Stage does what it is told and **reads every answer back from the page**, so a reply says which answers landed, which question or option was not found (with the real choices) and which required questions are still empty. `submit` is a separate call, made only when the user asked for it.
+
+* **How:** Cua's browser tools (DevTools), not the accessibility tree. Every question is an element with a name, a type and a handle; text goes in with no keyboard focus involved, a choice is a click on the option's handle, a dropdown is opened to read its choices, and off-screen questions work the same. Clicks are background (synthetic) clicks, so the browser window is never brought forward by them. Measured on a replica of a Google Form: every field, a dropdown, eight tick boxes, two pages and Submit, about a second per field; the accessibility route through the everyday Brave left the dropdown unreachable and reported typing that never arrived as done.
+* **Whose browser:** the agent's own window (a Chrome profile named `oni-agent`, kept under `~/Library/Application Support/CuaDriver/BrowserProfiles`), not your everyday Brave. A form that needs an account: Oni calls `form_login`, the window comes forward, you sign into Google or Microsoft there **once**, and the login is kept (Chrome writes cookies to disk every few seconds, so wait a moment before the browser is closed). Attaching to your everyday profile instead needs a daemon-wide "existing-profile" grant that lets any local process drive every site you are signed into; that is your call, so it is not switched on.
+* **Addresses:** public http(s) only, by the same rules as every other address Stage opens. `STAGE_FORMS_ALLOW_LOCAL=1` lets a developer's own test page through.
+* **If a browser of that profile is already running** (a crash, an earlier run) Stage attaches to it instead of failing.
+* **Not covered yet:** file uploads, date pickers that are not text fields, captchas, forms inside iframes from another site, and real Google / Microsoft forms have not been run (the test form copies their structure). A synthetic click can be ignored by a control that insists on a real one; the read-back says so rather than assuming.
+
+**Messaging apps that ignore background typing.** WhatsApp drops key events posted in the background (the call says ok, the box stays empty), so for it Stage types the message as real keystrokes (the app comes forward for a moment) and presses the app's own Send button. Other apps that do the same can be added with `STAGE_FOREGROUND_TYPING_APPS="Discord, Slack"` (names, case-insensitive).
+
+**Running it.** Copy `stage/.env.example` to `stage/.env` and add your keys. After that the Oni desktop app runs Stage for
+you: it starts with Oni and stops with it (the hotkey and the overlay only exist while Oni is open). Its output goes to
+`~/Library/Logs/PersonalAssistant/stage.log` (readable by you only: it prints the panel's address, token included). Set
+`ONI_NO_STAGE=1` before launching Oni to skip that. To run Stage on its own (without the app), use
+`bash stage/scripts/start.sh`; Ctrl+C stops it. Starting it again always replaces an older Stage, including one Oni
+left behind after a crash.
 
 **Changes from the HacKU submission** (`github.com/Mohit-pjcts/HackU`, `mac/`), all from a full code review in Oni: the
 API above (run records with an owner, an outcome and their own Stop; summaries instead of full records; the long poll;
@@ -204,11 +220,17 @@ The fix for each was to call the LLM *in that situation*, not everywhere. `LLM_F
 
 ## The hotkey: one way in, for Backstage and Onstage
 
-Hold **Control + Option** and talk, or tap it and type. The server decides what you meant:
+Hold **Control + Option** and talk, or tap it and type. **Every request goes hotkey → Oni's supervisor → a sub-agent** (`POST /hotkey/turn` on Oni, `src/hotkey.ts` here): Stage sends your words, the screenshot taken at key-down and the front app/window, Oni's supervisor reads the screen and decides what to do, and Stage says its reply out loud. "Update these exams into my calendar" with a timetable on screen now ends up in Oni's calendar; "open Calculator and compute 3 times 4" still ends up in Backstage, because the supervisor delegates it there.
 
-* **A job** (it starts with an action, "open", "compute", "write", "find", "organise", "play"…, or names an app as the place: "in Calculator") **starts the agents**. Backstage says "On it.", a **widget for each agent** appears in the bottom-right corner (its colour, its app, what it is doing right now, a running clock), and when they finish it reads the results out ("In Calculator: 45 times 12 is 540. TextEdit is done. In Safari: …") and shows them on the widgets. Say **stop** to stop them (or use the menu-bar icon).
-* **A question about the screen** ("how do I…", "what does this do", "where is…", "underline…") goes to Onstage, below.
-* Clear cases are decided by code in 0 ms (`src/router.ts`). Only an unclear one goes to jev (about 0.5 s), and when jev isn't sure it's treated as a question: explaining never changes anything, acting does.
+* **Kept in Stage, with no model:** words that control something already running: **stop** (cancels Oni's turn and the agents), a lesson's **next / back / repeat**, and **clear**.
+* **One request at a time.** While Oni works on one, a second press says so instead of starting another. Oni itself also refuses (and says so) if the dashboard is mid-turn or waiting on an approval on the same thread.
+* **Approvals are never given by voice here.** A hotkey turn that reaches a confirmation gate (send email, delete…) is declined on the spot, and the reply tells you which action was held back and to approve it in the Oni window. The screenshot is not kept in Oni's conversation history either (replaced by a one-line note).
+* **When Oni isn't running** (or hasn't been restarted since this landed), the old local router (`src/router.ts`, below) answers, so the hotkey still works. It is used only when Oni could not have taken the request at all (connection refused, or no such endpoint): if Oni took it and failed, it is never run a second time locally. `STAGE_HOTKEY_VIA_ONI=0` forces the local router; `ONI_URL` points at a different Oni (default `http://127.0.0.1:8000`).
+* If Onstage already spoke and drew its answer during the turn, the reply is not read over it.
+
+**The local router (fallback).** A job (it starts with an action, "open", "compute", "write", "find", "organise", "play"…, or names an app as the place: "in Calculator") **starts the agents**; a question about the screen ("how do I…", "what does this do") goes to Onstage. Clear cases are decided by code in 0 ms (`src/router.ts`); an unclear one goes to jev (about 0.5 s), and when jev isn't sure it's treated as a question: explaining never changes anything, acting does.
+
+Backstage says "On it.", a **widget for each agent** appears in the bottom-right corner (its colour, its app, what it is doing right now, a running clock), and when they finish it reads the results out ("In Calculator: 45 times 12 is 540. …") and shows them on the widgets. Say **stop** to stop them (or use the menu-bar icon).
 
 Each widget also shows a **live preview of the window its agent is working in** (about once a second, even when that window is covered by others), in a grid that grows to 2 or 3 columns for 4–9 agents. The previews use ScreenCaptureKit and need **Screen Recording** for Stage Overlay (macOS asks the first time; until then the widget says so). The menu-bar icon can turn previews off.
 
@@ -226,7 +248,7 @@ Hold **Control + Option** and ask out loud, or **tap** it to type. Onstage looks
 * **Cost of the voice.** Half a credit per character. The free plan gives 10,000 credits a month: a 6-step lesson used about 400.
 * The overlay's own windows are kept out of screenshots, and they never take clicks.
 
-| | Sonnet 5.5 (default) | Haiku 4.5 (`EXPLAIN_MODEL=claude-haiku-4-5-20251001`) |
+| | Sonnet 5.5 (default) | Haiku 5.5 (`EXPLAIN_MODEL=claude-haiku-5-5`) |
 |---|---|---|
 | time to answer (measured) | 3–9 s | 2–5 s |
 | cost per question | ~$0.015–0.02 | ~$0.006–0.008 |
