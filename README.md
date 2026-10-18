@@ -1,5 +1,9 @@
 # assistant
 
+[![Oni, a 2:39 video tour](docs/oni-promo-poster.jpg)](docs/oni-promo.mp4)
+
+**▶ [Watch the 2:39 video](docs/oni-promo.mp4)**: what Oni is, how its agents work, and the approval gate, shown on the real app.
+
 A personal AI assistant built on the Claude API and [LangGraph](https://github.com/langchain-ai/langgraph). Runs as a CLI and a Tauri desktop dashboard (voice included) — both talking to the same conversation, the same memory, and the same graph. A supervisor routes each request to the right specialist sub-agent (coding, research, email/calendar, Mac control) and can chain several in one turn. Side-effectful actions — sending an email, creating a calendar event, running a Shortcut, writing a durable memory — always pause for an explicit confirmation first. The whole thing is built around the assumption that anything a tool returns (a search result, an email, a calendar event, a Note) could be adversarial.
 
 ## What it can do today
