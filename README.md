@@ -1,5 +1,11 @@
 # assistant
 
+
+
+https://github.com/user-attachments/assets/c5269687-a2e9-4c33-8092-fb9eb6206b40
+
+
+
 [![Oni, a 2:39 video tour](docs/oni-promo-poster.jpg)](docs/oni-promo.mp4)
 
 **▶ [Watch the 2:39 video](docs/oni-promo.mp4)**: what Oni is, how its agents work, and the approval gate, shown on the real app.
