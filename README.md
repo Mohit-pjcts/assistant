@@ -187,6 +187,10 @@ npm run tauri dev
 
 This launches the Tauri window, which itself spawns the Python backend (`uvicorn assistant.server:app`) as a child process — quitting the window stops it too. No need to run `assistant` separately when using the dashboard. `npm run build` produces a release bundle.
 
+### iPhone app
+
+`ios/Oni` is a native SwiftUI app (free signing, installed from Xcode) that keeps a copy of the Obsidian Vault on the phone and syncs it with the Mac over Tailscale HTTPS (`assistant/vault_sync.py`, bearer-token protected, conflicts kept in `_conflicts/`, deletes in `_trash/`). The Oni tab runs a small on-device Oni that calls the Claude API directly with the same five vault tools as the Mac, so it works with the Mac off. The sync engine and chat engine live in a tested Swift package (`ios/OniCore`, 132 tests). Install steps, key handling, cost notes and the on-device checklist are in [IOS_SETUP.md](IOS_SETUP.md).
+
 ### Run (CLI only)
 
 ```sh

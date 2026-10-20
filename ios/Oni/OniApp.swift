@@ -2,8 +2,15 @@ import SwiftUI
 
 @main
 struct OniApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
+    @State private var chat: ChatController
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let model = AppModel()
+        _model = State(initialValue: model)
+        _chat = State(initialValue: ChatController(app: model))
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +22,7 @@ struct OniApp: App {
                 }
             }
             .environment(model)
+            .environment(chat)
         }
         .onChange(of: scenePhase) { _, phase in
             // Foreground-only sync (PLAN.md Phase 30, decision 10).
@@ -29,6 +37,8 @@ enum Route: Hashable {
     case note(String)
     case conflicts
     case trash
+    case chat(UUID)
+    case chatSetup
 }
 
 @Observable @MainActor
@@ -38,11 +48,16 @@ final class Navigator {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(ChatController.self) private var chat
 
     var body: some View {
         TabView {
             TabRoot { VaultView() }
                 .tabItem { Label("Vault", systemImage: "books.vertical") }
+            TabRoot { ChatListView() }
+                .tabItem { Label("Oni", systemImage: "sparkles") }
+                // A turn running is never invisible, even from another tab.
+                .badge(chat.isRunning ? "●" : nil)
             TabRoot { SearchView() }
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
             TabRoot { SettingsView() }
@@ -66,6 +81,8 @@ struct TabRoot<Content: View>: View {
                     case .note(let path): NoteView(path: path)
                     case .conflicts: ConflictsView()
                     case .trash: TrashView()
+                    case .chat(let id): ChatView(id: id)
+                    case .chatSetup: ChatSetupView()
                     }
                 }
         }

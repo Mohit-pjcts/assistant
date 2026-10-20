@@ -43,6 +43,9 @@ struct SettingsView: View {
                 NavigationLink(value: Route.trash) {
                     Label("Trash", systemImage: "trash")
                 }
+                NavigationLink(value: Route.chatSetup) {
+                    Label("Oni on this iPhone", systemImage: "sparkles")
+                }
             }
 
             Section {
