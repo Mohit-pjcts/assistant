@@ -3455,7 +3455,7 @@ guarded against, or something new), it's a bug against already-closed
 Phase 29 work, not an open item of this phase.
 
 
-## Phase 30 — Oni for iPhone: native SwiftUI Vault app with on-device Oni — PLANNED, not built (scoped 2026-10-18 via `/grill-with-docs`, STEPS.md 164)
+## Phase 30 — Oni for iPhone: native SwiftUI Vault app with on-device Oni — COMPLETE (scoped 2026-10-18 via `/grill-with-docs`, STEPS.md 164; built STEPS.md 165-171; status flip approved by the user 2026-10-20)
 
 **Objective:** a proper native iPhone app (not a browser page, not the PWA)
 that costs nothing to build and install: SwiftUI, installed from this Mac
@@ -3631,14 +3631,15 @@ start; this heading's status is unchanged pending the user's approval.**
   Stage 4. Nothing is verified on a real iPhone, so the done-when list above
   is entirely still open.
 
-## Phase 31 — Mac-connected Oni on the iPhone — PLANNED, NOT YET SCOPED (written out 2026-10-18 alongside Phase 30; needs its own `/grill-with-docs` session before any code)
+## Phase 31 — Mac-connected Oni on the iPhone — SCOPED, NOT BUILT (written out 2026-10-18; scoped 2026-10-20 via a `/grilling` session, STEPS.md 172; decisions below, ADR 0005)
 
 **Objective:** with the Mac reachable, the same iPhone app talks to the real
 Oni — the full supervisor with its specialists (email/calendar, research,
 Mac control, coding, Stage, the board, the Oni calendar) — instead of only
-the on-device vault Oni. Phone-only Oni stays the fallback. **This entry
-records known constraints and the questions a scoping session must answer;
-it deliberately makes no decisions**, because none of the below was grilled.
+the on-device vault Oni. Phone-only Oni stays the fallback. **The "Decisions"
+section at the end of this entry is the locked scope**; the original
+constraints and questions are kept above it as the record of what was
+asked (each is answered by a numbered decision below).
 
 **What Phase 30 hands it (so this phase starts with plumbing done):** the
 pairing flow, the Keychain-held token, the HTTPS-over-`tailscale serve`
@@ -3686,3 +3687,150 @@ is the reference implementation):**
    argue for the paid program after all?
 8. **Done bar** — the same on-device verification requirement as Phase 30,
    unless waived explicitly.
+
+
+### Decisions (locked 2026-10-20, `/grilling` session, STEPS.md 172)
+
+Each is the user's own call; two (D2, D8) were made against the recommendation
+and are recorded with their consequences in `docs/adr/0005-*`. The question
+numbers above are in brackets.
+
+- **D1 — Channel [Q5].** The app is a **second dashboard**: it uses `/chat`,
+  `/resume`, `/chat/stop`, `/a2ui/action`, `/uploads` and the thread/project
+  endpoints exactly as the dashboard does. NOT the "phone" channel
+  (`/phone/turn`, `_PHONE_CHANNEL_MARKER`, `phone_agent`): "text Rishabh" or
+  "open Spotify" means the **Mac**. No new channel marker, no supervisor-prompt
+  change, no Langfuse prompt re-sync. A native app cannot open apps by name
+  anyway. (A "you are talking to the iPhone app" hint is a possible later,
+  additive change; not in scope.)
+- **D2 — Auth [Q1]. No new auth.** `/chat` and the rest keep the access they
+  have today (unauthenticated; the private tailnet is the trust boundary, same
+  as the Shortcuts). The recommended "local OR bearer token on the app's
+  routes" was declined. This supersedes ADR 0004's note that this phase must
+  revisit the token: it was revisited and left alone. Consequence recorded in
+  ADR 0005: the app can now drive Oni and approve gates, and the existing
+  Wi-Fi/tailnet exposure of these routes (backend binds 0.0.0.0) is unchanged.
+- **D3 — Gate cards [Q2].** A **native layout for every gate kind** the
+  dashboard's `InterruptGate.tsx` renders (all `GATED_ACTIONS`, the bundled
+  upfront gate from `request_gated_action_confirmation`, the workflow
+  `propose_workflow` bundle, the shell inline-interpreter gate, and any
+  other kind present at build time — memory writes are NOT gates, they go
+  through the async review queue, which is D9's memory approvals), each
+  showing the payload's real content verbatim. Same security contract as the
+  dashboard: nothing summarised, nothing truncated. The app has no voice
+  approval, so the dashboard's `voice_approvable` flag is irrelevant here: every
+  gate is tap-to-approve. Port the dashboard's injection-shaped-payload tests.
+- **D4 — Unknown gates [Q2].** A gate kind with no layout falls back to a
+  **generic verbatim card** (every key/value as-is, full text readable, Approve
+  and Decline). A known kind carrying a field its layout has no slot for lists
+  it under **"Other details"** — nothing is ever hidden. A payload that cannot
+  be parsed at all is **declined** (fail closed).
+- **D5 — A2UI [Q3].** All 18 Basic Catalog component types **except `Video`
+  and `AudioPlayer`**, which render a placeholder ("Video: open on your Mac").
+  Includes `dataModel`/path binding and `/a2ui/action` submissions with the
+  `Button.action == {name}` lock enforced client-side too, plus `render_board_ui`
+  surfaces. Video/Audio can be added later without redoing anything.
+- **D6 — Threads [Q4/Q6].** The Oni tab gets a **"Mac | This iPhone" switch**
+  with two separate lists. Mac side = the Mac's Threads (shared with the
+  dashboard, so a dashboard conversation can be continued from the phone and
+  vice versa); iPhone side = the Phase 30 on-device Chats. No merging, no
+  automatic switching (the two Onis have different tools and different history
+  formats; a chat cannot move between them). New chat creates on the selected
+  side. Mac unreachable → the Mac side says so and offers the iPhone side.
+  Threads created by the app land **ungrouped** (no Project); moving a Thread
+  into a Project stays a dashboard action. The Mac list shows Projects as
+  collapsible folders, read-only.
+- **D7 — Dropped connection [Q6].** For turns started from the app, the Mac
+  **keeps running if the phone disconnects** (iOS suspends the app within
+  seconds of a screen lock). Today `_stream_turn` is tied to the response and a
+  closed connection cancels the turn; the dashboard path is **unchanged**. New
+  server mechanism: an app-originated request runs the turn as a background
+  task decoupled from the SSE response, which only observes it; the app
+  re-attaches (or reads the finished/paused thread state) when reopened and
+  shows the answer or the gate card waiting for it. `/chat/stop` keeps working.
+  Unattended turns appear in the existing `active_turns` registry/banner.
+  **Verify first** (never assumed): that a closed connection really cancels the
+  turn today, and how the app discovers a pending interrupt on reopen
+  (`/history` vs `aget_state`).
+- **D8 — Approval check [new].** **No Face ID / extra check** before Approve
+  (recommended: Face ID before every Approve tap). The phone's own lock screen
+  is the only protection; consistent with ADR 0004's no-app-lock. Recorded as
+  a deliberate weakening because this is the first time the phone can trigger
+  real-world actions.
+- **D9 — Extras.** In scope beyond chat/threads/gates/A2UI/stop/in-flight
+  indicator: **photo attach** (the Mac's `/uploads` rejects HEIC and iPhone
+  photos are HEIC, so the app converts to JPEG on device before upload),
+  **Project folders** (D6), the **kanban board** (`/board/tasks*`, drag between
+  columns) and **memory approvals** (`/memory/pending`, approve/decline cards).
+  Out: a mic button (the iOS keyboard already dictates), cost/calendar/
+  history-trace/Stage panels.
+- **D10 — Done bar [Q8].** The Phase 30 bar: Python tests pass, Swift tests
+  pass, an integration run against the real server on a temp state, then **the
+  user** runs an on-device checklist (written with the phase) before any status
+  flip is proposed. Not waived.
+- **Free-signing ceiling [Q7], accepted:** no push, no Live Activities, so a
+  long Mac turn reports only when the app is open (D7 makes sure it is not
+  lost). The 7-day expiry stays. The paid program is not argued for by this
+  phase.
+- **Network note (not a decision of this phase):** the Mac-connected mode
+  needs only Tailscale, because the Mac makes the Claude calls. The Tailscale
+  exit-node setup (STEPS.md 171) exists solely for the on-device Oni in Hong
+  Kong and is still unverified on the device.
+
+**Build order (a stage is not started before the previous one's tests pass):**
+1. **Server.** Verify the cancel-on-disconnect premise; build detached
+   app-originated turns (opt-in flag on the request, dashboard path untouched);
+   a way to read "running / finished / waiting at gate" for a thread; tests incl.
+   disconnect mid-turn and stop-while-detached.
+2. **Swift core (`OniCore`).** SSE client for `/chat`/`/resume`/`/chat/stop`/
+   `/a2ui/action`, models for every SSE frame type (`message`, `interrupt`,
+   `a2ui`, `agent_activity`, errors), thread/project/board/memory clients,
+   gate payload and A2UI tree models with strict validation. Unit tests plus an
+   integration run against the real router.
+3. **Mac chat.** The Oni tab's "Mac | This iPhone" switch, Mac thread list with
+   Project folders, chat view with live streaming, tool/agent activity,
+   "Oni is working" indicator and Stop, reconnect-after-suspend.
+4. **Gate cards.** Every kind (D3), the generic fallback (D4), decline on
+   unparseable, ported injection-shaped tests. Highest-risk stage: no gate
+   renderer ships without a test that its real content is shown verbatim.
+5. **Generative UI (D5).**
+6. **Photo attach + HEIC→JPEG** (D9).
+7. **Kanban board and memory approvals** (D9).
+
+**Done-when (all required, in this order):** server and Swift tests pass; the
+integration run passes; then the user confirms on the real iPhone: (1) switch to
+Mac, a new thread streams a real reply; (2) "Use backstage to text <contact> on
+WhatsApp saying hi" runs on the Mac; (3) a gated action (e.g. an email send)
+shows its card with the real content, Approve executes it once, Decline
+doesn't; (4) lock the phone mid-turn, reopen: the answer (or the waiting card)
+is there; (5) Stop cancels a running turn; (6) a thread started on the
+dashboard continues on the phone and back; (7) an A2UI form submits and a
+video block shows its placeholder; (8) a photo attaches and Oni describes it;
+(9) a board card moves columns and a pending memory fact approves/declines;
+(10) Mac unreachable: the Mac side says so, the iPhone side still works.
+
+**Risks, named up front:** the whole Mac API is now usable by anyone who can
+reach the Mac's port with no token (D2) and approvals have no extra check (D8) —
+a lost unlocked phone, or someone on the same network, can drive Oni and approve
+gates; a per-action gate renderer that omits a field is a hidden-content bug (why
+D4's "Other details" and the verbatim tests exist); detached turns (D7) mean a
+request can finish after you stopped looking, including ungated actions
+(backstage, calendar delete, `run_shortcut_on_phone`) — they were ungated on the
+dashboard too but you were watching; changing `_stream_turn`'s lifecycle touches
+the dashboard's core path and must not regress its stop/cancel guarantees.
+
+**Explicitly not in this phase:** an auth token or Face ID on the Mac API,
+a new channel marker, merging phone and Mac chats, push notifications, voice
+approval of gates, video/audio blocks, cost/calendar/trace/Stage panels, moving
+Threads between Projects from the phone, background sync.
+
+**Progress log (2026-10-20, STEPS.md 173).** **Stage 1 (server): built and verified.**
+`assistant/detached_turns.py`, the `detached` flag on `/chat`/`/resume`/
+`/a2ui/action`, `GET /threads/{id}/turn`, and `GET /history?thread_id=` (found
+missing while designing: the app must read a thread without moving the shared
+pointer). The cancel-on-disconnect premise was confirmed first with a probe;
+19 new tests including the real routes on a real socket; one tiny real-graph
+detached turn verified on a throwaway backend. **The live backend (inside the
+installed Oni.app, no `--reload`) is still the old code: quit and relaunch
+Oni.app before the phone can use any of this.** Stages 2-7 not started.
+

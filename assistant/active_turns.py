@@ -48,7 +48,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-Channel = Literal["dashboard", "voice", "phone", "automation", "cli", "hotkey"]
+Channel = Literal["dashboard", "voice", "phone", "automation", "cli", "hotkey", "app"]
 Outcome = Literal["completed", "error", "cancelled"]
 
 

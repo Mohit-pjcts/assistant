@@ -106,6 +106,8 @@ from assistant import (  # noqa: E402
 from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
 from assistant.agent import make_thread_config  # noqa: E402
 from assistant.compaction import is_compaction_summary, is_genuine_human_turn  # noqa: E402
+from assistant.detached_turns import observe as observe_detached  # noqa: E402
+from assistant.detached_turns import registry as detached_registry  # noqa: E402
 from assistant.interrupts import send_test_notification  # noqa: E402
 from assistant.local_only import require_local_client  # noqa: E402
 from assistant.logging_config import configure_logging  # noqa: E402
@@ -369,6 +371,7 @@ async def _stream_turn(
     gate_outcome: tuple[bool, str | None] | None = None,
     *,
     is_resume: bool = False,
+    channel: active_turns.Channel = "dashboard",
 ) -> AsyncIterator[bytes]:
     """Stream one turn (a fresh message OR a Command(resume=...)) as SSE
     frames: zero or more `{"type": "token", "text": ...}` deltas, zero or
@@ -427,7 +430,7 @@ async def _stream_turn(
     task = asyncio.current_task()
     if task is not None:
         app.state.active_tasks[thread_id] = task
-    active_turns.start_turn(thread_id, channel="dashboard")
+    active_turns.start_turn(thread_id, channel=channel)
     outcome: active_turns.Outcome = "completed"
     try:
         config = make_thread_config(thread_id)
@@ -808,6 +811,11 @@ class ChatRequest(BaseModel):
     # File/photo upload feature: paths returned by POST /uploads. Default
     # empty list keeps every pre-existing caller byte-compatible.
     attachments: list[Attachment] = []
+    # PLAN.md Phase 31 (D7): the iPhone app sets this so the turn keeps running
+    # on the Mac if the phone's connection drops (iOS suspends the app within
+    # seconds of a screen lock). Default False leaves every existing client —
+    # the dashboard above all — on today's cancel-on-disconnect behavior.
+    detached: bool = False
 
 
 class ResumeRequest(BaseModel):
@@ -815,6 +823,7 @@ class ResumeRequest(BaseModel):
     # Must match whichever thread_id the /chat call that produced the
     # pending interrupt used — same fallback-to-active-pointer default.
     thread_id: str | None = None
+    detached: bool = False
 
 
 class StopRequest(BaseModel):
@@ -869,6 +878,7 @@ class A2UIActionRequest(BaseModel):
     name: str
     context: dict[str, Any] = {}
     thread_id: str | None = None
+    detached: bool = False
 
 
 class CreateThreadRequest(BaseModel):
@@ -1046,6 +1056,77 @@ app.add_middleware(
 )
 
 
+def _turn_in_flight(thread_id: str) -> bool:
+    task = app.state.active_tasks.get(thread_id)
+    return task is not None and not task.done()
+
+
+def _turn_response(
+    thread_id: str,
+    input_or_command: Any,
+    *,
+    detached: bool,
+    gate_outcome: tuple[bool, str | None] | None = None,
+    is_resume: bool = False,
+) -> StreamingResponse:
+    """The SSE response for /chat, /resume and /a2ui/action.
+
+    Ordinary turns stream straight off `_stream_turn`, so a client disconnect
+    cancels them (the dashboard's behavior, unchanged). A `detached` turn
+    (PLAN.md Phase 31, D7 — see `detached_turns.py`) runs as its own task and
+    the response only observes it. A second turn on a thread that already has
+    one running is refused with a 409, since a phone retrying a request it
+    can't see the result of would otherwise start two turns at once."""
+    if not detached:
+        return StreamingResponse(
+            _stream_turn(
+                app.state.graph, thread_id, input_or_command, gate_outcome, is_resume=is_resume
+            ),
+            media_type="text/event-stream",
+        )
+    if _turn_in_flight(thread_id) or detached_registry.is_running(thread_id):
+        raise HTTPException(status_code=409, detail="A turn is already running on this thread.")
+    queue = detached_registry.start(
+        thread_id,
+        _stream_turn(
+            app.state.graph,
+            thread_id,
+            input_or_command,
+            gate_outcome,
+            is_resume=is_resume,
+            channel="app",
+        ),
+    )
+    return StreamingResponse(observe_detached(queue), media_type="text/event-stream")
+
+
+@app.get("/threads/{thread_id}/turn")
+async def thread_turn_state(thread_id: str) -> dict[str, Any]:
+    """Where a thread's current turn stands, for a client that was away (the
+    iPhone app after a screen lock — PLAN.md Phase 31, D7): `running` (any
+    channel's turn, with what it is doing), `waiting_for_approval` (a pending
+    confirmation gate, with its payload verbatim), or `idle`. `last` is how the
+    most recent DETACHED turn ended — `completed`, `cancelled` or `error` with
+    the error text — so a failure that happened while nobody was watching is
+    still visible. The finished answer itself is in `/history`."""
+    thread = await thread_store.get_thread(thread_id, db_path=thread_store.DEFAULT_DB_PATH)
+    if thread is None:
+        raise HTTPException(status_code=404, detail=f"No thread with id {thread_id}")
+    activity = next((t for t in active_turns.list_active() if t["thread_id"] == thread_id), None)
+    if _turn_in_flight(thread_id):
+        return {"status": "running", "gate": None, "activity": activity, "last": detached_registry.last(thread_id)}
+    state = await app.state.graph.aget_state(make_thread_config(thread_id))
+    pending = [i for t in state.tasks for i in t.interrupts]
+    if pending:
+        return {
+            "status": "waiting_for_approval",
+            "gate": pending[0].value,
+            "activity": None,
+            "last": detached_registry.last(thread_id),
+        }
+    return {"status": "idle", "gate": None, "activity": None, "last": detached_registry.last(thread_id)}
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest) -> StreamingResponse:
     # Thread resolution happens BEFORE the stream starts, not inside the
@@ -1054,9 +1135,7 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     # since HTTP headers/status can't change after the body starts).
     thread_id = await _resolve_thread_id(request.thread_id)
     input_ = {"messages": [("user", _build_user_content(request.message, request.attachments))]}
-    return StreamingResponse(
-        _stream_turn(app.state.graph, thread_id, input_), media_type="text/event-stream"
-    )
+    return _turn_response(thread_id, input_, detached=request.detached)
 
 
 @app.post("/uploads")
@@ -1218,15 +1297,12 @@ async def resume(request: ResumeRequest) -> StreamingResponse:
         if pending and isinstance(pending[0].value, dict)
         else None
     )
-    return StreamingResponse(
-        _stream_turn(
-            app.state.graph,
-            thread_id,
-            Command(resume=request.approved),
-            gate_outcome=(request.approved, action),
-            is_resume=True,
-        ),
-        media_type="text/event-stream",
+    return _turn_response(
+        thread_id,
+        Command(resume=request.approved),
+        detached=request.detached,
+        gate_outcome=(request.approved, action),
+        is_resume=True,
     )
 
 
@@ -1523,9 +1599,7 @@ async def a2ui_action(request: A2UIActionRequest) -> StreamingResponse:
         f"{json.dumps(request.context)}"
     )
     input_ = {"messages": [("user", message)]}
-    return StreamingResponse(
-        _stream_turn(app.state.graph, thread_id, input_), media_type="text/event-stream"
-    )
+    return _turn_response(thread_id, input_, detached=request.detached)
 
 
 @app.post("/chat/stop")
@@ -1741,16 +1815,17 @@ async def delete_project(project_id: str) -> dict[str, Any]:
 
 
 @app.get("/history")
-async def history() -> dict[str, Any]:
-    """Read the active thread's persisted state via the public
-    `graph.aget_state()` API — not by hand-parsing the checkpointer's own
-    serialized SQLite rows (STEPS.md 54 flagged this as real parsing work
-    the wrong way to do it). Always follows the active pointer (Phase 15):
-    a GUI picker switches threads via POST /threads/active, then re-calls
-    this — /history itself doesn't take a thread_id override, since viewing
-    a thread IS what "make it active" means for this endpoint's one caller
-    (the History panel)."""
-    thread_id = await thread_store.get_active_thread_id(db_path=thread_store.DEFAULT_DB_PATH)
+async def history(thread_id: str | None = None) -> dict[str, Any]:
+    """Read a thread's persisted state via the public `graph.aget_state()`
+    API — not by hand-parsing the checkpointer's own serialized SQLite rows
+    (STEPS.md 54 flagged this as real parsing work the wrong way to do it).
+    With no `thread_id` it follows the active pointer (Phase 15): a GUI
+    picker switches threads via POST /threads/active, then re-calls this.
+    An explicit `thread_id` (PLAN.md Phase 31) reads that thread without
+    touching the shared pointer — the iPhone app browses and resumes threads
+    while the dashboard may be showing another, so it must not move it. An
+    unknown id is a 404, same as /chat's."""
+    thread_id = await _resolve_thread_id(thread_id)
     snapshot = await app.state.graph.aget_state(make_thread_config(thread_id))
     messages: list[BaseMessage] = snapshot.values.get("messages", [])
     return {

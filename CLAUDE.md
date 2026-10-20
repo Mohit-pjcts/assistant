@@ -1248,6 +1248,31 @@ See PLAN.md.
   the prompt until it is answered; install it from
   `dashboard/src-tauri/target/release/bundle/macos/Oni.app` and click Allow.
 
+- **Phase 30 — Oni for iPhone: native SwiftUI Vault app + on-device Oni —
+  COMPLETE (status flip approved by the user 2026-10-20; STEPS.md 164-171).**
+  `ios/Oni` (SwiftUI, free signing, installed from Xcode) + `ios/OniCore`
+  (Swift package: sync engine, content logic, Claude API client, the five
+  vault tools, chat loop; 134 Swift tests). A Replica of the Vault syncs with
+  the Mac over `tailscale serve` HTTPS behind a `/vault/*` bearer token
+  (`assistant/vault_sync.py`); conflicts go to `_conflicts/`, deletes to
+  `_trash/`. The on-device Oni calls the Claude API directly from the phone
+  (the Mac's key in the Keychain, no app lock — ADR 0004, both against
+  my recommendation). Hong Kong constraint found live: Anthropic returns 403
+  there, which the app used to misread as a bad key and hide the saved one
+  (fixed, STEPS.md 171, with a Retry button); iOS allows one VPN, so the
+  on-device Oni needs the user's own VPN OR Tailscale with the Mac as an
+  exit node (set up on the Mac; still unverified on the device).
+  `IOS_SETUP.md` has the install steps and the on-device checklist.
+- **Phase 31 — Mac-connected Oni on the iPhone: SCOPED 2026-10-20 (STEPS.md
+  172), STAGE 1 IN PROGRESS.** The app's Oni tab gains a "Mac | This iPhone"
+  switch; the Mac side uses `/chat` as a second dashboard (D1), with native
+  cards for every confirmation gate, A2UI minus video/audio, photo attach,
+  Project folders, the board and memory approvals, and turns that keep
+  running on the Mac if the phone drops (detached turns, D7). **No new
+  auth and no Face ID on Approve (D2, D8) — against my recommendation, ADR
+  0005.** Locked decisions, build order and the device checklist: PLAN.md's
+  Phase 31 entry.
+
 This block is the only part of this file that changes routinely; everything
 below is durable.
 

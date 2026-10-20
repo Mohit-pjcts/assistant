@@ -64,7 +64,8 @@ _Avoid_: vault (on the phone), mirror, backup
 A single conversation with Oni — the checkpointed unit `thread_store.py`
 (Phase 15) registers and `/chat`/`/resume` operate on. Predates this file;
 named here for the first time because Project (below) now sits above it.
-_Avoid_: chat, conversation
+Always lives on the Mac and is shared with the dashboard.
+_Avoid_: conversation; and **chat**, which now means something narrower (below)
 
 **Project**:
 A named grouping of Threads in the dashboard's sidebar — `Oni → Project →
@@ -73,3 +74,17 @@ PLAN.md). Deliberately NOT named "Vault" despite the mockup's own code using
 that word for this same tree — that would collide with the Vault entry
 above.
 _Avoid_: vault, folder
+
+**Chat**:
+A conversation held with the on-device Oni inside the iPhone app (Phase 30).
+Stored only on the phone, uses only the five Vault tools, and cannot become a
+Thread or move to the Mac. The Oni tab's "This iPhone" side lists Chats; its
+"Mac" side lists Threads (Phase 31).
+_Avoid_: thread, conversation
+
+**Detached turn**:
+A turn started from the iPhone app that the Mac keeps running if the phone's
+connection drops (Phase 31). The stream is only an observer; the app finds the
+finished answer, or a gate waiting for it, when it reopens. Dashboard turns are
+not detached — closing their connection still cancels them.
+_Avoid_: background job, queued turn

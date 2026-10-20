@@ -255,7 +255,10 @@ async def test_stop_cancels_the_registered_task_for_its_thread() -> None:
         # POST /threads a new one — creating a thread always activates it
         # (this codebase's own documented behavior), which would silently
         # move the shared active pointer and break later tests in this
-        # file that assume nothing has repointed it yet.
+        # file that assume nothing has repointed it yet. Reading the pointer
+        # first-run-bootstraps that thread's row, so this test also passes
+        # when run alone (it used to depend on an earlier test having done it).
+        await thread_store.get_active_thread_id(db_path=thread_store.DEFAULT_DB_PATH)
         thread_id = thread_store.LEGACY_DEFAULT_THREAD_ID
 
         async def _never_finishes() -> None:

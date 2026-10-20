@@ -47,3 +47,7 @@ response is: rotate the Anthropic key, regenerate the Vault token, and
 update the Mac's `.env`. Revisit the key and lock choices if the Replica
 ever holds anything the user would not accept being read on a stolen,
 unlocked phone — the per-folder switches are the cheap mitigation.
+
+**Update (2026-10-20):** the revisit this ADR deferred to Phase 31 happened in
+the scoping session and the token was deliberately left on `/vault/*` only —
+see `0005-phone-app-drives-the-mac-api-without-a-token-or-approval-check.md`.

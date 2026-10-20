@@ -17,6 +17,7 @@ const CHANNEL_LABEL: Record<string, string> = {
   phone: "Phone",
   automation: "Automation",
   cli: "CLI",
+  app: "iPhone app",
 };
 
 function formatElapsed(seconds: number): string {
