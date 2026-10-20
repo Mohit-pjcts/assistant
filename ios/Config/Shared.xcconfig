@@ -1,0 +1,8 @@
+// Shared build settings for the Oni iPhone app. Anything personal (your Apple
+// developer Team ID, a different bundle ID) goes in Config/Local.xcconfig,
+// which is gitignored — see Local.xcconfig.example.
+PRODUCT_BUNDLE_IDENTIFIER = dev.mohitvuyyuru.oni
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

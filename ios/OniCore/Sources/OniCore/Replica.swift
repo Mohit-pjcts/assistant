@@ -160,6 +160,17 @@ public struct Replica: Sendable {
         return out
     }
 
+    /// Deletes every Note, the sync state and the kept Conflict copies, leaving an
+    /// empty Replica. Anything not yet synced is gone — callers must say so.
+    public func wipe() {
+        let fm = FileManager.default
+        for url in [notesRoot, conflictsRoot, stateURL, stateURL.appendingPathExtension("corrupt")] {
+            try? fm.removeItem(at: url)
+        }
+        try? fm.createDirectory(at: notesRoot, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: conflictsRoot, withIntermediateDirectories: true)
+    }
+
     // MARK: Conflict copies (the phone's own version, kept locally too)
 
     public func saveConflictCopy(id: String, data: Data) throws {

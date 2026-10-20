@@ -99,3 +99,12 @@ nova-superagent-agent-main.zip
 # OniCore (iPhone app logic) build output
 ios/OniCore/.build/
 ios/OniCore/.swiftpm/
+
+# iPhone app: the .xcodeproj is generated from ios/project.yml; Local.xcconfig is personal.
+ios/Oni.xcodeproj/
+ios/Config/Local.xcconfig
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/
+# The app source dir would otherwise match the sandbox rule "oni/" above (case-insensitive).
+!/ios/Oni/

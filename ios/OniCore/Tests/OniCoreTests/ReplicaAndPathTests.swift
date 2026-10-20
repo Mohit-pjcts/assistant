@@ -119,3 +119,24 @@ import Testing
         #expect(HTTPVaultServer.encodeQuery(["b": "2", "a": "1"]) == "a=1&b=2")  // stable order
     }
 }
+
+@Suite struct ReplicaWipe {
+    @Test func wipeLeavesAnEmptyUsableReplica() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("oni-wipe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = Replica(directory: dir)
+        try r.write("People/Ana.md", text: "x")
+        try r.saveConflictCopy(id: "c1", data: Data("phone".utf8))
+        var state = SyncState()
+        state.base["People/Ana.md"] = "abc"
+        try r.saveState(state)
+
+        r.wipe()
+
+        #expect(try r.localHashes().isEmpty)
+        #expect(r.conflictCopy(id: "c1") == nil)
+        #expect(r.loadState() == SyncState())
+        try r.write("Fresh.md", text: "still works")  // directories were recreated
+        #expect(r.text("Fresh.md") == "still works")
+    }
+}

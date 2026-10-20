@@ -1,0 +1,9 @@
+// Copy to Local.xcconfig (gitignored) and fill in.
+//
+// Team ID: after signing into Xcode (Settings -> Accounts) and building once,
+// run  ios/Scripts/show-team-id.sh
+DEVELOPMENT_TEAM = XXXXXXXXXX
+
+// Only if the default bundle ID is taken or you want your own prefix. A free
+// Apple account can register only 10 new App IDs per week, so avoid changing it.
+// PRODUCT_BUNDLE_IDENTIFIER = com.example.oni
