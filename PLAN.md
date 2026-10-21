@@ -3777,7 +3777,7 @@ numbers above are in brackets.
   exit-node setup (STEPS.md 171) exists solely for the on-device Oni in Hong
   Kong and is still unverified on the device.
 
-**Build order (a stage is not started before the previous one's tests pass). Progress (2026-10-21): stages 1 (server, STEPS.md 173), 2 (Swift core, 174) and 3 (Mac chat UI, 175; installed, not yet seen on a screen) are built and tested; stage 4 is next.**
+**Build order (a stage is not started before the previous one's tests pass). Progress (2026-10-21): stages 1 (server, STEPS.md 173), 2 (Swift core, 174) 3 (Mac chat UI, 175; installed, not yet seen on a screen) 4 (gate cards: drift guard, no stale answers, view guard, 176) and 5 (generative UI, 177) are built and tested; stage 6 (photo attach) is next.**
 1. **Server.** Verify the cancel-on-disconnect premise; build detached
    app-originated turns (opt-in flag on the request, dashboard path untouched);
    a way to read "running / finished / waiting at gate" for a thread; tests incl.

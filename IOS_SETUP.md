@@ -112,7 +112,7 @@ None of these touch the real Vault.
 7. Ask Oni to delete or rewrite one of *your* notes: it refuses.
 8. Mac on: Search returns semantic matches. Mac off: it says keyword matches only.
 
-## Mac-connected Oni (Phase 31) — on-device checklist, stages 1-3
+## Mac-connected Oni (Phase 31) — on-device checklist, stages 1-5
 
 Before anything: **quit and relaunch Oni.app on the Mac.** The backend inside it
 was started before these changes and has no detached turns, turn-state endpoint
@@ -134,6 +134,18 @@ phone talks to the Mac through the same address as the Vault).
 7. Turn Tailscale off: the Mac side says it cannot reach your Mac and offers the
    iPhone side; the iPhone side still works.
 
-Not built yet (later stages): generative-UI cards (shown as a one-line note),
-photo attach, the kanban board, memory approvals. Gate cards are drawn but get
-their per-action polish and device checks in Stage 4.
+   Also try approving the same card from the dashboard first, then the phone:
+   the phone says it was already answered and sends nothing.
+
+8. Ask Oni for a form ("make me a quick form to log my mood with a 1-10 slider,
+   a note box and a Save button"). The card draws in the chat, every input can be
+   edited, and **Save** starts a new turn that carries what you typed (it shows
+   as a "[UI interaction]" message, the same as on the dashboard). While Oni is
+   working or a confirmation is open, the buttons are greyed out.
+9. Ask for a tabbed or checklist card, a date/time field, and a picture
+   ("show a screenshot of my desktop"). Tabs switch, choices toggle, the date
+   picker opens, the image shows. A video or audio player shows a grey note to
+   open the chat on the Mac instead.
+
+Not built yet (later stages): photo attach, the kanban board, memory approvals.
+Cards made while a turn is running appear when it ends (after the reply).

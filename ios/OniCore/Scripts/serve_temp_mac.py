@@ -53,7 +53,7 @@ os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
 import uvicorn  # noqa: E402
-from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from assistant import (  # noqa: E402
     detached_turns,
@@ -84,9 +84,11 @@ GATE = {
 
 SURFACE = {
     "surfaceId": "s1",
+    "dataModel": {"/name": ""},
     "components": [
-        {"id": "root", "component": "Column", "children": ["title", "go"]},
+        {"id": "root", "component": "Column", "children": ["title", "name", "go"]},
         {"id": "title", "component": "Text", "text": "A card", "variant": "h2"},
+        {"id": "name", "component": "TextField", "label": "Name", "value": {"path": "/name"}},
         {"id": "label", "component": "Text", "text": "Go"},
         {"id": "go", "component": "Button", "child": "label", "action": {"name": "go"}},
     ],
@@ -129,6 +131,9 @@ class ScriptedGraph:
             history.append(AIMessage("Found it.", name="supervisor"))
         elif text.startswith("ui"):
             yield self._custom("a2ui_surface", SURFACE)
+            # The real render_ui carries the surface on its own message, which /history returns.
+            history.append(ToolMessage("Rendered.", tool_call_id="t1", name="render_ui",
+                                       additional_kwargs={"a2ui_surface": [SURFACE]}))
             yield self._token("Here is a card.")
             history.append(AIMessage("Here is a card.", name="supervisor"))
         elif text.startswith("gate"):

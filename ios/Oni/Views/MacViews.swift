@@ -163,7 +163,10 @@ private struct MacChatContent: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(session.items) { item in
-                        MacItemView(item: item).id(item.id)
+                        MacItemView(item: item, locked: session.isBusy || awaitingGate != nil) { surfaceId, name, context in
+                            session.pressButton(surfaceId: surfaceId, name: name, context: context)
+                        }
+                        .id(item.id)
                     }
                     if let pending = session.pendingUser { UserBubble(text: pending) }
                     if session.isBusy, !session.liveText.isEmpty {
@@ -248,19 +251,19 @@ private struct UserBubble: View {
 
 private struct MacItemView: View {
     let item: MacTranscriptItem
+    /// True while a turn runs or a confirmation is open: cards cannot start a second turn.
+    let locked: Bool
+    let onPress: (String, String, [String: JSONValue]) -> Void
 
     var body: some View {
         switch item {
         case .user(_, let text):
             UserBubble(text: text)
         case .assistant(_, let text, let surfaces, let skipped):
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 if !text.isEmpty { MarkdownView(blocks: MarkdownBlocks.parse(markdown: text)) }
-                // Generative-UI cards arrive in the next stage; say so rather than hide them.
-                if !surfaces.isEmpty {
-                    Label("Oni made \(surfaces.count == 1 ? "an interactive card" : "\(surfaces.count) interactive cards"). Open this conversation on your Mac to use \(surfaces.count == 1 ? "it" : "them").",
-                          systemImage: "rectangle.on.rectangle")
-                        .font(.footnote).foregroundStyle(.secondary)
+                ForEach(surfaces, id: \.surfaceId) { surface in
+                    A2UISurfaceView(surface: surface, disabled: locked, onPress: onPress)
                 }
                 if skipped > 0 {
                     Label("\(skipped) card\(skipped == 1 ? "" : "s") could not be shown safely and \(skipped == 1 ? "was" : "were") skipped.",

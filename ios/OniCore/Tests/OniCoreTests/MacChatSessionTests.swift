@@ -48,6 +48,7 @@ import Testing
         let gate = try #require(Gate.parse(gatePayload))
         let server = FakeMacServer(
             streams: [.init(frames: [.interrupt(gate)]), .init(frames: [.message("Sent.")])],
+            states: [.success(.waiting(gatePayload))],
             histories: [.success([user]), .success([user, MacMessage.make("assistant", "Sent.")])])
         let s = session(server)
         s.send("text her")
@@ -67,7 +68,9 @@ import Testing
 
     @Test func decliningSendsADecline() async throws {
         let gate = try #require(Gate.parse(gatePayload))
-        let server = FakeMacServer(streams: [.init(frames: [.interrupt(gate)]), .init(frames: [.message("Okay.")])])
+        let server = FakeMacServer(
+            streams: [.init(frames: [.interrupt(gate)]), .init(frames: [.message("Okay.")])],
+            states: [.success(.waiting(gatePayload))])
         let s = session(server)
         s.send("x")
         await settle(s)
@@ -190,5 +193,54 @@ import Testing
         await s.open()
         await settle(s)
         #expect(s.phase == .idle)
+    }
+
+    // MARK: a stale card is never answered
+
+    @Test func anApprovalForAConfirmationAlreadyAnsweredElsewhereIsNotSent() async throws {
+        let gate = try #require(Gate.parse(gatePayload))
+        let server = FakeMacServer(
+            streams: [.init(frames: [.interrupt(gate)])],
+            states: [.success(.idle("completed"))],           // the dashboard got there first
+            histories: [.success([user, reply])])
+        let s = session(server)
+        s.send("text her")
+        await settle(s)
+        #expect(s.phase == .awaitingApproval(gate))
+
+        s.answer(approved: true)
+        await settle(s)
+        #expect(await server.requests == [.chat(message: "text her", threadId: "t1", attachments: [])])
+        #expect(s.phase == .idle && s.notice?.contains("already answered") == true)
+    }
+
+    @Test func anApprovalForADifferentConfirmationThanTheOneShownIsNotSent() async throws {
+        let shown = try #require(Gate.parse(gatePayload))
+        let other: JSONValue = ["action": "send_imessage", "recipient": "+1999", "message": "something else"]
+        let server = FakeMacServer(
+            streams: [.init(frames: [.interrupt(shown)])],
+            states: [.success(.waiting(other))])
+        let s = session(server)
+        s.send("x")
+        await settle(s)
+        s.answer(approved: true)
+        await settle(s)
+        #expect(await server.requests.count == 1)
+        // The card now shows what the Mac is really waiting on.
+        #expect(s.phase == .awaitingApproval(try #require(Gate.parse(other))))
+    }
+
+    @Test func ifTheMacCannotBeAskedNothingIsApproved() async throws {
+        let gate = try #require(Gate.parse(gatePayload))
+        let server = FakeMacServer(
+            streams: [.init(frames: [.interrupt(gate)])],
+            states: [.failure(MacServerError.unreachable("offline"))])
+        let s = session(server)
+        s.send("x")
+        await settle(s)
+        s.answer(approved: true)
+        await settle(s)
+        #expect(await server.requests.count == 1)
+        #expect(s.phase == .lostContact)
     }
 }

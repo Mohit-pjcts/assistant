@@ -263,4 +263,79 @@ private let macEnabled = macEnv["ONI_TEST_MAC_URL"] != nil
         #expect(try await mac.projects().contains { $0.id == projectId && $0.name == "University" })
         #expect(try await mac.threads().threads.first { $0.id == thread }?.projectId == projectId)
     }
+
+    // MARK: the screen's session against the real routes
+
+    @MainActor private func settled(_ session: MacChatSession) async {
+        for _ in 0..<1500 where session.isBusy { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    @Test @MainActor func aSessionTakesAConfirmationThroughApprovalOnTheRealMac() async throws {
+        let thread = try await newThread()
+        let session = MacChatSession(threadId: thread, server: mac)
+        session.send("gate")
+        await settled(session)
+        guard case .awaitingApproval(let gate) = session.phase else { Issue.record("expected a card, got \(session.phase)"); return }
+        #expect(gate.action == "send_email")
+
+        session.answer(approved: true)
+        session.answer(approved: true)                      // a second tap is ignored
+        await settled(session)
+        #expect(session.phase == .idle)
+        #expect(session.items.contains { if case .assistant(_, "Sent.", _, _) = $0 { true } else { false } })
+    }
+
+    @Test @MainActor func aSessionRefusesToAnswerACardTheMacAlreadyMovedPast() async throws {
+        let thread = try await newThread()
+        let session = MacChatSession(threadId: thread, server: mac)
+        session.send("gate")
+        await settled(session)
+        guard case .awaitingApproval = session.phase else { Issue.record("expected a card"); return }
+
+        // The dashboard answers first.
+        for try await _ in mac.stream(.resume(approved: false, threadId: thread)) {}
+
+        session.answer(approved: true)
+        await settled(session)
+        #expect(session.phase == .idle)
+        #expect(session.notice?.contains("already answered") == true)
+        // The history shows only the dashboard's decline, never a second answer.
+        let replies = session.items.compactMap { item -> String? in if case .assistant(_, let t, _, _) = item { t } else { nil } }
+        #expect(replies.contains("Sent.") == false)
+    }
+
+    @Test @MainActor func reopeningAThreadWithAWaitingConfirmationShowsTheCard() async throws {
+        let thread = try await newThread()
+        _ = try await chat("gate", in: thread)             // the phone "went away" at the card
+        let reopened = MacChatSession(threadId: thread, server: mac)
+        await reopened.open()
+        guard case .awaitingApproval(let gate) = reopened.phase else { Issue.record("expected a card, got \(reopened.phase)"); return }
+        #expect(gate.rows.contains(.field(label: "Bcc", value: "hidden@example.com")))
+        reopened.answer(approved: false)
+        await settled(reopened)
+        #expect(reopened.phase == .idle)
+    }
+
+    @Test @MainActor func aCardIsDrawnFromHistoryAndItsButtonReportsTheEditedFormAsATurn() async throws {
+        let thread = try await newThread()
+        let session = MacChatSession(threadId: thread, server: mac)
+        session.send("ui")
+        await settled(session)
+        #expect(session.phase == .idle)
+        let surfaces = session.items.flatMap { item -> [A2UISurface] in
+            if case .assistant(_, _, let surfaces, _) = item { surfaces } else { [] }
+        }
+        let surface = try #require(surfaces.first)
+        #expect(surface.surfaceId == "s1")
+
+        // What the person typed into the card goes back, and nothing else is added.
+        var form = A2UIFormState(surface)
+        form.set(form.path(surface.component("name")?.fields["value"]), string: "Ada")
+        session.pressButton(surfaceId: surface.surfaceId, name: "go", context: form.context)
+        await settled(session)
+        #expect(session.phase == .idle)
+        let said = session.items.compactMap { item -> String? in if case .user(_, let t) = item { t } else { nil } }
+        let report = try #require(said.first { $0.contains("[UI interaction]") })
+        #expect(report.contains("'go'") && report.contains("s1") && report.contains("Ada"))
+    }
 }

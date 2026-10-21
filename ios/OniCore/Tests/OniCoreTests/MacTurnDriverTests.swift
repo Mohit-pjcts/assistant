@@ -125,6 +125,23 @@ import Testing
         #expect(await driver(waiting).watch(threadId: "t1", progress: { _ in }) == .needsApproval(parsed))
     }
 
+    @Test func anAnswerIsSentOnlyWhileTheMacIsStillWaitingOnThatExactCard() async throws {
+        let parsed = try #require(Gate.parse(gate))
+        let still = FakeMacServer(streams: [.init(frames: [.message("Sent.")])], states: [.success(.waiting(gate))])
+        #expect(await driver(still).answer(approved: true, expecting: parsed, threadId: "t1", progress: { _ in }) == .replied)
+        #expect(await still.requests == [.resume(approved: true, threadId: "t1")])
+
+        for state in [TurnState.idle("completed"), .running, .waiting(["action": "send_imessage", "recipient": "+1999", "message": "x"])] {
+            let moved = FakeMacServer(states: [.success(state)])
+            #expect(await driver(moved).answer(approved: true, expecting: parsed, threadId: "t1", progress: { _ in }) == .staleApproval)
+            #expect(await moved.requests.isEmpty)
+        }
+
+        let silent = FakeMacServer(states: [.failure(MacServerError.unreachable("offline"))])
+        #expect(await driver(silent).answer(approved: true, expecting: parsed, threadId: "t1", progress: { _ in }) == .lostContact)
+        #expect(await silent.requests.isEmpty)
+    }
+
     @Test func theApprovalGoesOutAsAResumeForTheSameThread() async {
         let server = FakeMacServer(streams: [.init(frames: [.message("Sent.")])])
         let (outcome, _) = await run(driver(server), .resume(approved: true, threadId: "t9"))

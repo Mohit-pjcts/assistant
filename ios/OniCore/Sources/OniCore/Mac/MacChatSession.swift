@@ -97,8 +97,15 @@ public final class MacChatSession {
     /// Answers the confirmation the thread is paused at. The phase leaves
     /// `awaitingApproval` synchronously, so a second tap cannot send a second answer.
     public func answer(approved: Bool) {
-        guard case .awaitingApproval = phase else { return }
-        run(.resume(approved: approved, threadId: threadId))
+        guard case .awaitingApproval(let gate) = phase else { return }
+        errorMessage = nil
+        notice = nil
+        liveText = ""
+        liveSurfaceCount = 0
+        activity = "Sending your answer…"
+        begin(phase: .running) { driver, progress in
+            await driver.answer(approved: approved, expecting: gate, threadId: self.threadId, progress: progress)
+        }
     }
 
     /// A generative-UI button was pressed.
@@ -199,6 +206,12 @@ public final class MacChatSession {
             return
         case .lostContact:
             phase = .lostContact
+            return
+        case .staleApproval:
+            // Nothing was sent. Show what the Mac actually has now.
+            phase = .idle
+            notice = "That confirmation was already answered somewhere else, so nothing was sent."
+            await open()
             return
         }
         liveText = ""

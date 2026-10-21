@@ -1,0 +1,124 @@
+{
+  "<dynamic action>": [
+    "action",
+    "summary",
+    "voice_approvable"
+  ],
+  "calendar_create_event": [
+    "action",
+    "calendar_name",
+    "description",
+    "end",
+    "location",
+    "start",
+    "timezone",
+    "title",
+    "voice_approvable"
+  ],
+  "calendar_update_event": [
+    "action",
+    "changes",
+    "current",
+    "event_id",
+    "voice_approvable"
+  ],
+  "create_calendar_event": [
+    "action",
+    "attendees",
+    "calendar_id",
+    "description",
+    "end",
+    "location",
+    "start",
+    "timezone",
+    "title",
+    "voice_approvable"
+  ],
+  "create_gmail_filter": [
+    "action",
+    "criteria",
+    "resulting_action",
+    "voice_approvable"
+  ],
+  "delete_calendar_event": [
+    "action",
+    "calendar_id",
+    "event",
+    "event_id",
+    "spoken_prompt",
+    "voice_approvable"
+  ],
+  "delete_disk_file": [
+    "action",
+    "content",
+    "path",
+    "voice_approvable"
+  ],
+  "delete_gmail_filter": [
+    "action",
+    "filter",
+    "filter_id",
+    "voice_approvable"
+  ],
+  "execute_shell_command": [
+    "action",
+    "command",
+    "spoken_prompt"
+  ],
+  "modify_gmail_labels": [
+    "action",
+    "add_label_ids",
+    "message",
+    "message_id",
+    "remove_label_ids",
+    "voice_approvable"
+  ],
+  "propose_workflow": [
+    "action",
+    "goal",
+    "steps",
+    "voice_approvable"
+  ],
+  "run_shortcut": [
+    "action",
+    "name",
+    "spoken_prompt"
+  ],
+  "send_email": [
+    "action",
+    "bcc",
+    "body",
+    "body_format",
+    "cc",
+    "subject",
+    "to",
+    "voice_approvable"
+  ],
+  "send_imessage": [
+    "action",
+    "message",
+    "recipient",
+    "voice_approvable"
+  ],
+  "send_test_notification": [
+    "action",
+    "message",
+    "spoken_prompt"
+  ],
+  "update_calendar_event": [
+    "action",
+    "calendar_id",
+    "changes",
+    "current",
+    "event_id",
+    "voice_approvable"
+  ],
+  "write_disk_file": [
+    "action",
+    "existed",
+    "new_content",
+    "path",
+    "previous_content",
+    "voice_approvable"
+  ]
+}

@@ -14,6 +14,9 @@ public enum TurnOutcome: Sendable, Equatable {
     /// The Mac stopped answering while a turn was running. The turn is
     /// probably still going on the Mac; reopening the thread checks again.
     case lostContact
+    /// An answer was NOT sent: the card on screen is no longer the confirmation
+    /// the Mac is waiting on (answered from the dashboard, or already done).
+    case staleApproval
 }
 
 /// What the app shows while it waits.
@@ -80,6 +83,24 @@ public struct MacTurnDriver: Sendable {
         }
         // The stream ended with no terminal frame: the link dropped.
         return await watch(threadId: request.threadId, progress: progress)
+    }
+
+    /// Answers a confirmation, but only after the Mac confirms it is STILL
+    /// waiting on exactly the card the person saw. `/resume` does not check
+    /// that anything is pending, so a stale Approve (answered meanwhile from the
+    /// dashboard, or tapped twice from two devices) must never be sent. If the
+    /// check itself cannot be made, nothing is sent either.
+    public func answer(
+        approved: Bool, expecting gate: Gate, threadId: String,
+        progress: @MainActor @Sendable (TurnProgress) -> Void
+    ) async -> TurnOutcome {
+        do {
+            let state = try await server.turnState(threadId: threadId)
+            guard state.status == .waitingForApproval, state.gate == gate else { return .staleApproval }
+        } catch {
+            return .lostContact
+        }
+        return await run(.resume(approved: approved, threadId: threadId), progress: progress)
     }
 
     /// Follows a thread's turn without sending anything: used after a dropped
