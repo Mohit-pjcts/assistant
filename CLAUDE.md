@@ -1275,6 +1275,28 @@ See PLAN.md.
   auth and no Face ID on Approve (D2, D8) — against my recommendation, ADR
   0005.** Locked decisions, build order and the device checklist: PLAN.md's
   Phase 31 entry.
+- **Phase 32 — Earbud-button voice for the Mac's Oni on the iPhone —
+  COMPLETE (status flip approved by the user 2026-10-22; STEPS.md 180-191).**
+  Press a wired earbud's button, talk, press again: the Mac transcribes it
+  (`/voice/transcribe`), the supervisor answers in short spoken-style sentences
+  (`channel: "headset"`), and `POST /voice/speak` (`assistant/voice_speak.py`,
+  ElevenLabs, shared account and guard rails with Onstage, key stays on the Mac)
+  is read back through the earbuds. Logic in `ios/OniCore/Voice/`
+  (`HeadsetVoiceSession`, `VoicePrep`, `SpokenReply`); hardware in `ios/Oni/
+  EarbudHardware.swift`. **Platform limits measured on the device, not
+  assumed:** iOS will not start a microphone from the background, so a locked
+  phone needs the mic kept on while armed (orange dot, battery); the earbud
+  button goes to the Now Playing app, so with Apple Music playing Oni uses
+  "music mode" (it watches the music pause/resume as the press). Gates stay
+  click-only: a voice turn that hits one says it is waiting on the screen.
+  `/voice/*` is open on the tailnet like the rest of the Mac API (Phase 31 D2).
+- **iPhone polish after Phase 32, not a numbered phase (STEPS.md 192):** a
+  top-left slide-in menu replaces the tab bar (Oni, Calendar, Board, Memory,
+  Vault, Search, Settings); a read-only Calendar screen; Oni's mark as SVG for
+  the app icon and in-app logo (the Tauri icon is gone from the phone; the Mac
+  `Oni.app` icon is still Tauri's). **Security-model change:** `GET /calendar`
+  is now readable from the phone (was loopback-only); add/edit/delete are still
+  loopback-only (`tests/test_calendar_access.py`).
 
 This block is the only part of this file that changes routinely; everything
 below is durable.

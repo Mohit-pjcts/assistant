@@ -80,11 +80,11 @@ VPN and retry without retyping.
 ## Cost
 
 Phone chats are billed to that key. Each chat shows an estimated cost, and the
-Oni tab shows the running total (estimates from published prices, not an
+Oni screen shows the running total (estimates from published prices, not an
 invoice). The system prompt and tool definitions are cached, so a short chat
 costs a fraction of a cent on Haiku. A turn is capped at 25 model calls, and
-three identical tool failures in a row stop it. While a turn runs the Oni tab
-shows a marker, and the chat shows what Oni is doing with a Stop button.
+three identical tool failures in a row stop it. While a turn runs the menu
+button shows a marker, and the chat shows what Oni is doing with a Stop button.
 
 ## Tests
 
@@ -106,7 +106,7 @@ None of these touch the real Vault.
    keep either version.
 5. Delete a note on the phone: it appears in Trash (and `_trash/` on the Mac) and
    can be restored. A Mac edit made meanwhile beats the pending delete.
-6. Mac off: ask Oni (Oni tab) about a note and it answers from the phone copy.
+6. Mac off: ask Oni (Oni screen, This iPhone side) about a note and it answers from the phone copy.
    Tell it something worth saving: it writes a linked note marked `oni: true`,
    which syncs when the Mac is back.
 7. Ask Oni to delete or rewrite one of *your* notes: it refuses.
@@ -154,11 +154,11 @@ phone talks to the Mac through the same address as the Vault).
     shown in the thread (the Mac's history keeps only the text), the same as
     the dashboard.
 
-11. Oni tab → **Board**. Four columns (the tabs at the top show counts). Tap a
+11. Menu → **Board**. Four columns (the tabs at the top show counts). Tap a
     task to edit it or change its column, long-press it for "Move to…", swipe
     left to delete, **+** to add one. Check the dashboard's Board tab shows the
     same change, and the other way round (pull down to refresh).
-12. Oni tab → **Memory to review** (the number is how many wait). Each fact
+12. Menu → **Memory** (it lists what waits to be reviewed; the number is how many wait). Each fact
     is shown in full with where it came from. **Approve** and **Decline** act
     on the Mac; the dashboard's Memory panel agrees. If you answered one on the
     dashboard first, the phone says it was already answered.
@@ -166,3 +166,61 @@ phone talks to the Mac through the same address as the Vault).
 All seven stages are built. The phase is not complete until you have run
 items 1-12; tell me which fail.
 Cards made while a turn is running appear when it ends (after the reply).
+
+## Getting around: the menu
+
+There is no tab bar. The three-line button at the top left of every screen opens
+the menu: **Oni**, **Calendar**, **Board**, **Memory**, **Vault**, **Search**,
+and **Settings** at the bottom (badges: a dot while a turn runs, how many facts
+wait in Memory, how many Conflicts). Tap outside it or swipe it left to close.
+
+**Calendar** is the semester calendar the Mac builds from the Vault's notes,
+shown as an agenda from today: exams and deadlines first, a colour per course,
+multi-day windows on every day they cover. The top-right menu filters (Classes,
+Tutorials, Study, Deadlines & exams) and jumps to a date. It is **read-only**:
+the Mac's `/calendar` can be read from the phone, but adding, editing and
+deleting stay loopback-only on the Mac.
+
+## Earbud voice (Phase 32)
+
+Talk to the Mac's Oni through wired earbuds without touching the phone: press the
+earbud button, talk, press again. The Mac transcribes it, Oni answers in a few
+short sentences, and the reply is read back in an ElevenLabs voice through the
+earbuds. If the Mac can't make that voice the phone's own voice reads it.
+
+**Needs** (on the Mac): **quit and relaunch Oni.app** after updating, a working
+`ELEVENLABS_API_KEY` in `.env` (the same account Onstage uses; Oni stops speaking
+before the month's credits run out so it cannot starve Onstage), and Tailscale on.
+
+**Use it:** Oni screen → **Mac** side → **Earbud voice** card → **Arm** (allow the
+Microphone and Media & Apple Music prompts the first time). Put the earbuds in.
+Press: a high beep and it listens. Press again: a low beep, then Oni works and
+speaks. Pressing while Oni is working cancels it; pressing while it speaks
+interrupts and listens. Every spoken turn goes into one Mac conversation called
+"Earbud voice" (link in the card). **A confirmation card is never answered by
+voice**: Oni says it is waiting on your phone screen, and only a tap approves.
+Replies are read aloud only through worn audio, never the phone's speaker.
+
+**With the phone locked** turn on **Works with the phone locked** in the card.
+iOS will not let an app start the microphone from the background, so this keeps
+the mic running while armed: an orange dot and more battery. With it off, the mic
+runs only between the two presses and so only works with Oni on screen. Re-arm
+after iOS closes the app.
+
+**With music playing (Apple Music):** arm normally; the music keeps playing (the
+card says "Music mode"). iOS sends the earbud button to the music app, so Oni
+watches the music instead: the press that pauses it also starts Oni listening,
+the next press stops listening and Oni answers, then the music resumes. Pausing
+the music for any other reason also starts a listen (a silent one is dropped). If
+nothing is playing and the Music app is closed, re-arm.
+
+Settings → **Earbud voice log** shows what it has been doing (also saved as
+`earbud-voice.log` in the app's Documents).
+
+## App icon
+
+The icon and the in-app mark are SVG: `Oni/Assets.xcassets/OniMark.imageset/
+oni-mark.svg` (the same drawing as the Mac app's header) and `Scripts/
+oni-app-icon.svg`. To change the icon, edit the SVG and run
+`sh ios/Scripts/make_app_icon.sh`.
+

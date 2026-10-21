@@ -3835,7 +3835,7 @@ installed Oni.app, no `--reload`) is still the old code: quit and relaunch
 Oni.app before the phone can use any of this.** Stages 2-7 not started.
 
 
-## Phase 32 — Earbud-button voice I/O on the iPhone — SCOPED 2026-10-21, STAGE 1 (device spike) DONE: GO with variant B (STEPS.md 181-184)
+## Phase 32 — Earbud-button voice I/O on the iPhone — COMPLETE (status flip approved by the user 2026-10-22; STEPS.md 180-191)
 
 **Goal.** With wired earbuds in the iPhone, one press of the earbud button starts
 Oni listening, a second press sends the request to the Mac over Tailscale, and
@@ -3896,3 +3896,18 @@ Oni.app is still the old code: quit and relaunch Oni.app before Stage 3 can be t
 press, Mac, ElevenLabs reply sentence by sentence), Arm/Disarm bar in the Oni tab, one "Earbud
 voice" conversation on the Mac, gates announced and never voice-approved, replies read aloud only
 through worn audio. **Stage 4, the on-device check, is next and is the user's to run.**
+
+**Progress log (2026-10-22, STEPS.md 187-191). Phase 32 COMPLETE** (the user: "it is done"),
+confirmed on the real phone with the wired earbuds. Stage 4's rounds found and fixed: silent
+recordings after the earbuds were plugged in post-arm (a stale audio input; the session is now
+cycled on a route change), a press-only mic mode (mic runs only between presses; cannot start
+from a locked phone, so "Works with the phone locked" keeps it on), and **music mode** for
+Apple Music (music keeps playing; iOS sends the button to the music app, so Oni treats the music
+pausing/resuming as the press and pauses/resumes the music around a turn). Costs accepted: the
+orange dot and battery while the mic is kept on; any pause of the music counts as a press.
+**Not done, deliberately:** the volume-button fallback (not needed), spoken approval of gates.
+
+**Not in the numbered phases (STEPS.md 192):** the iPhone app got a top-left menu in place of
+the tab bar, a read-only Calendar (`GET /calendar` opened to the phone; writes stay loopback-only),
+and Oni's mark as the app icon and in-app logo (SVG, replacing the Tauri icon).
+
