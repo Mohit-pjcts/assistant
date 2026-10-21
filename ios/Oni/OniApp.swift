@@ -4,12 +4,14 @@ import SwiftUI
 struct OniApp: App {
     @State private var model: AppModel
     @State private var chat: ChatController
+    @State private var mac: MacController
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let model = AppModel()
         _model = State(initialValue: model)
         _chat = State(initialValue: ChatController(app: model))
+        _mac = State(initialValue: MacController(app: model))
     }
 
     var body: some Scene {
@@ -23,10 +25,15 @@ struct OniApp: App {
             }
             .environment(model)
             .environment(chat)
+            .environment(mac)
         }
         .onChange(of: scenePhase) { _, phase in
             // Foreground-only sync (PLAN.md Phase 30, decision 10).
-            if phase == .active { Task { await model.sync() } }
+            if phase == .active {
+                Task { await model.sync() }
+                // A turn running on the Mac when the phone locked is picked up again.
+                Task { await mac.foreground() }
+            }
         }
     }
 }
@@ -38,6 +45,7 @@ enum Route: Hashable {
     case conflicts
     case trash
     case chat(UUID)
+    case macThread(String)
     case chatSetup
 }
 
@@ -49,15 +57,16 @@ final class Navigator {
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(ChatController.self) private var chat
+    @Environment(MacController.self) private var mac
 
     var body: some View {
         TabView {
             TabRoot { VaultView() }
                 .tabItem { Label("Vault", systemImage: "books.vertical") }
-            TabRoot { ChatListView() }
+            TabRoot { OniTabView() }
                 .tabItem { Label("Oni", systemImage: "sparkles") }
                 // A turn running is never invisible, even from another tab.
-                .badge(chat.isRunning ? "●" : nil)
+                .badge(chat.isRunning || mac.anyBusy ? "●" : nil)
             TabRoot { SearchView() }
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
             TabRoot { SettingsView() }
@@ -82,6 +91,7 @@ struct TabRoot<Content: View>: View {
                     case .conflicts: ConflictsView()
                     case .trash: TrashView()
                     case .chat(let id): ChatView(id: id)
+                    case .macThread(let id): MacChatView(threadId: id)
                     case .chatSetup: ChatSetupView()
                     }
                 }

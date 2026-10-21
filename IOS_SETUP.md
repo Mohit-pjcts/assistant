@@ -89,7 +89,8 @@ shows a marker, and the chat shows what Oni is doing with a Stop button.
 ## Tests
 
 ```sh
-ios/OniCore/test.sh                # 132 Swift tests, no device or network
+ios/OniCore/test.sh                # Swift tests, no device or network
+ios/OniCore/Scripts/integration_mac.sh # Mac client vs the REAL /chat routes, scripted graph, no API spend
 ios/OniCore/Scripts/integration.sh # sync engine vs the real Python router, on a temp copy of the Vault
 ios/OniCore/Scripts/smoke.sh       # REAL API, a few cents: Haiku + Sonnet, temp notes only
 ```
@@ -110,3 +111,29 @@ None of these touch the real Vault.
    which syncs when the Mac is back.
 7. Ask Oni to delete or rewrite one of *your* notes: it refuses.
 8. Mac on: Search returns semantic matches. Mac off: it says keyword matches only.
+
+## Mac-connected Oni (Phase 31) — on-device checklist, stages 1-3
+
+Before anything: **quit and relaunch Oni.app on the Mac.** The backend inside it
+was started before these changes and has no detached turns, turn-state endpoint
+or per-thread history, so the phone would get errors. Tailscale must be on (the
+phone talks to the Mac through the same address as the Vault).
+
+1. Oni tab → **Mac** side. The list shows your dashboard's conversations, with
+   Projects as folders. Pull to refresh works.
+2. New chat (pencil) → ask something that needs a tool ("what's on my calendar
+   today?"). The reply streams, the bar shows what Oni is doing, and the thread
+   appears in the dashboard (the dashboard's *current* thread does not change).
+3. Ask something slow, then **lock the phone**. Unlock: the answer is there, or
+   the bar says it is still working. (The Mac keeps going either way.)
+4. Press **Stop** during a long turn: it ends and says "Stopped."
+5. Ask for something gated ("email me a test message"): a card shows the real
+   recipients, subject and body. **Decline** does nothing; asking again and
+   **Approve** does it once.
+6. Open a dashboard thread on the phone, reply, and see the reply on the dashboard.
+7. Turn Tailscale off: the Mac side says it cannot reach your Mac and offers the
+   iPhone side; the iPhone side still works.
+
+Not built yet (later stages): generative-UI cards (shown as a one-line note),
+photo attach, the kanban board, memory approvals. Gate cards are drawn but get
+their per-action polish and device checks in Stage 4.

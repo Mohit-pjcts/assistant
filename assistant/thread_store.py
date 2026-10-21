@@ -210,10 +210,17 @@ async def list_threads(db_path: Path | str | None = None) -> list[Thread]:
         return [Thread(**dict(row)) for row in rows]
 
 
-async def create_thread(title: str | None = None, db_path: Path | str | None = None) -> Thread:
+async def create_thread(
+    title: str | None = None, db_path: Path | str | None = None, *, activate: bool = True
+) -> Thread:
     """Create a new thread and make it the active pointer immediately —
     the whole point of starting a new conversation is that whoever just
-    started it continues talking to it by default next."""
+    started it continues talking to it by default next.
+
+    `activate=False` leaves the shared pointer where it was (PLAN.md Phase 31):
+    the iPhone app names its thread explicitly on every call, so creating one
+    from the phone must not switch what the dashboard, the CLI and the
+    Shortcuts are all talking to."""
     db_path = _resolve(db_path)
     thread_id = str(uuid.uuid4())
     now = _now()
@@ -222,7 +229,8 @@ async def create_thread(title: str | None = None, db_path: Path | str | None = N
             "INSERT INTO threads (id, title, created_at, last_active_at) VALUES (?, ?, ?, ?)",
             (thread_id, title, now, now),
         )
-        await _set_pointer(db, thread_id)
+        if activate:
+            await _set_pointer(db, thread_id)
         await db.commit()
     return Thread(id=thread_id, title=title, created_at=now, last_active_at=now)
 

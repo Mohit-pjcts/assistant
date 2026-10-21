@@ -59,6 +59,18 @@ async def test_create_thread_becomes_the_active_pointer() -> None:
         assert active == new_thread.id
 
 
+async def test_create_thread_can_leave_the_active_pointer_alone() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "threads.sqlite"
+        before = await get_active_thread_id(db_path=db_path)
+
+        quiet = await create_thread(title="From the phone", db_path=db_path, activate=False)
+
+        assert quiet.id != before
+        assert await get_active_thread_id(db_path=db_path) == before
+        assert await get_thread(quiet.id, db_path=db_path) is not None
+
+
 async def test_set_active_thread_switches_the_pointer() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "threads.sqlite"

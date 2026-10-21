@@ -1003,6 +1003,20 @@ async def test_create_thread_becomes_the_new_active_thread() -> None:
         assert any(t["id"] == thread["id"] for t in body["threads"])
 
 
+async def test_create_thread_with_activate_false_leaves_the_active_pointer_alone() -> None:
+    # The iPhone app names its thread on every call (PLAN.md Phase 31); creating
+    # one must not switch what the dashboard is showing.
+    with TestClient(server.app) as client:
+        before = client.get("/threads").json()["active_thread_id"]
+        response = client.post("/threads", json={"title": "From the phone", "activate": False})
+        assert response.status_code == 200, response.text
+        created = response.json()["id"]
+
+        body = client.get("/threads").json()
+        assert body["active_thread_id"] == before
+        assert any(t["id"] == created for t in body["threads"])
+
+
 async def test_explicit_thread_id_isolates_conversations_without_touching_active_pointer() -> None:
     """The actual fix for STEPS.md 66's collision: two different thread_ids
     used explicitly on /chat must never see each other's messages, and

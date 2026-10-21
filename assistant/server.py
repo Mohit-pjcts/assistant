@@ -883,6 +883,10 @@ class A2UIActionRequest(BaseModel):
 
 class CreateThreadRequest(BaseModel):
     title: str | None = None
+    # The dashboard's New Thread switches the shared pointer to the new thread
+    # (default, unchanged). The iPhone app sends False: it names its thread on
+    # every call, and must not move what the dashboard is showing.
+    activate: bool = True
 
 
 class SetActiveThreadRequest(BaseModel):
@@ -1718,7 +1722,9 @@ async def list_threads() -> dict[str, Any]:
 
 @app.post("/threads")
 async def create_thread(request: CreateThreadRequest) -> dict[str, Any]:
-    thread = await thread_store.create_thread(title=request.title, db_path=thread_store.DEFAULT_DB_PATH)
+    thread = await thread_store.create_thread(
+        title=request.title, db_path=thread_store.DEFAULT_DB_PATH, activate=request.activate
+    )
     return _serialize_thread(thread)
 
 

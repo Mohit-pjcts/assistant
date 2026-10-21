@@ -1,10 +1,9 @@
 import OniCore
 import SwiftUI
 
-/// The Oni tab: phone-local chats with the on-device Oni.
-struct ChatListView: View {
+/// The on-device Oni's chats: the "This iPhone" side of the Oni tab.
+struct PhoneChatList: View {
     @Environment(ChatController.self) private var chat
-    @Environment(Navigator.self) private var nav
 
     var body: some View {
         List {
@@ -42,15 +41,6 @@ struct ChatListView: View {
                 } footer: {
                     Text("An estimate from Anthropic's published prices, not an invoice.")
                 }
-            }
-        }
-        .navigationTitle("Oni")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    nav.path.append(.chat(chat.newChat()))
-                } label: { Image(systemName: "square.and.pencil") }
-                .accessibilityLabel("New chat")
             }
         }
     }
