@@ -112,7 +112,7 @@ None of these touch the real Vault.
 7. Ask Oni to delete or rewrite one of *your* notes: it refuses.
 8. Mac on: Search returns semantic matches. Mac off: it says keyword matches only.
 
-## Mac-connected Oni (Phase 31) — on-device checklist, stages 1-5
+## Mac-connected Oni (Phase 31) — on-device checklist (all stages)
 
 Before anything: **quit and relaunch Oni.app on the Mac.** The backend inside it
 was started before these changes and has no detached turns, turn-state endpoint
@@ -147,5 +147,22 @@ phone talks to the Mac through the same address as the Vault).
    picker opens, the image shows. A video or audio player shows a grey note to
    open the chat on the Mac instead.
 
-Not built yet (later stages): photo attach, the kanban board, memory approvals.
+10. Tap the photo button next to the message box and pick a normal iPhone
+    photo (they are HEIC). A thumbnail appears; type "what is this?" and send.
+    Oni describes it. Try two photos, and the x on a thumbnail to remove one.
+    The photo's location is not sent. After the reply the photo is no longer
+    shown in the thread (the Mac's history keeps only the text), the same as
+    the dashboard.
+
+11. Oni tab → **Board**. Four columns (the tabs at the top show counts). Tap a
+    task to edit it or change its column, long-press it for "Move to…", swipe
+    left to delete, **+** to add one. Check the dashboard's Board tab shows the
+    same change, and the other way round (pull down to refresh).
+12. Oni tab → **Memory to review** (the number is how many wait). Each fact
+    is shown in full with where it came from. **Approve** and **Decline** act
+    on the Mac; the dashboard's Memory panel agrees. If you answered one on the
+    dashboard first, the phone says it was already answered.
+
+All seven stages are built. The phase is not complete until you have run
+items 1-12; tell me which fail.
 Cards made while a turn is running appear when it ends (after the reply).

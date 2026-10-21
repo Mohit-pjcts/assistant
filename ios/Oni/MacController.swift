@@ -19,6 +19,10 @@ final class MacController {
     private(set) var projects: [MacProject] = []
     private(set) var isLoading = false
     private var sessions: [String: MacChatSession] = [:]
+    /// The Board and the memory-review queue, shared by their screens and the
+    /// list that shows the queue's count. Created on first use, from a `.task`.
+    private(set) var board: MacBoard?
+    private(set) var review: MacMemoryReview?
     private var cached: (url: URL, server: HTTPMacServer)?
 
     init(app: AppModel) { self.app = app }
@@ -30,6 +34,8 @@ final class MacController {
         let server = HTTPMacServer(baseURL: url)
         cached = (url, server)
         sessions = [:]
+        board = nil
+        review = nil
         return server
     }
 
@@ -49,6 +55,15 @@ final class MacController {
         return made
     }
 
+    /// The Board and the review queue for the current Mac, created if needed.
+    /// Mutates state: call from a `.task`, never from a view body.
+    func prepareExtras() -> (board: MacBoard, review: MacMemoryReview)? {
+        guard let server else { return nil }
+        if board == nil { board = MacBoard(server: server) }
+        if review == nil { review = MacMemoryReview(server: server) }
+        return (board!, review!)
+    }
+
     func refresh() async {
         guard let server, !isLoading else { return }
         isLoading = true
@@ -60,6 +75,8 @@ final class MacController {
             threads = fetched.threads.sorted { $0.lastActiveAt > $1.lastActiveAt }
             projects = fetchedProjects
             link = .connected
+            // The count on the list; failures here are not the list's problem.
+            if let extras = prepareExtras() { await extras.review.load() }
         } catch MacServerError.unreachable(let why) {
             link = .unreachable(why)
         } catch {

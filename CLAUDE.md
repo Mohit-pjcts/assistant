@@ -1264,8 +1264,10 @@ See PLAN.md.
   exit node (set up on the Mac; still unverified on the device).
   `IOS_SETUP.md` has the install steps and the on-device checklist.
 - **Phase 31 — Mac-connected Oni on the iPhone: SCOPED 2026-10-20 (STEPS.md
-  172), STAGES 1-5 BUILT (server 173, Swift core 174, Mac chat UI 175, gate
-  cards 176, generative UI 177; installed on the phone but not yet seen on a screen), STAGE 6 NEXT.** The app's Oni tab gains a "Mac | This iPhone"
+  172), ALL 7 STAGES CODE-COMPLETE (server 173, Swift core 174, Mac chat UI 175,
+  gate cards 176, generative UI 177, photo attach 178, board + memory
+  approvals 179; installed on the phone but not yet seen on a screen; NOT
+  COMPLETE until the user runs the on-device checklist, D10).** The app's Oni tab gains a "Mac | This iPhone"
   switch; the Mac side uses `/chat` as a second dashboard (D1), with native
   cards for every confirmation gate, A2UI minus video/audio, photo attach,
   Project folders, the board and memory approvals, and turns that keep

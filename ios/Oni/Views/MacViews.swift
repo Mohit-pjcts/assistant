@@ -1,4 +1,5 @@
 import OniCore
+import PhotosUI
 import SwiftUI
 
 /// Which Oni the tab is talking to. Separate lists, no merging (PLAN.md Phase 31 D6).
@@ -71,6 +72,22 @@ struct MacThreadListView: View {
                     description: Text("Start one with the button above. It also shows up on your Mac."))
                     .listRowBackground(Color.clear)
             }
+            if mac.link == .connected {
+                Section {
+                    NavigationLink(value: Route.macBoard) { Label("Board", systemImage: "rectangle.3.group") }
+                    NavigationLink(value: Route.macMemory) {
+                        HStack {
+                            Label("Memory to review", systemImage: "brain")
+                            Spacer()
+                            if let count = mac.review?.pending.count, count > 0 {
+                                Text("\(count)").font(.caption).fontWeight(.semibold)
+                                    .padding(.horizontal, 8).padding(.vertical, 2)
+                                    .background(Color.accentColor, in: Capsule()).foregroundStyle(.white)
+                            }
+                        }
+                    }
+                }
+            }
             ForEach(ungrouped) { MacThreadRow(thread: $0) }
             ForEach(mac.projects) { project in
                 let inside = mac.threads.filter { $0.projectId == project.id }
@@ -139,6 +156,12 @@ private struct MacChatContent: View {
     let session: MacChatSession
     let title: String?
     @Binding var draft: String
+    @State private var photos: [PreparedPhoto] = []
+    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var preparing = 0
+    @State private var photoProblem: String?
+
+    private static let maxPhotos = 4
 
     private var awaitingGate: Gate? {
         if case .awaitingApproval(let gate) = session.phase { gate } else { nil }
@@ -156,6 +179,12 @@ private struct MacChatContent: View {
         }
         .navigationTitle(title ?? "Conversation")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: session.unsent) { _, unsent in
+            // An upload failed and nothing was sent: put the message back.
+            guard unsent != nil, let back = session.takeUnsent() else { return }
+            draft = back.text
+            photos = back.photos
+        }
     }
 
     private var transcript: some View {
@@ -168,7 +197,7 @@ private struct MacChatContent: View {
                         }
                         .id(item.id)
                     }
-                    if let pending = session.pendingUser { UserBubble(text: pending) }
+                    if let pending = session.pendingUser { UserBubble(text: pending, photos: session.pendingPhotos) }
                     if session.isBusy, !session.liveText.isEmpty {
                         MarkdownView(blocks: MarkdownBlocks.parse(markdown: session.liveText)).id("live")
                     }
@@ -221,31 +250,121 @@ private struct MacChatContent: View {
 
     private var composer: some View {
         let blocked = session.isBusy || awaitingGate != nil
-        return HStack(alignment: .bottom, spacing: 8) {
-            TextField(awaitingGate != nil ? "Approve or decline above first" : "Ask Oni", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .textFieldStyle(.roundedBorder)
-                .disabled(awaitingGate != nil)
-            Button {
-                let text = draft
-                draft = ""
-                session.send(text)
-            } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
-            .disabled(blocked || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .accessibilityLabel("Send")
+        let canSend = !blocked && preparing == 0 && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return VStack(alignment: .leading, spacing: 6) {
+            if !photos.isEmpty || preparing > 0 { attachmentStrip }
+            if let problem = photoProblem {
+                Label(problem, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.red)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                PhotosPicker(selection: $pickerItems, maxSelectionCount: Self.maxPhotos - photos.count, matching: .images) {
+                    Image(systemName: "photo.badge.plus").font(.title2)
+                }
+                .disabled(awaitingGate != nil || photos.count >= Self.maxPhotos)
+                .accessibilityLabel("Attach a photo")
+                .onChange(of: pickerItems) { _, items in
+                    guard !items.isEmpty else { return }
+                    pickerItems = []
+                    load(items)
+                }
+                TextField(placeholder, text: $draft, axis: .vertical)
+                    .lineLimit(1...5)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(awaitingGate != nil)
+                Button {
+                    let text = draft
+                    let attached = photos
+                    draft = ""
+                    photos = []
+                    photoProblem = nil
+                    session.send(text, photos: attached)
+                } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                .disabled(!canSend)
+                .accessibilityLabel("Send")
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private var placeholder: String {
+        if awaitingGate != nil { return "Approve or decline above first" }
+        return photos.isEmpty ? "Ask Oni" : "Say what to do with the photo"
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(photos) { photo in
+                    PhotoThumb(data: photo.data, size: 64)
+                        .overlay(alignment: .topTrailing) {
+                            Button { photos.removeAll { $0.id == photo.id } } label: {
+                                Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .black.opacity(0.65))
+                            }
+                            .padding(3)
+                            .accessibilityLabel("Remove photo")
+                        }
+                }
+                if preparing > 0 { ProgressView().frame(width: 64, height: 64) }
+            }
+        }
+    }
+
+    /// Reads each picked item off the main thread and converts it to a JPEG, so a
+    /// 12-megapixel HEIC never blocks the screen and a bad one is reported here.
+    private func load(_ items: [PhotosPickerItem]) {
+        photoProblem = nil
+        let room = Self.maxPhotos - photos.count
+        if items.count > room { photoProblem = "Up to \(Self.maxPhotos) photos per message." }
+        for item in items.prefix(max(0, room)) {
+            preparing += 1
+            Task {
+                defer { preparing -= 1 }
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else { throw PhotoPrepError.unreadable }
+                    let name = item.itemIdentifier ?? "photo"
+                    let prepared = try await Task.detached(priority: .userInitiated) {
+                        try PhotoPrep.jpeg(from: data, filename: name)
+                    }.value
+                    photos.append(prepared)
+                } catch {
+                    photoProblem = (error as? PhotoPrepError)?.description ?? "A photo could not be loaded."
+                }
+            }
+        }
     }
 }
 
 private struct UserBubble: View {
     let text: String
+    var photos: [PreparedPhoto] = []
 
     var body: some View {
-        Text(text)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
-            .frame(maxWidth: .infinity, alignment: .trailing)
+        VStack(alignment: .trailing, spacing: 6) {
+            if !photos.isEmpty {
+                HStack(spacing: 6) { ForEach(photos) { PhotoThumb(data: $0.data, size: 96) } }
+            }
+            Text(text)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+}
+
+/// A small square preview, decoded once.
+private struct PhotoThumb: View {
+    let data: Data
+    let size: CGFloat
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image { Image(uiImage: image).resizable().scaledToFill() } else { Color.secondary.opacity(0.15) }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .task { image = await Task.detached { UIImage(data: data) }.value }
     }
 }
 

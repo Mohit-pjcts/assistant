@@ -171,6 +171,10 @@ class ScriptedGraph:
 
 async def _seed() -> None:
     await memory_store.propose_pending_fact("Prefers tea over coffee", provenance="chat on 2026-10-20")
+    # One fact per phone test that approves or declines it (tests run in parallel).
+    await memory_store.propose_pending_fact("Plays squash on Thursdays", provenance="chat on 2026-10-19")
+    await memory_store.propose_pending_fact("Studies at HKU", provenance="chat on 2026-10-18")
+    await memory_store.propose_pending_fact("Keeps a standing desk", provenance="chat on 2026-10-17")
 
 
 async def _release() -> dict[str, bool]:

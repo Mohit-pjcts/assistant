@@ -46,6 +46,8 @@ enum Route: Hashable {
     case trash
     case chat(UUID)
     case macThread(String)
+    case macBoard
+    case macMemory
     case chatSetup
 }
 
@@ -92,6 +94,8 @@ struct TabRoot<Content: View>: View {
                     case .trash: TrashView()
                     case .chat(let id): ChatView(id: id)
                     case .macThread(let id): MacChatView(threadId: id)
+                    case .macBoard: MacBoardView()
+                    case .macMemory: MacMemoryView()
                     case .chatSetup: ChatSetupView()
                     }
                 }

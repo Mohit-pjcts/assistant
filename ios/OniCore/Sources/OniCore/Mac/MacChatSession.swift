@@ -26,6 +26,11 @@ public final class MacChatSession {
     public private(set) var items: [MacTranscriptItem] = []
     /// What was just sent, shown until the Mac's history includes it.
     public private(set) var pendingUser: String?
+    /// The photos sent with `pendingUser`, shown with it until history includes them.
+    public private(set) var pendingPhotos: [PreparedPhoto] = []
+    /// A message whose photos could not be uploaded: nothing was sent, so the
+    /// screen puts it back in the composer. Cleared by `takeUnsent()`.
+    public private(set) var unsent: UnsentMessage?
     public private(set) var liveText = ""
     /// Cards made during the running turn; they are drawn once the turn ends
     /// and `/history` carries them.
@@ -92,6 +97,43 @@ public final class MacChatSession {
         guard !trimmed.isEmpty, canStartTurn else { return }
         pendingUser = trimmed
         run(.chat(message: trimmed, threadId: threadId, attachments: attachments))
+    }
+
+    /// Sends a message with pictures: each is uploaded to the Mac first, then the
+    /// chat goes out carrying them. If an upload fails, NOTHING is sent and the
+    /// message comes back through `unsent`.
+    public func send(_ text: String, photos: [PreparedPhoto]) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, canStartTurn else { return }
+        guard !photos.isEmpty else { return send(trimmed) }
+        errorMessage = nil
+        notice = nil
+        liveText = ""
+        liveSurfaceCount = 0
+        pendingUser = trimmed
+        pendingPhotos = photos
+        activity = photos.count == 1 ? "Uploading the photo…" : "Uploading \(photos.count) photos…"
+        let threadId = self.threadId
+        begin(phase: .running) { driver, progress in
+            var attachments: [MacAttachment] = []
+            do {
+                for photo in photos {
+                    attachments.append(try await self.server.upload(
+                        data: photo.data, filename: photo.filename, mimeType: photo.mimeType))
+                }
+            } catch {
+                self.unsent = UnsentMessage(text: trimmed, photos: photos)
+                return .failed("The photo could not be uploaded, so nothing was sent. \(self.describe(error))")
+            }
+            self.activity = "Thinking…"
+            return await driver.run(.chat(message: trimmed, threadId: threadId, attachments: attachments), progress: progress)
+        }
+    }
+
+    /// Hands back (once) a message that was not sent because an upload failed.
+    public func takeUnsent() -> UnsentMessage? {
+        defer { unsent = nil }
+        return unsent
     }
 
     /// Answers the confirmation the thread is paused at. The phase leaves
@@ -162,6 +204,7 @@ public final class MacChatSession {
             activity = "Reconnecting to your Mac…"
         case .busyElsewhere:
             pendingUser = nil
+            pendingPhotos = []
             notice = "Oni is already working on this conversation (it was started somewhere else), so your message was not sent."
         case .frame(let frame):
             if phase == .reconnecting { phase = .running }
@@ -228,6 +271,7 @@ public final class MacChatSession {
         do {
             items = MacTranscript.items(from: try await server.history(threadId: threadId))
             pendingUser = nil
+            pendingPhotos = []
             isLoaded = true
         } catch MacServerError.unreachable {
             // Keep what is on screen; the phase says the Mac is out of reach.
@@ -240,4 +284,10 @@ public final class MacChatSession {
     private func describe(_ error: Error) -> String {
         (error as? MacServerError)?.description ?? error.localizedDescription
     }
+}
+
+/// A message the Mac never received.
+public struct UnsentMessage: Sendable, Equatable {
+    public let text: String
+    public let photos: [PreparedPhoto]
 }

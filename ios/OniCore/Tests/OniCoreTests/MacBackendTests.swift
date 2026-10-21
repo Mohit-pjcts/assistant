@@ -1,4 +1,6 @@
+import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 @testable import OniCore
 
@@ -337,5 +339,70 @@ private let macEnabled = macEnv["ONI_TEST_MAC_URL"] != nil
         let said = session.items.compactMap { item -> String? in if case .user(_, let t) = item { t } else { nil } }
         let report = try #require(said.first { $0.contains("[UI interaction]") })
         #expect(report.contains("'go'") && report.contains("s1") && report.contains("Ada"))
+    }
+
+    @Test @MainActor func aRealHEICIsConvertedOnThePhoneAndAcceptedByTheMac() async throws {
+        // What an iPhone's library hands over: HEIC, which the Mac refuses as-is.
+        let context = CGContext(data: nil, width: 3000, height: 2000, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 3000, height: 2000))
+        let out = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(out, "public.heic" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        await #expect(throws: MacServerError.self) {
+            _ = try await mac.upload(data: out as Data, filename: "IMG_1.heic", mimeType: "image/heic")
+        }
+
+        let photo = try PhotoPrep.jpeg(from: out as Data, filename: "IMG_1.HEIC")
+        let thread = try await newThread()
+        let session = MacChatSession(threadId: thread, server: mac)
+        session.send("what is this", photos: [photo])
+        await settled(session)
+        #expect(session.errorMessage == nil && session.phase == .idle)
+        #expect(session.unsent == nil)
+        #expect(session.items.contains { if case .assistant(_, "ok", _, _) = $0 { true } else { false } })
+    }
+
+    @Test @MainActor func theBoardScreenLogicWorksAgainstTheRealStore() async throws {
+        let board = MacBoard(server: mac)
+        let title = "Phone task \(UUID().uuidString.prefix(6))"
+        #expect(await board.add(title: title, description: "from the phone", priority: "high"))
+        let task = try #require(board.tasks.first { $0.title == title })
+        #expect(task.column == .todo && task.ref.hasPrefix("ONI-"))
+
+        #expect(await board.move(task, to: .inReview))
+        #expect(await board.edit(try #require(board.tasks.first { $0.id == task.id }), title: title + " (edited)",
+                                 description: "from the phone", priority: "low"))
+
+        // A second screen opening the board sees what this one did.
+        let other = MacBoard(server: mac)
+        await other.load()
+        let seen = try #require(other.tasks.first { $0.id == task.id })
+        #expect(seen.column == .inReview && seen.title.hasSuffix("(edited)") && seen.priority == "low")
+
+        #expect(await board.delete(seen))
+        await other.load()
+        #expect(other.tasks.contains { $0.id == task.id } == false)
+    }
+
+    @Test @MainActor func approvingAndDecliningMemoryFactsWorksAgainstTheRealQueue() async throws {
+        let review = MacMemoryReview(server: mac)
+        await review.load()
+        let squash = try #require(review.pending.first { $0.content == "Plays squash on Thursdays" })
+        let hku = try #require(review.pending.first { $0.content == "Studies at HKU" })
+        #expect(squash.provenance == "chat on 2026-10-19")
+        #expect(await review.approve(squash))
+        #expect(await review.decline(hku))
+        #expect(review.pending.contains { $0.id == squash.id || $0.id == hku.id } == false)
+
+        // A second screen still holding the old card is told it was already answered.
+        let stale = MacMemoryReview(server: mac)
+        await stale.load()                                              // fresh queue: neither is there
+        #expect(stale.pending.contains { $0.id == squash.id } == false)
+        let late = MacMemoryReview(server: mac)
+        #expect(await late.approve(squash) == false)
+        #expect(late.errorMessage != nil)
     }
 }

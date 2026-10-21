@@ -226,8 +226,11 @@ import Testing
         s.answer(approved: true)
         await settle(s)
         #expect(await server.requests.count == 1)
-        // The card now shows what the Mac is really waiting on.
-        #expect(s.phase == .awaitingApproval(try #require(Gate.parse(other))))
+        // The card now shows what the Mac is really waiting on. The refresh runs
+        // after the turn is marked idle, so wait for it rather than for idleness.
+        let expected = MacChatSession.Phase.awaitingApproval(try #require(Gate.parse(other)))
+        for _ in 0..<2000 where s.phase != expected { try? await Task.sleep(for: .milliseconds(2)) }
+        #expect(s.phase == expected)
     }
 
     @Test func ifTheMacCannotBeAskedNothingIsApproved() async throws {
@@ -242,5 +245,51 @@ import Testing
         await settle(s)
         #expect(await server.requests.count == 1)
         #expect(s.phase == .lostContact)
+    }
+
+    // MARK: photos
+
+    private func photo(_ name: String) -> PreparedPhoto {
+        PreparedPhoto(data: Data([0xFF, 0xD8, 1, 2, 3]), filename: name, pixelWidth: 10, pixelHeight: 10)
+    }
+
+    @Test func photosAreUploadedFirstThenSentWithTheChatInOrder() async {
+        let server = FakeMacServer(streams: [.init(frames: [.message("A cat.")])], histories: [.success([user, reply])])
+        let s = session(server)
+        s.send("what is this?", photos: [photo("a.jpg"), photo("b.jpg")])
+        #expect(s.pendingUser == "what is this?" && s.pendingPhotos.count == 2)
+        #expect(s.activity == "Uploading 2 photos…")
+        await settle(s)
+        #expect(s.phase == .idle && s.pendingPhotos.isEmpty && s.errorMessage == nil)
+        #expect(await server.uploads.map(\.filename) == ["a.jpg", "b.jpg"])
+        #expect(await server.uploads.allSatisfy { $0.mimeType == "image/jpeg" })
+        guard case .chat(let message, let thread, let attachments)? = await server.requests.first else {
+            Issue.record("expected a chat request"); return
+        }
+        #expect(message == "what is this?" && thread == "t1")
+        #expect(attachments.map(\.filename) == ["a.jpg", "b.jpg"])
+    }
+
+    @Test func aFailedUploadSendsNothingAndGivesTheMessageBack() async {
+        let server = FakeMacServer(histories: [.success([])])
+        await server.failUploads(with: MacServerError.unreachable("offline"))
+        let s = session(server)
+        s.send("look", photos: [photo("a.jpg")])
+        await settle(s)
+        #expect(s.phase == .idle && s.pendingUser == nil && s.pendingPhotos.isEmpty)
+        #expect(s.errorMessage?.contains("nothing was sent") == true)
+        #expect(await server.requests.isEmpty)                          // no chat went out
+        let back = s.takeUnsent()
+        #expect(back?.text == "look" && back?.photos.map(\.filename) == ["a.jpg"])
+        #expect(s.takeUnsent() == nil)                                  // only once
+    }
+
+    @Test func aMessageWithNoPhotosGoesTheOrdinaryWay() async {
+        let server = FakeMacServer(streams: [.init(frames: [.message("ok")])], histories: [.success([user, reply])])
+        let s = session(server)
+        s.send("hi", photos: [])
+        await settle(s)
+        #expect(await server.uploads.isEmpty)
+        #expect(await server.requests == [.chat(message: "hi", threadId: "t1", attachments: [])])
     }
 }
