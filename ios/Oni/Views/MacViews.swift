@@ -7,8 +7,10 @@ enum OniSide: String {
     case mac, phone
 }
 
-/// The Oni tab: a switch between the Mac's Oni (real supervisor and
-/// specialists) and the on-device Oni (Vault only, works offline from the Mac).
+/// The Oni home: a switch between the Mac's Oni (real supervisor and
+/// specialists) and the on-device Oni (Vault only, works offline from the Mac),
+/// the earbud-voice control, and the conversations. Everything scrolls with the
+/// list under a plain inline title, nothing is pinned over it.
 struct OniTabView: View {
     @AppStorage("oniSide") private var side: OniSide = .mac
     @Environment(ChatController.self) private var chat
@@ -18,21 +20,14 @@ struct OniTabView: View {
     var body: some View {
         Group {
             switch side {
-            case .mac: MacThreadListView(switchToPhone: { side = .phone })
-            case .phone: PhoneChatList()
+            case .mac: MacThreadListView(switchToPhone: { side = .phone }) { header }
+            case .phone: PhoneChatList { header }
             }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            Picker("Oni", selection: $side) {
-                Text("Mac").tag(OniSide.mac)
-                Text("This iPhone").tag(OniSide.phone)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .background(.bar)
         }
         .navigationTitle("Oni")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) { OniTitle() }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     switch side {
@@ -45,18 +40,37 @@ struct OniTabView: View {
             }
         }
     }
+
+    private var header: some View {
+        VStack(spacing: 14) {
+            Picker("Oni", selection: $side) {
+                Text("Mac").tag(OniSide.mac)
+                Text("This iPhone").tag(OniSide.phone)
+            }
+            .pickerStyle(.segmented)
+            // Earbud voice talks to the Mac's Oni, so it lives on that side.
+            if side == .mac { EarbudVoiceCard() }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+    }
 }
 
 // MARK: - Mac thread list
 
-struct MacThreadListView: View {
+struct MacThreadListView<Header: View>: View {
     let switchToPhone: () -> Void
+    @ViewBuilder let header: Header
     @Environment(MacController.self) private var mac
 
     private var ungrouped: [MacThread] { mac.threads.filter { $0.projectId == nil } }
 
     var body: some View {
         List {
+            Section { header }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             if case .unreachable(let why) = mac.link {
                 Section {
                     Label("Can't reach your Mac", systemImage: "wifi.exclamationmark").font(.headline)
@@ -72,30 +86,20 @@ struct MacThreadListView: View {
                     description: Text("Start one with the button above. It also shows up on your Mac."))
                     .listRowBackground(Color.clear)
             }
-            if mac.link == .connected {
-                Section {
-                    NavigationLink(value: Route.macBoard) { Label("Board", systemImage: "rectangle.3.group") }
-                    NavigationLink(value: Route.macMemory) {
-                        HStack {
-                            Label("Memory to review", systemImage: "brain")
-                            Spacer()
-                            if let count = mac.review?.pending.count, count > 0 {
-                                Text("\(count)").font(.caption).fontWeight(.semibold)
-                                    .padding(.horizontal, 8).padding(.vertical, 2)
-                                    .background(Color.accentColor, in: Capsule()).foregroundStyle(.white)
-                            }
-                        }
-                    }
+            if !ungrouped.isEmpty {
+                Section("Conversations") {
+                    ForEach(ungrouped) { MacThreadRow(thread: $0) }
                 }
             }
-            ForEach(ungrouped) { MacThreadRow(thread: $0) }
             ForEach(mac.projects) { project in
                 let inside = mac.threads.filter { $0.projectId == project.id }
                 if !inside.isEmpty {
-                    DisclosureGroup {
-                        ForEach(inside) { MacThreadRow(thread: $0) }
-                    } label: {
-                        Label(project.name, systemImage: "folder")
+                    Section {
+                        DisclosureGroup {
+                            ForEach(inside) { MacThreadRow(thread: $0) }
+                        } label: {
+                            Label(project.name, systemImage: "folder")
+                        }
                     }
                 }
             }

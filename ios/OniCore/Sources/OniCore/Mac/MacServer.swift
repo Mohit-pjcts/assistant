@@ -8,10 +8,13 @@ public enum TurnRequest: Sendable, Equatable {
     case resume(approved: Bool, threadId: String)
     /// A generative-UI button was pressed; sent as an ordinary user turn.
     case a2uiAction(surfaceId: String, name: String, context: [String: JSONValue], threadId: String)
+    /// A message spoken through the earphones (PLAN.md Phase 32). Sent on the
+    /// "headset" channel, so the Mac answers in short sentences a voice can read.
+    case headsetChat(message: String, threadId: String)
 
     var path: String {
         switch self {
-        case .chat: "/chat"
+        case .chat, .headsetChat: "/chat"
         case .resume: "/resume"
         case .a2uiAction: "/a2ui/action"
         }
@@ -19,7 +22,7 @@ public enum TurnRequest: Sendable, Equatable {
 
     public var threadId: String {
         switch self {
-        case .chat(_, let id, _), .resume(_, let id), .a2uiAction(_, _, _, let id): id
+        case .chat(_, let id, _), .resume(_, let id), .a2uiAction(_, _, _, let id), .headsetChat(_, let id): id
         }
     }
 
@@ -28,6 +31,8 @@ public enum TurnRequest: Sendable, Equatable {
         case .chat(let message, let threadId, let attachments):
             ["message": .string(message), "thread_id": .string(threadId), "detached": true,
              "attachments": .array(attachments.map(\.json))]
+        case .headsetChat(let message, let threadId):
+            ["message": .string(message), "thread_id": .string(threadId), "detached": true, "channel": "headset"]
         case .resume(let approved, let threadId):
             ["approved": .bool(approved), "thread_id": .string(threadId), "detached": true]
         case .a2uiAction(let surfaceId, let name, let context, let threadId):
@@ -72,6 +77,8 @@ public protocol MacServer: Sendable {
     func deleteThread(id: String) async throws
     func projects() async throws -> [MacProject]
 
+    func calendar() async throws -> MacCalendar
+
     func boardTasks() async throws -> [BoardTask]
     func createBoardTask(column: BoardColumn, title: String, description: String, priority: String) async throws -> BoardTask
     func moveBoardTask(id: String, to column: BoardColumn, position: Int?) async throws -> BoardTask
@@ -83,6 +90,13 @@ public protocol MacServer: Sendable {
     func declinePendingFact(id: Int) async throws
 
     func upload(data: Data, filename: String, mimeType: String) async throws -> MacAttachment
+
+    /// Speech to text on the Mac (`/voice/transcribe`, local Whisper).
+    func transcribe(audio: Data, filename: String, mimeType: String) async throws -> String
+    /// One piece of a reply as MP3 in the Mac's ElevenLabs voice (`/voice/speak`).
+    /// Throws if the Mac cannot make it (no key, credits low): the caller falls
+    /// back to the phone's own voice.
+    func speak(text: String) async throws -> Data
 }
 
 /// `MacServer` over HTTPS to the Mac (`tailscale serve`). No token: the routes
@@ -117,7 +131,8 @@ public struct HTTPMacServer: MacServer {
         return req
     }
 
-    private func send(_ req: URLRequest) async throws -> JSONValue {
+    /// The raw body of a 2xx answer; any other status is a `MacServerError`.
+    private func sendRaw(_ req: URLRequest) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -128,7 +143,11 @@ public struct HTTPMacServer: MacServer {
         }
         guard let http = response as? HTTPURLResponse else { throw MacServerError.server(status: 0, message: "Not an HTTP response") }
         guard (200..<300).contains(http.statusCode) else { throw Self.mapError(status: http.statusCode, body: String(decoding: data, as: UTF8.self)) }
-        return JSONValue.parse(String(decoding: data, as: UTF8.self)) ?? .null
+        return data
+    }
+
+    private func send(_ req: URLRequest) async throws -> JSONValue {
+        JSONValue.parse(String(decoding: try await sendRaw(req), as: UTF8.self)) ?? .null
     }
 
     private func call(_ method: String, _ path: String, query: [String: String] = [:], json: JSONValue? = nil) async throws -> JSONValue {
@@ -242,6 +261,13 @@ public struct HTTPMacServer: MacServer {
         try (try await call("GET", "/projects")["projects"]?.array ?? []).map(MacProject.init)
     }
 
+    // MARK: calendar
+
+    /// Read-only: the phone can see the semester calendar, not change it.
+    public func calendar() async throws -> MacCalendar {
+        try MacCalendar(try await call("GET", "/calendar"))
+    }
+
     // MARK: board
 
     public func boardTasks() async throws -> [BoardTask] {
@@ -290,15 +316,34 @@ public struct HTTPMacServer: MacServer {
     // MARK: uploads
 
     public func upload(data: Data, filename: String, mimeType: String) async throws -> MacAttachment {
+        var req = try makeRequest("POST", "/uploads", timeout: 120)
+        Self.attachFile(data, filename: filename, mimeType: mimeType, to: &req)
+        return try MacAttachment(try await send(req))
+    }
+
+    /// A multipart/form-data body with one part named "file".
+    private static func attachFile(_ data: Data, filename: String, mimeType: String, to req: inout URLRequest) {
         let boundary = "oni-\(UUID().uuidString)"
         var body = Data()
-        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(Self.quoted(filename))\"\r\nContent-Type: \(mimeType)\r\n\r\n".utf8))
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(quoted(filename))\"\r\nContent-Type: \(mimeType)\r\n\r\n".utf8))
         body.append(data)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-        var req = try makeRequest("POST", "/uploads", timeout: 120)
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
-        return try MacAttachment(try await send(req))
+    }
+
+    // MARK: voice
+
+    public func transcribe(audio: Data, filename: String, mimeType: String) async throws -> String {
+        // The first call after the Mac starts loads the speech model, which can
+        // take several seconds.
+        var req = try makeRequest("POST", "/voice/transcribe", timeout: 90)
+        Self.attachFile(audio, filename: filename, mimeType: mimeType, to: &req)
+        return try await send(req)["text"]?.string ?? ""
+    }
+
+    public func speak(text: String) async throws -> Data {
+        try await sendRaw(try makeRequest("POST", "/voice/speak", json: ["text": .string(text)], timeout: 25))
     }
 
     /// Keeps a filename from breaking out of its quoted header value. Works on

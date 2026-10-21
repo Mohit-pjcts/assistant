@@ -2,11 +2,16 @@ import OniCore
 import SwiftUI
 
 /// The on-device Oni's chats: the "This iPhone" side of the Oni tab.
-struct PhoneChatList: View {
+struct PhoneChatList<Header: View>: View {
+    @ViewBuilder let header: Header
     @Environment(ChatController.self) private var chat
 
     var body: some View {
         List {
+            Section { header }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             if !chat.hasKey {
                 Section {
                     NavigationLink(value: Route.chatSetup) {

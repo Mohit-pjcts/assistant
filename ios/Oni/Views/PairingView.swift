@@ -14,6 +14,15 @@ struct PairingView: View {
         NavigationStack {
             Form {
                 Section {
+                    VStack(spacing: 10) {
+                        OniMark(size: 56).foregroundStyle(Color.accentColor)
+                        Text("Oni").font(.largeTitle).fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .listRowBackground(Color.clear)
+                Section {
                     TextField("my-mac.tailnet.ts.net", text: $address)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)

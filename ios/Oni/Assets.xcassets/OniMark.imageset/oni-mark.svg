@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Oni's mark: one circle, two strokes, one arc. The same geometry as
+       dashboard/src/components/nav/BrandMark.tsx. Drawn black so the asset
+       catalog can tint it (template rendering). -->
+  <circle cx="16" cy="10.5" r="3.6"/>
+  <path d="M13.2 7.6C14.5 5.3 18 5 19.3 7C20.6 9 19.8 12 19 14.5C18.3 16.8 20.5 19.5 23.5 22.5"/>
+  <path d="M12.8 8.5C11.3 10 11.6 13 10.3 15.8" opacity="0.65"/>
+  <path d="M8.5 23.5C11 20 21 20 23.5 23.5"/>
+</svg>

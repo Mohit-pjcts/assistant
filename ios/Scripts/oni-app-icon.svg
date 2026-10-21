@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- The iPhone app icon: Oni's mark (Oni/Assets.xcassets/OniMark.imageset/oni-mark.svg)
+       in the app's dark-mode accent on the dashboard's dark background, centred.
+       Turn it into the PNG the asset catalog needs with scripts/make_app_icon.sh. -->
+  <rect width="1024" height="1024" fill="#161619"/>
+  <g transform="translate(512 512) scale(40) translate(-16 -14.7)"
+     fill="none" stroke="#A18BF0" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="16" cy="10.5" r="3.6"/>
+    <path d="M13.2 7.6C14.5 5.3 18 5 19.3 7C20.6 9 19.8 12 19 14.5C18.3 16.8 20.5 19.5 23.5 22.5"/>
+    <path d="M12.8 8.5C11.3 10 11.6 13 10.3 15.8" opacity="0.65"/>
+    <path d="M8.5 23.5C11 20 21 20 23.5 23.5"/>
+  </g>
+</svg>

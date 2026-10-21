@@ -99,6 +99,24 @@ public final class MacChatSession {
         run(.chat(message: trimmed, threadId: threadId, attachments: attachments))
     }
 
+    /// Sends a message that was spoken through the earphones, on the headset
+    /// channel. Returns false (and sends nothing) if a turn is already running
+    /// or waiting for approval, so the caller can say so instead of waiting.
+    @discardableResult
+    public func sendSpoken(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, canStartTurn else { return false }
+        pendingUser = trimmed
+        run(.headsetChat(message: trimmed, threadId: threadId))
+        return true
+    }
+
+    /// Waits until the turn this session is following has finished, whichever
+    /// way it ended. Returns at once if none is running.
+    public func finishedTurn() async {
+        await task?.value
+    }
+
     /// Sends a message with pictures: each is uploaded to the Mac first, then the
     /// chat goes out carrying them. If an upload fails, NOTHING is sent and the
     /// message comes back through `unsent`.

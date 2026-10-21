@@ -304,6 +304,54 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         #expect(sent.body.range(of: Data([1, 2, 3])) != nil)
     }
 
+    @Test func theClientReadsTheCalendarFromTheMac() async throws {
+        let mac = client { _, _ in
+            .json(#"{"events": [{"id": "a", "date": "2026-10-22", "title": "T", "kind": "exam", "course": "X"}], "courses": [], "undated": []}"#)
+        }
+        let calendar = try await mac.calendar()
+        #expect(calendar.events.first?.isDue == true)
+        #expect(StubProtocol.requests[0].request.url?.path == "/calendar")
+        #expect(StubProtocol.requests[0].request.httpMethod == "GET")
+    }
+
+    // MARK: voice (PLAN.md Phase 32)
+
+    @Test func aHeadsetTurnIsAChatOnTheHeadsetChannel() async throws {
+        let mac = client { _, _ in .sse(["data: {\"type\": \"message\", \"content\": \"ok\"}\n\n"]) }
+        _ = try await frames(mac.stream(.headsetChat(message: "what is next", threadId: "t1")))
+        #expect(StubProtocol.requests[0].request.url?.path == "/chat")
+        let body = try #require(sentJSON())
+        #expect(body["channel"]?.string == "headset")
+        #expect(body["detached"]?.bool == true)
+        #expect(body["message"]?.string == "what is next" && body["thread_id"]?.string == "t1")
+    }
+
+    @Test func aTranscriptionIsAMultipartFileAndReturnsTheText() async throws {
+        let mac = client { _, _ in .json(#"{"text": "Hello? Again."}"#) }
+        let text = try await mac.transcribe(audio: Data([9, 8, 7]), filename: "voice.wav", mimeType: "audio/wav")
+        #expect(text == "Hello? Again.")
+        let sent = StubProtocol.requests[0]
+        #expect(sent.request.url?.path == "/voice/transcribe")
+        #expect(sent.request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary=") == true)
+        #expect(String(decoding: sent.body, as: UTF8.self).contains("name=\"file\"; filename=\"voice.wav\""))
+        #expect(sent.body.range(of: Data([9, 8, 7])) != nil)
+    }
+
+    @Test func speechPostsTheTextAndReturnsTheRawAudio() async throws {
+        let mac = client { _, _ in StubReply(status: 200, chunks: [Data([0x49, 0x44, 0x33, 1, 2])]) }
+        let audio = try await mac.speak(text: "Your next meeting is at three.")
+        #expect(audio == Data([0x49, 0x44, 0x33, 1, 2]))
+        #expect(StubProtocol.requests[0].request.url?.path == "/voice/speak")
+        #expect(sentJSON()?["text"]?.string == "Your next meeting is at three.")
+    }
+
+    @Test func speechThatTheMacCannotMakeIsAnErrorTheCallerCanReadAndFallBackFrom() async throws {
+        let mac = client { _, _ in .json(#"{"detail": "ElevenLabs is not configured"}"#, status: 503) }
+        await #expect(throws: MacServerError.server(status: 503, message: "ElevenLabs is not configured")) {
+            _ = try await mac.speak(text: "Hello.")
+        }
+    }
+
     // MARK: encoding
 
     @Test func queryValuesSurviveSpecialCharacters() {

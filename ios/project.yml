@@ -23,6 +23,11 @@ targets:
     dependencies:
       - package: OniCore
         product: OniCore
+    # Merged with the generated Info.plist (GENERATE_INFOPLIST_FILE below).
+    info:
+      path: Oni/Info.plist
+      properties:
+        UIBackgroundModes: [audio]
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -38,6 +43,12 @@ targets:
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        # Phase 32: the earbud-button voice input records from the earbud
+        # microphone. (The audio background mode is the `info:` block below:
+        # UIBackgroundModes has no INFOPLIST_KEY_ build setting.)
+        # Pausing and resuming Apple Music while you talk to Oni.
+        INFOPLIST_KEY_NSAppleMusicUsageDescription: Oni pauses your music while you talk to it and resumes it afterwards.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Oni listens through your earbuds when you press their button, so you can talk to it without touching the phone.
 schemes:
   Oni:
     build:

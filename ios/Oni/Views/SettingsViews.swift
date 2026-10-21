@@ -46,6 +46,9 @@ struct SettingsView: View {
                 NavigationLink(value: Route.chatSetup) {
                     Label("Oni on this iPhone", systemImage: "sparkles")
                 }
+                NavigationLink(value: Route.earbudLog) {
+                    Label("Earbud voice log", systemImage: "headphones")
+                }
             }
 
             Section {

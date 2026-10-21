@@ -3834,3 +3834,65 @@ detached turn verified on a throwaway backend. **The live backend (inside the
 installed Oni.app, no `--reload`) is still the old code: quit and relaunch
 Oni.app before the phone can use any of this.** Stages 2-7 not started.
 
+
+## Phase 32 — Earbud-button voice I/O on the iPhone — SCOPED 2026-10-21, STAGE 1 (device spike) DONE: GO with variant B (STEPS.md 181-184)
+
+**Goal.** With wired earbuds in the iPhone, one press of the earbud button starts
+Oni listening, a second press sends the request to the Mac over Tailscale, and
+Oni's answer is spoken back through the earbuds in an ElevenLabs voice. No iPhone
+Shortcut, and nothing outside the Oni iOS app and the Mac backend Oni.app already
+runs (user's explicit constraint: no independent scripts or daemons on the laptop).
+
+**Why it is risky.** iOS blocks starting a microphone from the background (Apple
+DTS: "a privacy block ... prevents recording sessions from activating in the
+background"; only CallKit/LiveCommunicationKit/PushToTalk are exempt, communication
+apps only). So the app must be *armed* in the foreground first. Two ways of
+starting the mic on a press are compared in Stage 1: **A** start the audio engine
+on the press, **B** keep the engine running while armed and only keep the audio on
+a press (permanent orange mic dot, more battery).
+
+**Stages.** 1 device spike (this entry) → 2 Mac `POST /voice/speak` (ElevenLabs
+`eleven_flash_v2_5`, key stays in the Mac's `.env`, speech-to-text stays on the
+existing `/voice/transcribe`) plus a headset channel marker so replies are short and
+speakable → 3 the real feature in the app (state machine idle/recording/thinking/
+speaking, sentence-by-sentence speech, Arm toggle) → 4 verify on the device.
+
+**Decisions.** Gates stay click-only: a voice turn that hits one says so and waits;
+a button press never approves anything. While armed, Oni owns the Now Playing slot,
+so the earbud button no longer reaches music apps; iOS has no way to disable
+play/pause system-wide, so starting a music app takes the button back until Oni is
+re-armed. The phone cannot be on a cable and have earbuds in at once (one USB-C
+port), so each test round is: install over the cable, unplug, test, replug, pull
+`headset-spike.log` with `devicectl device copy from`.
+
+**Go/no-go.** If neither variant A nor B captures audio from a button press with the
+screen locked, stop and report: the feature then needs a screen interaction.
+
+**Not in this phase.** Bluetooth earbuds, voice approval of gates, wake words, a
+Siri/Action Button trigger.
+
+**Progress log (2026-10-21, STEPS.md 181-184).** **Stage 1 done, go/no-go = GO.** On the
+real phone with the wired earbuds: the button reaches Oni with the screen locked;
+variant A (start the mic on a press) fails in the background (`kAUStartIO`), variant
+B (mic engine running while armed) works, survives route changes and 2+ minutes
+locked, and plays the recording back through the earbuds. Two bugs of mine found and
+fixed along the way (an audio-callback isolation crash; the engine not restarting
+after a route change). Carried into later stages: the earbud mic is ~16 dB quiet, so
+Stage 3 normalizes gain and downmixes to mono 16 kHz; the always-on mic means a
+permanent orange dot and unmeasured battery drain while armed; the always-on engine
+must restart after a call/Siri interruption; and the backend's `/voice/transcribe` is
+currently broken inside the installed Oni.app because the app's minimal PATH hides
+Homebrew's `ffmpeg` (fixed in Stage 2).
+
+**Progress log (2026-10-21, STEPS.md 185).** **Stage 2 done (Mac backend).** `POST /voice/speak`
+(ElevenLabs, Alice + `eleven_flash_v2_5`, the same voice and guard rails as Onstage, key
+stays on the Mac), `ChatRequest.channel = "headset"` with its speakable-reply marker (gates
+stay click-only), and the ffmpeg PATH fix for `/voice/transcribe`. 23 new tests; one real
+ElevenLabs call and one real transcription verified in-process. **The live backend inside
+Oni.app is still the old code: quit and relaunch Oni.app before Stage 3 can be tried.**
+
+**Progress log (2026-10-21, STEPS.md 186).** **Stage 3 built (the real feature in the iOS app)**,
+351 Swift tests pass, installed on the phone. Earbud-button flow end to end (press, record,
+press, Mac, ElevenLabs reply sentence by sentence), Arm/Disarm bar in the Oni tab, one "Earbud
+voice" conversation on the Mac, gates announced and never voice-approved, replies read aloud only
+through worn audio. **Stage 4, the on-device check, is next and is the user's to run.**

@@ -5,13 +5,17 @@ struct OniApp: App {
     @State private var model: AppModel
     @State private var chat: ChatController
     @State private var mac: MacController
+    // Owned here, not by a screen, so arming survives leaving the Oni tab (Phase 32).
+    @State private var earbud: EarbudVoice
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let model = AppModel()
         _model = State(initialValue: model)
         _chat = State(initialValue: ChatController(app: model))
-        _mac = State(initialValue: MacController(app: model))
+        let mac = MacController(app: model)
+        _mac = State(initialValue: mac)
+        _earbud = State(initialValue: EarbudVoice(mac: mac))
     }
 
     var body: some Scene {
@@ -26,6 +30,7 @@ struct OniApp: App {
             .environment(model)
             .environment(chat)
             .environment(mac)
+            .environment(earbud)
         }
         .onChange(of: scenePhase) { _, phase in
             // Foreground-only sync (PLAN.md Phase 30, decision 10).
@@ -49,6 +54,7 @@ enum Route: Hashable {
     case macBoard
     case macMemory
     case chatSetup
+    case earbudLog
 }
 
 @Observable @MainActor
@@ -56,29 +62,47 @@ final class Navigator {
     var path: [Route] = []
 }
 
+/// The whole app: one screen at a time, chosen from the menu at the top left
+/// (the Mac app's own navigation rail, as a slide-in menu).
 struct RootView: View {
-    @Environment(AppModel.self) private var model
-    @Environment(ChatController.self) private var chat
-    @Environment(MacController.self) private var mac
+    @State private var menu = AppMenu()
 
     var body: some View {
-        TabView {
-            TabRoot { VaultView() }
-                .tabItem { Label("Vault", systemImage: "books.vertical") }
-            TabRoot { OniTabView() }
-                .tabItem { Label("Oni", systemImage: "sparkles") }
-                // A turn running is never invisible, even from another tab.
-                .badge(chat.isRunning || mac.anyBusy ? "●" : nil)
-            TabRoot { SearchView() }
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
-            TabRoot { SettingsView() }
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .badge(model.conflicts.count)
+        ZStack(alignment: .leading) {
+            screen
+                // A new screen starts at its own root, not wherever the last one was.
+                .id(menu.selection)
+                .disabled(menu.isOpen)
+            if menu.isOpen {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture { menu.isOpen = false }
+                    .accessibilityLabel("Close menu")
+                    .accessibilityAddTraits(.isButton)
+                    .transition(.opacity)
+                MenuDrawer()
+                    .transition(.move(edge: .leading))
+            }
+        }
+        .animation(.snappy(duration: 0.25), value: menu.isOpen)
+        .environment(menu)
+    }
+
+    @ViewBuilder private var screen: some View {
+        switch menu.selection {
+        case .oni: TabRoot { OniTabView() }
+        case .calendar: TabRoot { CalendarView() }
+        case .board: TabRoot { MacBoardView() }
+        case .memory: TabRoot { MacMemoryView() }
+        case .vault: TabRoot { VaultView() }
+        case .search: TabRoot { SearchView() }
+        case .settings: TabRoot { SettingsView() }
         }
     }
 }
 
-/// A tab with its own navigation stack, so wikilinks push within the tab.
+/// A screen with its own navigation stack, so wikilinks push within it, and the
+/// menu button at the top left of its root.
 struct TabRoot<Content: View>: View {
     @State private var navigator = Navigator()
     @ViewBuilder var content: Content
@@ -86,6 +110,7 @@ struct TabRoot<Content: View>: View {
     var body: some View {
         NavigationStack(path: $navigator.path) {
             content
+                .toolbar { ToolbarItem(placement: .topBarLeading) { MenuButton() } }
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .folder(let path): FolderView(path: path)
@@ -97,6 +122,7 @@ struct TabRoot<Content: View>: View {
                     case .macBoard: MacBoardView()
                     case .macMemory: MacMemoryView()
                     case .chatSetup: ChatSetupView()
+                    case .earbudLog: EarbudLogView()
                     }
                 }
         }

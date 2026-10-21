@@ -73,7 +73,7 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import StreamingResponse  # noqa: E402
+from fastapi.responses import Response, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from langchain_core.messages import BaseMessage, HumanMessage  # noqa: E402
 from langfuse import Langfuse  # noqa: E402
@@ -816,6 +816,11 @@ class ChatRequest(BaseModel):
     # seconds of a screen lock). Default False leaves every existing client —
     # the dashboard above all — on today's cancel-on-disconnect behavior.
     detached: bool = False
+    # PLAN.md Phase 32: "headset" means the message was spoken through earphones
+    # and the reply will be read aloud, so the screen cannot be relied on. The
+    # server prepends `_HEADSET_CHANNEL_MARKER` (the same mechanism as the phone
+    # channel). Anything else, or None, leaves the message exactly as sent.
+    channel: Literal["headset"] | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -1138,7 +1143,10 @@ async def chat(request: ChatRequest) -> StreamingResponse:
     # response (SSE only starts once we've already committed to a 200,
     # since HTTP headers/status can't change after the body starts).
     thread_id = await _resolve_thread_id(request.thread_id)
-    input_ = {"messages": [("user", _build_user_content(request.message, request.attachments))]}
+    message = request.message
+    if request.channel == "headset":
+        message = _HEADSET_CHANNEL_MARKER + "\n\n" + message
+    input_ = {"messages": [("user", _build_user_content(message, request.attachments))]}
     return _turn_response(thread_id, input_, detached=request.detached)
 
 
@@ -1247,7 +1255,10 @@ async def voice_transcribe(file: UploadFile = File(...)) -> dict[str, str]:
     docstring) — surfaced here as a clear 502 rather than a bare stack
     trace, since "ffmpeg missing" is a real, expected first-run gap for
     anyone following the iPhone-access setup steps out of order."""
+    from assistant.tool_path import ensure_tool_path
     from assistant.voice_io import transcribe_file
+
+    ensure_tool_path()  # Oni.app's minimal PATH hides Homebrew's ffmpeg (STEPS.md 184)
 
     if not file.content_type or not file.content_type.startswith("audio/"):
         raise HTTPException(
@@ -1286,6 +1297,31 @@ async def voice_transcribe(file: UploadFile = File(...)) -> dict[str, str]:
     return {"text": text}
 
 
+
+class SpeakRequest(BaseModel):
+    text: str
+
+
+@app.post("/voice/speak")
+async def voice_speak(request: SpeakRequest) -> Response:
+    """PLAN.md Phase 32: Oni's reply as an MP3 in the ElevenLabs voice, for the
+    iPhone's earbud voice feature. The Mac fetches it so the API key never
+    leaves the Mac (`assistant/voice_speak.py` has the voice, the guard rails and
+    why one request is capped). Any failure is a non-200 the phone reads as
+    "fall back to the phone's own voice"; nothing here touches the graph.
+    `X-Spoken-Truncated: 1` means the text was cut to the length cap."""
+    from assistant.voice_speak import SpeakError, get_speaker
+
+    try:
+        audio, truncated = await get_speaker().speak(request.text)
+    except SpeakError as error:
+        raise HTTPException(status_code=error.status, detail=error.detail) from error
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={"X-Spoken-Truncated": "1" if truncated else "0"},
+    )
+
 @app.post("/resume")
 async def resume(request: ResumeRequest) -> StreamingResponse:
     thread_id = await _resolve_thread_id(request.thread_id)
@@ -1322,6 +1358,34 @@ _PHONE_CHANNEL_MARKER = (
     "Mac, and never onstage (it explains the Mac's screen, which the user "
     "can't see from here).]"
 )
+
+
+# PLAN.md Phase 32: a turn spoken through the iPhone's earphones. The reply is
+# read aloud by a text-to-speech voice, so the shape of the answer matters more
+# than usual. Gates stay click-only (a voice turn never approves anything): the
+# model is told to say a gate is waiting, not to ask for a spoken yes.
+_HEADSET_CHANNEL_MARKER = (
+    "[This message was spoken through the user's earphones and your reply will "
+    "be read aloud by a text-to-speech voice; they cannot see the screen. Answer "
+    "in one to three short, plain sentences: no markdown, lists, tables, code "
+    "blocks, links or emoji, and do not use render_ui or render_form. If the "
+    "answer is long or visual, give the one-sentence gist and say the rest is "
+    "on their screen. If an action needs their approval, say in one sentence "
+    "that it is waiting for approval on the phone screen; never ask them to "
+    "approve by voice.]"
+)
+
+_CHANNEL_MARKERS = (_PHONE_CHANNEL_MARKER, _HEADSET_CHANNEL_MARKER)
+
+
+def _strip_channel_marker(text: str) -> str:
+    """Hide a channel marker from a message shown in History: the model needs
+    the instruction, the person reading the thread does not."""
+    for marker in _CHANNEL_MARKERS:
+        prefix = marker + "\n\n"
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    return text
 
 
 @app.post("/phone/turn")
@@ -1838,7 +1902,7 @@ async def history(thread_id: str | None = None) -> dict[str, Any]:
         "messages": [
             {
                 "role": _message_role(m),
-                "content": _render_content(m.content),
+                "content": _strip_channel_marker(_render_content(m.content)),
                 "synthetic": _is_synthetic(m),
                 # The message's own `.name` — semantics depend on role,
                 # checked against real output rather than assumed (STEPS.md
@@ -2391,15 +2455,20 @@ async def fire_automation(automation_id: str) -> dict[str, Any]:
 # --- Semester calendar (vault timetable + deadlines + tutorials) ------------
 
 
-@app.get("/calendar", dependencies=[Depends(require_local_client)])
+@app.get("/calendar")
 async def get_calendar() -> dict[str, Any]:
-    """Classes, tutorials and deadlines for the dashboard's Calendar view,
-    parsed fresh from the vault notes on every call (calendar_store's own
-    docstring: the notes stay the single source of truth, so fixing a date
-    there fixes it here with no sync step). Loopback-only like /history/trace:
-    the backend is unauthenticated and bound to 0.0.0.0 for the iPhone
-    channel, and a room-by-room weekly schedule says where the user will be
-    and when. The iPhone never needs it."""
+    """Classes, tutorials and deadlines for the dashboard's Calendar view and
+    the iPhone's Calendar screen, parsed fresh from the vault notes on every
+    call (calendar_store's own docstring: the notes stay the single source of
+    truth, so fixing a date there fixes it here with no sync step).
+
+    READ access is open to the iPhone since STEPS.md 192: it was
+    loopback-only when the iPhone "never needed it", on the grounds that a
+    room-by-room weekly schedule says where the user will be and when. The
+    user then asked for the calendar on the phone, and the phone reaches every
+    other endpoint (board, memory, threads) the same unauthenticated way
+    (PLAN.md Phase 31 D2), so this read is no weaker than those. Add, edit and
+    delete below stay loopback-only: the phone has no way to write the calendar."""
     # Plain file reads of a few small notes, but still blocking I/O.
     data = await asyncio.to_thread(calendar_store.load_calendar)
     return data.to_json()

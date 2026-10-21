@@ -70,6 +70,10 @@ actor FakeMacServer: MacServer {
     func failStore(with error: (any Error)?) { storeFailure = error }
     private func checkStore() throws { if let storeFailure { throw storeFailure } }
 
+    private var calendarJSON: JSONValue = ["events": [], "courses": [], "undated": []]
+    func seedCalendar(_ json: JSONValue) { calendarJSON = json }
+    func calendar() async throws -> MacCalendar { try checkStore(); return try MacCalendar(calendarJSON) }
+
     func boardTasks() async throws -> [BoardTask] { try checkStore(); return board }
     func createBoardTask(column: BoardColumn, title: String, description: String, priority: String) async throws -> BoardTask {
         try checkStore()
@@ -114,6 +118,27 @@ actor FakeMacServer: MacServer {
     private var uploadFailure: (any Error)?
     func failUploads(with error: any Error) { uploadFailure = error }
 
+    // Voice: scripted transcripts (the last one repeats), and speech that records
+    // what it was asked to say.
+    private var transcripts: [Result<String, any Error>] = []
+    private(set) var transcribed: [(size: Int, filename: String, mimeType: String, wav: Data)] = []
+    private(set) var spoken: [String] = []
+    private var speakFailure: (any Error)?
+    func scriptTranscripts(_ results: [Result<String, any Error>]) { transcripts = results }
+    func failSpeech(with error: (any Error)?) { speakFailure = error }
+
+    func transcribe(audio: Data, filename: String, mimeType: String) async throws -> String {
+        transcribed.append((audio.count, filename, mimeType, audio))
+        let next = transcripts.count > 1 ? transcripts.removeFirst() : (transcripts.first ?? .success(""))
+        return try next.get()
+    }
+
+    func speak(text: String) async throws -> Data {
+        spoken.append(text)
+        if let speakFailure { throw speakFailure }
+        return Data("mp3:\(text)".utf8)
+    }
+
     func upload(data: Data, filename: String, mimeType: String) async throws -> MacAttachment {
         if let uploadFailure { throw uploadFailure }
         uploads.append((filename, mimeType, data.count))
@@ -139,8 +164,8 @@ extension TurnState {
 }
 
 extension MacMessage {
-    static func make(_ role: String, _ content: String) -> MacMessage {
-        try! MacMessage(.object(["role": .string(role), "content": .string(content)]))
+    static func make(_ role: String, _ content: String, surfaces: [JSONValue] = []) -> MacMessage {
+        try! MacMessage(.object(["role": .string(role), "content": .string(content), "surfaces": .array(surfaces)]))
     }
 }
 
