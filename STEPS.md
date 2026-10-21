@@ -13953,3 +13953,10 @@ Stages 4-5 were committed and pushed first (`444178a`, with `c7dc666`; the push 
 ## 193. Docs brought up to date after Phase 32 (2026-10-22)
 
 - At the user's request ("update then sync git"): `IOS_SETUP.md` now describes the menu (the tab bar it still mentioned is gone), the read-only Calendar, how to use earbud voice (arming, the locked-phone switch, music mode, the log) and how to regenerate the icon from the SVG; `PLAN.md` marks Phase 32 COMPLETE with a closing progress log; the `CLAUDE.md` status block gained the Phase 32 entry and the post-phase iPhone polish entry (including the `GET /calendar` security-model change). Status flip approved by the user ("it is done", 2026-10-22).
+
+## 194. The Mac app's icon is Oni's mark too (2026-10-22)
+
+- **Asked for (user):** "mac icon too". `/Applications/Oni.app` is an unsigned Tauri bundle reading `Contents/Resources/icon.icns`; its icon, and every file in `dashboard/src-tauri/icons/`, was the Tauri logo (STEPS.md 192 left it, the ask then was the iPhone only).
+- **Done:** `scripts/make_mac_icon.sh` renders `ios/Scripts/oni-app-icon.svg` (the same SVG as the iPhone icon, so one drawing for both), shapes it into the standard macOS icon (824 px rounded square, 184 px corners, transparent margin) and runs `tauri icon`, which rewrote the whole `src-tauri/icons/` set. `tauri icon` also writes Android/iOS sets and a 64x64 this app never uses; the script deletes them. The new `icon.icns` was copied into `/Applications/Oni.app` and the release bundle under `src-tauri/target/` (no code signature to break: the bundle is unsigned) and both were touched so Finder re-reads them.
+- **Caveat:** macOS caches icons. The Dock keeps the old one until the app is quit and reopened, and Finder may need `killall Dock Finder` (or a logout) if it still shows the old one. The next `tauri build` uses the new set on its own.
+- **Not done:** the running app was not restarted, and nothing is committed (the standing rule: the user commits, or asks).

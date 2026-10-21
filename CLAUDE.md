@@ -1293,8 +1293,8 @@ See PLAN.md.
 - **iPhone polish after Phase 32, not a numbered phase (STEPS.md 192):** a
   top-left slide-in menu replaces the tab bar (Oni, Calendar, Board, Memory,
   Vault, Search, Settings); a read-only Calendar screen; Oni's mark as SVG for
-  the app icon and in-app logo (the Tauri icon is gone from the phone; the Mac
-  `Oni.app` icon is still Tauri's). **Security-model change:** `GET /calendar`
+  the app icon and in-app logo (the Tauri icon is gone from the phone, and
+  from the Mac `Oni.app` and the Tauri icon set too, STEPS.md 194). **Security-model change:** `GET /calendar`
   is now readable from the phone (was loopback-only); add/edit/delete are still
   loopback-only (`tests/test_calendar_access.py`).
 
