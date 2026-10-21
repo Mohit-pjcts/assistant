@@ -123,7 +123,7 @@ describe("event helpers", () => {
   });
 
   it("gives each course in a list its own hue", () => {
-    const codes = ["AILT9009", "CCCH9053", "COMP2119", "COMP2501", "MATH2014"];
+    const codes = ["AILT9009", "CCHU9053", "COMP2119", "COMP2501", "MATH2014"];
     const hues = codes.map((c) => courseHue(c, codes));
     expect(new Set(hues).size).toBe(codes.length);
     expect(courseHue("COMP2119", codes)).toBe(courseHue("COMP2119", codes));

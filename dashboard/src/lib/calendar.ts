@@ -66,6 +66,7 @@ const KIND_ORDER: Record<CalendarEvent["kind"], number> = {
   deadline: 1,
   tutorial: 2,
   class: 3,
+  study: 4,
 };
 
 /** Chronological, all-day (no time) entries first. */

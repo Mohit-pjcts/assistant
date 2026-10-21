@@ -100,6 +100,10 @@ nova-superagent-agent-main.zip
 ios/OniCore/.build/
 ios/OniCore/.swiftpm/
 
+# Oni promo video: the finished video is linked from the README, so the whole
+# working directory (sources, assets, renders) stays local.
+video/
+
 # iPhone app: the .xcodeproj is generated from ios/project.yml; Local.xcconfig is personal.
 ios/Oni.xcodeproj/
 ios/Config/Local.xcconfig

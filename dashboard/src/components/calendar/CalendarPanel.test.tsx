@@ -221,6 +221,25 @@ describe("CalendarPanel", () => {
     );
   });
 
+  it("keeps study blocks in their own group, apart from classes", async () => {
+    const block = event({
+      id: "study",
+      date: "2026-10-29",
+      title: "Study: PA1 Task B",
+      kind: "study",
+      start_time: "14:00",
+      end_time: "17:00",
+    });
+    mockedFetchCalendar.mockResolvedValue({ ...sample, events: [...sample.events, block] });
+    const user = await renderPanel();
+    const cell = screen.getByTestId("calendar-day-2026-10-29");
+    expect(within(cell).getByTestId("calendar-chip")).toHaveAttribute("data-kind", "study");
+    await user.click(screen.getByRole("button", { name: "Classes" }));
+    expect(within(cell).getAllByTestId("calendar-chip")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Study" }));
+    expect(within(cell).queryAllByTestId("calendar-chip")).toHaveLength(0);
+  });
+
   it("shows the dates the notes do not give, and where the data came from", async () => {
     await renderPanel();
     expect(screen.getByText("No date yet")).toBeInTheDocument();

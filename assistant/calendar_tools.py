@@ -43,7 +43,7 @@ class CalendarEventSpec(BaseModel):
     date: str = Field(description="YYYY-MM-DD. The first day, for a multi-day window.")
     kind: str = Field(
         default="exam",
-        description="exam | deadline | class | tutorial. Use exam for tests/finals/quizzes, "
+        description="exam | deadline | class | tutorial | study. Use exam for tests/finals/quizzes, "
         "deadline for assignments and submissions.",
     )
     course: str = Field(default="", description="Course code such as COMP2119, if there is one.")
@@ -77,7 +77,7 @@ def oni_calendar_list(
         from_date: YYYY-MM-DD, inclusive. Default: today.
         to_date: YYYY-MM-DD, inclusive. Default: no limit.
         course: Only this course code, e.g. COMP2119.
-        kind: Only exam | deadline | class | tutorial.
+        kind: Only exam | deadline | class | tutorial | study.
     """
     try:
         start = date.fromisoformat(from_date) if from_date else date.today()

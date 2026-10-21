@@ -1408,7 +1408,7 @@ export async function fetchClaudeCodeSession(sessionId: string): Promise<ClaudeC
 // deadlines parsed from the vault's timetable / deadlines / tutorials notes
 // on every request, so the notes stay the one source of truth. Loopback-only
 // on the backend (server.py), like /history/trace.
-export type CalendarEventKind = "class" | "tutorial" | "exam" | "deadline";
+export type CalendarEventKind = "class" | "tutorial" | "study" | "exam" | "deadline";
 
 export interface CalendarEvent {
   id: string;

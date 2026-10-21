@@ -64,11 +64,6 @@ TIMETABLE_SUFFIX = "— Class Timetable.md"
 DEADLINES_SUFFIX = "— Deadlines.md"
 TUTORIALS_SUFFIX = "— Tutorials.md"
 
-# The timetable note itself documents this: the HKU calendar spells the
-# course CCHU9053, the rest of the vault (and the Deadlines table) CCCH9053.
-# Normalised here so one course is one filter chip / one colour.
-_COURSE_ALIASES = {"CCHU9053": "CCCH9053"}
-
 _MONTHS = {
     m: i
     for i, m in enumerate(
@@ -108,7 +103,9 @@ _HEADER_KEYS = {
     "kind": "kind",
 }
 
-KINDS = ("class", "tutorial", "exam", "deadline")
+# "study" is the user's own self-scheduled work blocks (the study plan), kept
+# apart from the timetable's classes and tutorials.
+KINDS = ("class", "tutorial", "study", "exam", "deadline")
 
 
 @dataclass
@@ -246,8 +243,7 @@ def _find_time(text: str) -> tuple[str | None, str | None]:
 
 
 def _course_code(raw: str) -> str:
-    code = _clean(raw).upper()
-    return _COURSE_ALIASES.get(code, code)
+    return _clean(raw).upper()
 
 
 def _is_tbc(text: str) -> bool:

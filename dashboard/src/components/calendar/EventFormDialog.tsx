@@ -26,6 +26,7 @@ const KIND_OPTIONS: { value: CalendarEventKind; label: string }[] = [
   { value: "deadline", label: "Deadline" },
   { value: "class", label: "Class" },
   { value: "tutorial", label: "Tutorial" },
+  { value: "study", label: "Study" },
 ];
 
 export function emptyForm(date: string): EventFormValue {

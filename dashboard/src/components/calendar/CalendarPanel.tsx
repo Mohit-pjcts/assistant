@@ -46,13 +46,14 @@ import {
 } from "@/lib/calendar";
 import { cn } from "@/lib/utils";
 
-// What the three toggles switch. Exams and deadlines share one toggle: the
+// What the four toggles switch. Exams and deadlines share one toggle: the
 // question the view answers is "what's due", not which of the two it is.
-type Group = "class" | "tutorial" | "due";
+type Group = "class" | "tutorial" | "study" | "due";
 
 const GROUPS: { value: Group; label: string }[] = [
   { value: "class", label: "Classes" },
   { value: "tutorial", label: "Tutorials" },
+  { value: "study", label: "Study" },
   { value: "due", label: "Deadlines & exams" },
 ];
 
@@ -84,7 +85,10 @@ function relativeDay(from: string, to: string): string {
 // printed. A session whose slot is not in the vault is dashed.
 function EventChip({ event, color }: { event: CalendarEvent; color: string }) {
   const marker = event.kind === "deadline" ? "◆ " : event.kind === "exam" ? "● " : "";
-  const time = event.kind === "class" || event.kind === "tutorial" ? event.start_time : null;
+  const time =
+    event.kind === "class" || event.kind === "tutorial" || event.kind === "study"
+      ? event.start_time
+      : null;
   return (
     <span
       data-testid="calendar-chip"
@@ -97,7 +101,7 @@ function EventChip({ event, color }: { event: CalendarEvent; color: string }) {
       )}
       style={{
         borderLeftColor: color,
-        backgroundColor: `color-mix(in oklab, ${color} ${event.kind === "class" ? 12 : 22}%, transparent)`,
+        backgroundColor: `color-mix(in oklab, ${color} ${event.kind === "class" || event.kind === "study" ? 12 : 22}%, transparent)`,
       }}
     >
       {marker}
@@ -202,6 +206,7 @@ export function CalendarPanel() {
   const [shown, setShown] = useState<Record<Group, boolean>>({
     class: true,
     tutorial: true,
+    study: true,
     due: true,
   });
   const [hiddenCourses, setHiddenCourses] = useState<Set<string>>(new Set());

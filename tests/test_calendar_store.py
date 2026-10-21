@@ -50,7 +50,7 @@ DEADLINES = """\
 | Fri 18 Sep 2026 (time not stated) | AILT9009 | Group Proposal (~300 words, one per group) | 20% |
 | Week of Mon 2 Nov – Fri 6 Nov 2026 (probably Fri 6 Nov; time not stated) | AILT9009 | Individual AI Portfolio and Group Poster Project | 20% and 40% |
 | Thu 26 Nov 2026 and Mon 30 Nov 2026 (in class) | COMP2501 | Optional in-class project presentations | bonus |
-| Fri 4 Dec 2026, 17:00 (hard copy) and 23:59 (Turnitin soft copy) | CCCH9053 | Case Study final report, group, 6,000 words. The brief says 17:00. | 20% |
+| Fri 4 Dec 2026, 17:00 (hard copy) and 23:59 (Turnitin soft copy) | CCHU9053 | Case Study final report, group, 6,000 words. The brief says 17:00. | 20% |
 
 ## Events with no date in the materials
 - **MATH2014 final exam** (50%): "in the exam period".
@@ -109,12 +109,11 @@ def test_weekly_rows_expand_to_one_event_per_session_minus_excluded_weeks(vault)
     assert data.warnings == []  # the Sessions column agrees with the expansion
 
 
-def test_the_calendar_course_code_alias_is_normalised(vault):
+def test_a_weekly_class_row_expands_to_its_session_dates(vault):
     vault("Semester 3 — Class Timetable.md", TIMETABLE)
     data = calendar_store.load_calendar()
-    ccch = [e for e in data.events if e.course == "CCCH9053"]
-    assert [e.date for e in ccch] == ["2026-09-02", "2026-09-16"]
-    assert not any(e.course == "CCHU9053" for e in data.events)
+    cchu = [e for e in data.events if e.course == "CCHU9053"]
+    assert [e.date for e in cchu] == ["2026-09-02", "2026-09-16"]
 
 
 def test_the_by_weekday_summary_tables_are_not_counted_twice(vault):
@@ -183,7 +182,7 @@ def test_two_dates_joined_by_and_are_two_events(vault):
 def test_a_long_item_keeps_a_short_title_and_the_full_text_as_detail(vault):
     vault("Semester 3 — Deadlines.md", DEADLINES)
     data = calendar_store.load_calendar()
-    report = next(e for e in data.events if e.course == "CCCH9053")
+    report = next(e for e in data.events if e.course == "CCHU9053")
     assert report.title == "Case Study final report, group, 6,000 words"
     assert report.detail == "Case Study final report, group, 6,000 words. The brief says 17:00."
     assert report.start_time == "17:00"  # first time only; "23:59" is in the parenthetical
@@ -398,6 +397,25 @@ def test_a_multi_day_window_and_a_tbc_time_round_trip(vault):
     assert (events["Project week"].date, events["Project week"].end_date) == ("2026-11-02", "2026-11-06")
     assert events["Project week"].kind == "deadline"  # the default
     assert events["MATH2014 Final"].start_time is None
+
+
+def test_a_study_block_is_its_own_kind_not_a_class(vault):
+    calendar_store.add_events(
+        [
+            {
+                "title": "Study: PA1 Task A",
+                "date": "2026-10-25",
+                "kind": "study",
+                "course": "COMP2119",
+                "start_time": "14:00",
+                "end_time": "17:00",
+            }
+        ]
+    )
+    data = calendar_store.load_calendar()
+    [block] = [e for e in data.events if e.title == "Study: PA1 Task A"]
+    assert (block.kind, block.start_time, block.end_time) == ("study", "14:00", "17:00")
+    assert data.warnings == []
 
 
 def test_a_bad_event_adds_nothing_and_names_the_culprit(vault):
