@@ -2,11 +2,12 @@
 # One command for everything: Stage's panel and local API (http://127.0.0.1:3000) and the overlay (menu bar), together.
 #   bash scripts/start.sh            normal: the overlay never appears in screenshots or screen recordings
 #   bash scripts/start.sh --record   recording a demo: cursors, widgets and drawings show up in screen recordings
-# Ctrl+C stops both. Running it again first stops a Stage that is already running (only Stage: whatever else might be
+# It also starts the Cua Driver daemon (scripts/daemon.sh). Ctrl+C stops all three. Running it again first stops a Stage that is already running (only Stage: whatever else might be
 # listening on the port is left alone, and the start fails loudly instead).
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export PATH="$HOME/.bun/bin:$PATH"
+# ~/.local/bin is where cua-driver lives; an app launched from Spotlight/Dock does not have it on its PATH
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
 PORT="${PORT:-3000}"
 REC=""; [[ "${1:-}" == "--record" ]] && REC="--record"
 APP="overlay/build/Stage Overlay.app"
@@ -26,7 +27,15 @@ if [[ ! -x "$BIN" || overlay/Overlay.swift -nt "$BIN" ]]; then
   bash scripts/build-overlay.sh
 fi
 
-stop() { pkill -f "Stage Overlay.app/Contents/MacOS/StageOverlay" 2>/dev/null; kill "$PANEL" 2>/dev/null; exit 0; }
+# The Cua Driver daemon Stage's agents act through: started with Stage, stopped with it, so it is never started by hand.
+# daemon.sh restarts it with our tuning (and so also replaces one left over from a crashed run). It runs in the
+# background because it waits up to 20 s for a permission grant, which must not hold up the panel.
+if [[ "${STAGE_NO_CUA_DAEMON:-}" == "" ]]; then
+  bash scripts/daemon.sh >/dev/null 2>&1 &
+fi
+
+stop_cua() { cua-driver stop >/dev/null 2>&1; pkill -f 'CuaDriver.app/Contents/MacOS/cua-driver' 2>/dev/null; }
+stop() { pkill -f "Stage Overlay.app/Contents/MacOS/StageOverlay" 2>/dev/null; stop_cua; kill "$PANEL" 2>/dev/null; exit 0; }
 trap stop INT TERM
 
 rm -f "$SERVER_FILE"

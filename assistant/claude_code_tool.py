@@ -98,10 +98,34 @@ _CLAUDE_BIN = shutil.which("claude") or str(_HOME / ".local" / "bin" / "claude")
 _KEYS_TO_STRIP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 
+# When this backend is started from inside a Claude Code host (the Claude
+# desktop app, an IDE extension, another claude session), its environment
+# carries that host's markers - CLAUDECODE, CLAUDE_CODE_ENTRYPOINT=
+# claude-desktop, CLAUDE_CODE_CHILD_SESSION, a messaging socket, and so on.
+# Passed through, the nested session records itself as entrypoint
+# "claude-desktop", and claude_code_sessions.list_sessions (which keeps only
+# "sdk-cli") silently drops it from the dashboard panel (seen 2026-10-22: the
+# sessions ran fine, the panel showed none of them). Every inherited marker
+# is removed and the entrypoint is pinned, so the tag no longer depends on
+# how the backend happened to be launched.
+_HOST_ENV_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK_", "CLAUDE_PREVIEW_")
+_HOST_ENV_NAMES = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
+# Not host markers: where Claude Code keeps its config, and a deliberately
+# configured OAuth token. Stripping these would change which login it uses.
+_HOST_ENV_KEEP = ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+SESSION_ENTRYPOINT = "sdk-cli"
+
+
 def _subscription_env() -> dict:
-    env = dict(os.environ)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _HOST_ENV_KEEP
+        or not (key in _HOST_ENV_NAMES or key.startswith(_HOST_ENV_PREFIXES))
+    }
     for key in _KEYS_TO_STRIP:
         env.pop(key, None)
+    env["CLAUDE_CODE_ENTRYPOINT"] = SESSION_ENTRYPOINT
     return env
 
 

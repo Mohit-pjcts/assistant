@@ -243,6 +243,11 @@ fn stop_stage(mut child: Child) {
     let _ = Command::new("pkill")
         .args(["-f", "Stage Overlay.app/Contents/MacOS/StageOverlay"])
         .status();
+    // The Cua Driver daemon (started by start.sh, also through `open`) gets the
+    // same sweep, in case the script was force-killed before its trap ran.
+    let _ = Command::new("pkill")
+        .args(["-f", "CuaDriver.app/Contents/MacOS/cua-driver"])
+        .status();
 }
 
 fn kill_managed_processes(app_handle: &tauri::AppHandle) {
