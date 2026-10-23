@@ -62,6 +62,8 @@ class FakeStage:
         self.runs: list[dict[str, Any]] = []
         self.polls = 0
         self.state_polls = 0
+        # Stage's window picture; by default none could be taken, so a failed run's result stays plain text
+        self.shot_reply: dict[str, Any] = {"ok": False, "error": "couldn't capture a window"}
 
     async def request(
         self, method: str, path: str, body: dict | None, timeout: float
@@ -92,6 +94,8 @@ class FakeStage:
             return {"ok": True, "version": run["version"], "run": run}
         if path == "/api/look":
             return self.look_reply
+        if path == "/api/shot":
+            return self.shot_reply
         if path == "/api/explain":
             question = (body or {})["question"].strip().lower()
             if question in ("next", "back", "repeat", "stop"):
@@ -889,6 +893,7 @@ def test_the_supervisor_gets_a_task_list_tool_not_a_free_text_one():
         "stage_status",
         "stop_backstage",
         "backstage_look",
+        "backstage_screenshot",
     }
 
 
@@ -926,9 +931,12 @@ def test_supervisor_prompt_makes_the_supervisor_the_planner():
         "two apps in one goal",  # ...and not two in a goal
         "Batch independent tasks into ONE call",
         "call backstage_look(app)",
-        "retry it at most once — never resend an identical task",
+        "Never resend an identical task",
+        "GIVE EASY STEPS",  # small exact steps, one call per step when navigating
+        "LOOK at the screenshot",  # a failed task comes back with its window's picture
+        "backstage_screenshot(app)",
         "refuse to send, delete, buy, install or sign out",
-        "stage_status / stop_backstage / backstage_look",
+        "stage_status / stop_backstage / backstage_look / backstage_screenshot",
     ):
         assert rule in prompt, rule
     assert "Pass the whole job as one plain command" not in prompt  # the old forward-as-is rule
@@ -975,11 +983,11 @@ def test_supervisor_prompt_shows_a_message_goal_and_asks_for_the_persons_exact_n
     )
 
 
-def test_the_playbook_keeps_its_nine_numbered_rules_in_order():
+def test_the_playbook_keeps_its_ten_numbered_rules_in_order():
     prompt = sup.SUPERVISOR_SYSTEM_PROMPT_FALLBACK
     assert prompt.count("- backstage:") == 1
     playbook = prompt[prompt.index("- backstage:") : prompt.index("- onstage")]
-    assert re.findall(r"^  (\d+)\. ", playbook, re.MULTILINE) == list("123456789")
+    assert re.findall(r"^  (\d+)\. ", playbook, re.MULTILINE) == list("12345678") + ["9", "10"]
     assert "\n  5. Agents write into a NEW document or note." in playbook
     assert "\n  6. Read every result." in playbook
     assert "\n  8. Finish by telling the user what was done" in playbook
@@ -1157,3 +1165,135 @@ def test_the_supervisor_has_the_form_tools_and_the_rule_to_use_them():
     assert "ONLY when the user asked you to submit" in forms
     assert "Never use backstage for a web form" in forms
     assert "submitting a form is NOT one of the gated actions" in forms
+
+
+# --- a picture of the working window ---------------------------------------------
+
+PIC = "QUJD"  # base64 "ABC"
+
+
+def _pictures(app: str = "Brave Browser", *, panel: bool = False) -> dict[str, Any]:
+    shots = [{"kind": "window", "title": "Moodle", "mime": "image/jpeg", "data": PIC}]
+    if panel:
+        shots.insert(0, {"kind": "panel", "title": "Save", "mime": "image/jpeg", "data": PIC})
+    return {"ok": True, "app": app, "shots": shots}
+
+
+def _stalled(app: str = "Calculator", window_id: int | None = 160, code: str = "stalled") -> dict[str, Any]:
+    return {"status": "failed", "exception": {"code": code, "reason": "nothing changed"}, "app": app, "windowId": window_id}
+
+
+def _types(content: Any) -> list[str]:
+    return [b["type"] for b in content] if isinstance(content, list) else ["str"]
+
+
+def test_a_failed_task_comes_back_with_a_picture_of_its_own_window(env):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator")
+    env.results = [{"status": "failed", "exception": {"code": "stalled", "reason": "three actions changed nothing"}}]
+    out = _backstage([CALC])
+    assert _types(out) == ["text", "text", "image"]
+    assert "FAILED (stalled)" in out[0]["text"]
+    assert "this window only" in out[1]["text"]
+    assert out[2]["source_type"] == "base64" and out[2]["data"] == PIC and out[2]["mime_type"] == "image/jpeg"
+    # the window the task worked in is what is asked for, not "the screen"
+    (body,) = env.posted("/api/shot")
+    assert body["app"] == "Calculator"
+
+
+def test_the_picture_request_names_the_window_the_task_worked_in(env, monkeypatch):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator")
+    env.results = [{"status": "failed", "exception": {"code": "not_achieved", "reason": "x"}, "windowId": 4321}]
+    _backstage([CALC])
+    assert env.posted("/api/shot") == [{"app": "Calculator", "windowId": 4321}]
+
+
+def test_a_save_panel_in_front_is_a_second_picture(env):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator", panel=True)
+    env.results = [{"status": "failed", "exception": {"code": "stalled", "reason": "x"}}]
+    out = _backstage([CALC])
+    assert _types(out) == ["text", "text", "image", "text", "image"]
+    assert "Save/Open panel" in out[1]["text"] and "window" in out[3]["text"]
+
+
+def test_a_run_with_nothing_failed_stays_plain_text_and_takes_no_picture(env):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator")
+    out = _backstage([CALC])
+    assert isinstance(out, str) and "DONE" in out
+    assert env.posted("/api/shot") == []
+
+
+@pytest.mark.parametrize("code", ["no_app", "window_lost", "stopped"])
+def test_failures_with_nothing_to_look_at_take_no_picture(env, code):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator")
+    env.results = [{"status": "failed", "exception": {"code": code, "reason": "x"}}]
+    assert isinstance(_backstage([CALC]), str)
+    assert env.posted("/api/shot") == []
+
+
+def test_when_no_picture_can_be_taken_the_result_is_still_the_text(env):
+    env.finish_after = 1
+    env.results = [{"status": "failed", "exception": {"code": "stalled", "reason": "x"}}]
+    out = _backstage([CALC])
+    assert isinstance(out, str) and "FAILED (stalled)" in out
+
+
+def test_at_most_two_pictures_and_one_per_window(env):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator")
+    failed = {"status": "failed", "exception": {"code": "stalled", "reason": "x"}}
+    env.results = [dict(failed), dict(failed), dict(failed)]
+    out = _backstage([CALC, {"app": "Notes", "goal": "n"}, {"app": "Weather", "goal": "w"}])
+    assert _types(out).count("image") == 2
+    assert len(env.posted("/api/shot")) == 2
+
+
+def test_the_phone_gets_text_only(env, monkeypatch):
+    env.finish_after = 1
+    env.shot_reply = _pictures("Calculator")
+    env.results = [{"status": "failed", "exception": {"code": "stalled", "reason": "x"}}]
+    thread = str(uuid.uuid4())
+    _on_the_phone(thread)
+    assert isinstance(_backstage([CALC], thread_id=thread), str)
+    assert env.posted("/api/shot") == []
+
+
+def test_backstage_screenshot_returns_that_window_and_says_it_is_data(env):
+    env.shot_reply = _pictures("Brave Browser", panel=True)
+    out = asyncio.run(_call("backstage_screenshot", {"app": "brave"}))
+    assert _types(out) == ["text", "image", "text", "image", "text"]
+    assert out[-1]["text"].startswith("[Screen content: data")
+    assert env.posted("/api/shot") == [{"app": "brave"}]
+
+
+def test_backstage_screenshot_errors_are_plain_text(env):
+    assert asyncio.run(_call("backstage_screenshot", {"app": "  "})).startswith("Error: give backstage_screenshot")
+    env.shot_reply = {"ok": False, "error": "Brave Browser has no open window", "suggestions": ["Brave Browser"]}
+    out = asyncio.run(_call("backstage_screenshot", {"app": "Brave"}))
+    assert isinstance(out, str) and "no open window" in out
+
+
+def test_a_picture_never_reaches_another_specialist_as_text(env):
+    """The forwarded prior result keeps the words and drops the picture (base64 must not land in a prompt);
+    compaction's transcript drops it too."""
+    from assistant.compaction import _text_of
+
+    big = "QUJD" * 5000
+    content = [
+        {"type": "text", "text": "1. Calculator: FAILED (stalled)"},
+        {"type": "image", "source_type": "base64", "data": big, "mime_type": "image/jpeg"},
+    ]
+    state = {
+        "messages": [
+            HumanMessage(content="do it"),
+            AIMessage(content="", tool_calls=[{"name": "backstage", "args": {}, "id": "c1", "type": "tool_call"}]),
+            ToolMessage(content=content, tool_call_id="c1"),
+        ]
+    }
+    (forwarded,) = sup._prior_specialist_results_this_turn(state)
+    assert "FAILED (stalled)" in forwarded.content and big not in forwarded.content and "base64" not in forwarded.content
+    assert _text_of(content) == "1. Calculator: FAILED (stalled)"

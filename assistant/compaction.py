@@ -80,6 +80,17 @@ _SUMMARY_PROMPT_FALLBACK = (
 )
 
 
+def _text_of(content: object) -> str:
+    """A message's text only (a block list's text blocks; images and other blocks left out). memory_extraction.text_only_content
+    is the same thing, but it imports this module."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b if isinstance(b, str) else b.get("text", "") for b in content if isinstance(b, str) or (isinstance(b, dict) and b.get("type") == "text")]
+        return "\n".join(p for p in parts if p)
+    return str(content)
+
+
 def is_genuine_human_turn(message: AnyMessage) -> bool:
     """A real user-turn boundary — not a synthetic HumanMessage the graph
     itself inserts — Phase 7 Part B's recalled-facts injection
@@ -171,10 +182,10 @@ def compact_history_node(state: dict[str, Any]) -> dict[str, Any]:
     to_summarize = messages[:keep_from]
     kept = messages[keep_from:]
 
+    # text only: a tool result can carry a window screenshot (base64), which the
+    # summarizer must never be handed as text (the old repr() of a block list)
     transcript = "\n".join(
-        f"{type(m).__name__}: "
-        f"{m.content if isinstance(m.content, str) else m.content!r}"
-        for m in to_summarize
+        f"{type(m).__name__}: {_text_of(m.content)}" for m in to_summarize
     )
     model = ChatAnthropic(model=SUMMARIZER_MODEL_NAME, thinking={"type": "disabled"})
     summary_prompt = prompts.get_prompt(

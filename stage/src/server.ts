@@ -17,6 +17,7 @@ import { perceive } from "./perceive.ts";
 import { askOni, localControl, speakable, stopOni, viaOni } from "./hotkey.ts";
 import { route } from "./router.ts";
 import { agentLabel, spokenSummary, tidyAnswer } from "./results.ts";
+import { windowShots } from "./shot.ts";
 import { LOCKED_MESSAGE, checkUrl, resolveAppStrict, screenLocked, suggestApps, windowsOf } from "./apps.ts";
 import { AgentBrowser, type FieldAnswer } from "./webform.ts";
 import { fromThisComputer } from "./localonly.ts";
@@ -69,7 +70,7 @@ function summary(r: RunRecord) {
     status: r.status, outcome: r.outcome, error: r.error, startedAt: r.startedAt, version: r.version, totals: r.totals,
     tasks: r.tasks.map((t) => ({
       id: t.id, agent: t.agent, app: t.app, goal: t.goal, status: t.status, now: t.now, answer: t.answer,
-      exception: t.exception, steps: t.steps, seconds: t.seconds, llmCalls: t.llmCalls,
+      exception: t.exception, steps: t.steps, seconds: t.seconds, llmCalls: t.llmCalls, windowId: t.windowId,
     })),
   };
 }
@@ -544,6 +545,29 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
           return json({ ok: true, app: app.name, window: win.title, lines, truncated: truncated || obs.truncated });
         } catch (e: any) {
           return json({ ok: false, error: `couldn't read ${asked}: ${String(e?.message ?? e).slice(0, 200)}` });
+        }
+      }
+
+      // A picture of ONE app's working window, for Oni to look at when a task stalls or fails: only that window (a window
+      // is captured by its id, so what covers it or lies behind it is not in the picture), plus the Save / Open panel in
+      // front of it when there is one. {app, windowId?}: the window a task worked in, else the app's biggest. Read-only
+      // like /api/look, never blocked by a running job.
+      if (req.method === "POST" && url.pathname === "/api/shot") {
+        const b = await body(req);
+        const asked = typeof b?.app === "string" ? b.app.trim() : "";
+        if (!asked) return json({ ok: false, error: "send {app: string, windowId?: number}" }, 400);
+        if (asked.length > MAX_APP) return json({ ok: false, error: `app too long (max ${MAX_APP} characters)` }, 400);
+        if (await isLocked()) return json({ ok: false, error: LOCKED_MESSAGE, locked: true });
+        try {
+          const apps = await driver.listApps();
+          const app = resolveAppStrict(apps, asked);
+          if (!app) return json({ ok: false, ...noSuchApp(apps, [asked]) });
+          const windowId = Number.isInteger(b?.windowId) ? Number(b?.windowId) : undefined;
+          const shots = await windowShots(driver, app.name, windowId);
+          if (!shots.length) return json({ ok: false, error: `couldn't capture a ${app.name} window (none open on this desktop, minimised, or the capture is refused)` });
+          return json({ ok: true, app: app.name, shots });
+        } catch (e: any) {
+          return json({ ok: false, error: `couldn't capture ${asked}: ${String(e?.message ?? e).slice(0, 200)}` });
         }
       }
 

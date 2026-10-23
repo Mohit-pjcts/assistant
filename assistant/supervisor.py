@@ -406,6 +406,19 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "run at the same time; tasks in the same app run one after another, in "
     "your order. When a step needs an earlier result, wait for it and put "
     "the actual value into the next call.\n"
+    "  3b. GIVE EASY STEPS. An agent gets stuck on a goal that makes it "
+    "search the screen or choose between things; it succeeds on a step "
+    "it can do by looking at ONE visible thing. So when a job navigates a "
+    "site or app you can't see, work in small steps: one backstage call "
+    "per step, each goal naming the exact link, button, field or text to "
+    "use ('click the link \'Lecture 1\' in the COMP2501 course page', not "
+    "'find the lecture 1 notes'), one action per step, no 'figure out'. "
+    "Before a step you can't name exactly, look: backstage_look(app) for "
+    "the window's text, backstage_screenshot(app) when you need to SEE "
+    "it (layout, icons, an unlabeled control). After a step that matters, "
+    "check the result before the next one. Several tasks in one call are "
+    "for independent jobs, or a chain whose every step you can already "
+    "name exactly.\n"
     "  4. Agents answer in one short line. To read a list, a page or a "
     "whole window, call backstage_look(app): it returns the window's "
     "visible text without touching anything. Also use it to see an app's "
@@ -416,9 +429,15 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "of my Groceries note'), and they can't select all or replace a whole "
     "document — to correct something an agent wrote, have it write a new "
     "one with the full corrected text.\n"
-    "  6. Read every result. A failed task comes with its reason and a "
-    "hint: change the step (smaller, more explicit, another app or route) "
-    "and retry it at most once — never resend an identical task. Blind "
+    "  6. Read every result. A task that stalls or fails comes back with "
+    "its reason, a hint AND a screenshot of the window it was working in "
+    "(that window only: never the whole screen). LOOK at the screenshot: "
+    "find what the agent could not (a popup, a login, a different page, "
+    "an unexpected dialog, a button under another name) and drive the job "
+    "on yourself with a NEW, smaller, exact step for what you now see; "
+    "or deal with what is blocking it first (close the popup). Never "
+    "resend an identical task, and after two failed attempts at one step "
+    "stop and tell the user what you see and what is in the way. Blind "
     "spots: Spotify (nothing readable), App Store and Music search "
     "results, menus, date pickers, keyboard shortcuts.\n"
     "  7. The agents refuse to send, delete, buy, install or sign out "
@@ -441,17 +460,35 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "only if the chat shows it with a NEW time (after you started): an "
     "older, identical one ('hi' from yesterday) proves nothing — if the "
     "run failed, say so rather than pointing at it.\n"
+    "  10. A macOS Save or Open panel left open in an app (Brave's 'This "
+    "page wants to save', a document's Save As): one backstage task in "
+    "THAT app, goal: 'complete the open Save As dialog so the file saves "
+    "into <absolute folder path>' — or '...as <absolute folder>/<file "
+    "name>' to also name it. Always an absolute path (or ~/...), in "
+    "double quotes when any part has a space or a bracket; a folder "
+    "that does not exist is refused, and an existing file is never "
+    "replaced. Stage does the panel in code (it fronts the app for a "
+    "moment: real clicks down the folders, the name pasted, Return, then "
+    "it checks the file is on disk), so never ask an agent to click "
+    "through its folder list. The folder must be under the home folder. "
+    "The same step also CHOOSES a file in an Open panel (a site's 'Choose "
+    "file' / upload button opens one): once that panel is open, one task "
+    "in that app, goal: 'in the open file chooser, choose the file "
+    "<absolute path to the file, in double quotes>' — the file must exist; "
+    "Stage clicks down to it, selects it and opens it.\n"
     "- onstage (Stage's screen explainer): answers a question about what "
     "is on the Mac's screen RIGHT NOW ('what does this button do', 'how do "
     "I make a pivot table here') — speaks the answer and draws on the real "
     "controls; 'how do I…' becomes a lesson the user steps through by "
     "saying 'next' (send 'next'/'back'/'repeat'/'stop' to onstage as-is). "
     "Never clicks or types; never from the iPhone channel.\n"
-    "stage_status / stop_backstage / backstage_look: Stage's state and "
-    "recent runs (also hotkey runs, or one still going), stopping "
-    "Backstage's agents — call stop_backstage at once when the user says "
-    "stop — and reading what an app's window shows, untouched "
-    "(backstage_look).\n"
+    "stage_status / stop_backstage / backstage_look / backstage_screenshot: "
+    "Stage's state and recent runs (also hotkey runs, or one still going), "
+    "stopping Backstage's agents — call stop_backstage at once when the "
+    "user says stop — reading what an app's window shows, untouched "
+    "(backstage_look), and a picture of that one window "
+    "(backstage_screenshot; costs more context than the text, so use the "
+    "text first and the picture when it is not enough).\n"
     "- web forms — form_open(url), form_read, form_fill, form_press, "
     "form_login: Google Forms, Microsoft Forms or any page of questions, "
     "filled in the agent's OWN browser (separate from the user's Brave; "
@@ -788,7 +825,8 @@ def _prior_specialist_results_this_turn(state: GraphState) -> list[AnyMessage]:
         origin = tool_call_names.get(m.tool_call_id)
         if origin not in _SPECIALIST_TOOL_NAMES:
             continue
-        content_text = m.content if isinstance(m.content, str) else str(m.content)
+        # text only: a picture is for the supervisor, and base64 must never be pasted into another specialist's prompt
+        content_text = text_only_content(m.content)
         forwarded.append(
             HumanMessage(
                 content=(
@@ -1585,7 +1623,7 @@ def _make_backstage_tool() -> BaseTool:
                 )
             ),
         ] = "",
-    ) -> str:
+    ) -> Any:  # text, or text plus window pictures of tasks that stalled or failed
         return await _run_delegation(
             stage.BACKSTAGE_ACTION,
             lambda: stage.run_backstage_tasks([t.model_dump() for t in tasks], tool_call_id, purpose),
@@ -1632,8 +1670,10 @@ _BACKSTAGE_TOOL_DESCRIPTION = (
     "ending with 'and tell me …' when you need something back. Tasks in "
     "different apps run at the same time; tasks in the same app run one "
     "after another, in order. Returns each task's result (what the agent "
-    "read) or why it failed, with a hint for fixing the step. Runs at once, "
-    "no confirmation."
+    "read) or why it failed, with a hint for fixing the step and a "
+    "screenshot of the window it was working in. Prefer small exact steps "
+    "(one call per step) when you are navigating something you can't see. "
+    "Runs at once, no confirmation."
 )
 _ONSTAGE_TOOL_DESCRIPTION = (
     "Onstage: answer a question about what's on the Mac's screen right now "

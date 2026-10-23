@@ -1,6 +1,9 @@
 // Plan compilers: turn common goals into exact steps IN CODE (no LLM, no cost, no latency).
 // "Code computes facts; the classifier only chooses" (the awlevin principle). Anything not covered returns null,
 // and the agent falls back to a cached plan, then (optionally) to an LLM planner, then to jev on its own.
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname } from "node:path";
 import type { Item, PlanStep } from "./contracts.ts";
 
 // ---------- shared text helpers ----------
@@ -667,8 +670,51 @@ export function withoutAppSuffix(app: string, goal: string): string {
   return goal.replace(new RegExp(`[,\\s]+(?:in|on|using|with|via)\\s+(?:the\\s+)?${name}(?:\\s+app)?\\s*([.?!]*)\\s*$`, "i"), "$1");
 }
 
+/**
+ * a goal that finishes an open macOS Save / Open panel at a path ("complete the Save As dialog so the file saves into
+ * /Users/me/Documents/x"): ONE save_dialog step (savedialog.ts does it in code). The panel must be on screen (its Save and
+ * Cancel buttons are among the controls) or named by the goal; the path must be absolute or ~/ (quoted, or running to the
+ * end / to a joining word), because a folder named only by words ("the MATH2014 folder") is a guess.
+ */
+const isDir = (p: string) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+const expandHome = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? homedir() + p.slice(1) : p);
+
+/**
+ * An unquoted absolute path in a goal. A name can hold spaces and brackets ("Lec01-Course overview (Moodle).pdf") and the
+ * sentence goes on after the path ("/x/y (you can press ...), then click Save"), so no pattern alone can tell them apart.
+ * The disk can: take the words after the path's start (cut at "and/then/as/with/so/using/please", a comma or a semicolon)
+ * and prefer, longest first, a candidate that is an existing folder, else one whose folder exists and which ends in a file
+ * extension, else one whose folder exists. A path must start at a word boundary (so "sidebar/list)" is not one).
+ */
+function bareSavePath(goal: string): string | undefined {
+  const m = goal.match(/(?:^|[\s(])((?:~|\/)[^\n]*)/);
+  if (!m) return undefined;
+  const run = m[1]!.split(/[,;]|\s+(?:and|then|as|with|so|using|please)\b/i)[0]!;
+  const words = run.trim().split(/\s+/);
+  const cands: string[] = [];
+  const trim = (c: string) => { c = c.replace(/[.,;:]+$/, ""); return c.endsWith(")") && (c.match(/\)/g) ?? []).length > (c.match(/\(/g) ?? []).length ? c.slice(0, -1) : c; };
+  for (let k = words.length; k >= 1; k--) cands.push(trim(words.slice(0, k).join(" ")));
+  const ok = (c: string) => c.length > 1 && existsSync(dirname(expandHome(c)));
+  return cands.find((c) => isDir(expandHome(c)))
+    ?? cands.find((c) => ok(c) && /\.\w{1,6}$/.test(c))
+    ?? cands.find(ok)
+    ?? cands[cands.length - 1];
+}
+
+export function savePanelPlan(goal: string, items: Item[]): PlanStep[] | null {
+  if (!/\b(save|saves|saving|download|export|open|choose|select|upload|attach|pick)\b/i.test(goal)) return null;
+  const named = /\b(save|open)( as)? (dialog|panel|sheet|window)\b|\bwants to save\b|\bfile (picker|chooser)\b|\b(choose|upload|select|attach) (a |the )?file (dialog|panel)\b/i.test(goal);
+  const onScreen = items.some((i) => i.role === "AXButton" && /^(save|open|choose)$/i.test(i.text.trim())) && items.some((i) => i.role === "AXButton" && /^cancel$/i.test(i.text.trim()));
+  if (!named && !onScreen) return null;
+  const quoted = goal.match(/["'`\u201c\u2018]((?:~|\/)[^"'`\u201d\u2019\n]+)["'`\u201d\u2019]/);
+  const path = (quoted?.[1] ?? bareSavePath(goal))?.trim().replace(/[.,;:]+$/, "");
+  return path && path.length > 1 ? [{ action: "save_dialog", text: path }] : null;
+}
+
 export function compilePlan(app: string, rawGoal: string, items: Item[], files: string[] = []): PlanStep[] | null {
   const goal = withoutAppSuffix(app, rawGoal);
+  const panel = savePanelPlan(goal, items);
+  if (panel) return panel;
   if (app === "Calculator") return calculatorPlan(goal, items);
   if (app === "Maps") return mapsPlan(goal);
   if (app === "Stocks") return stocksPlan(goal);

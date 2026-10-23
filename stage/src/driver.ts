@@ -62,7 +62,11 @@ export function classifyError(rc: RawCall): { code: DriverErrorCode; detail: str
   if (j.effect === "refused" || j.status === "refused") {
     const reason: string = j.escalation?.reason ?? j.refusal?.message ?? "refused";
     let code: DriverErrorCode = "refused";
-    if (/same_pid_keyboard|other eligible top-level/.test(reason)) code = "keyboard_ambiguity";
+    // a Save panel is its own window that accessibility cannot attribute to the app's main window: Cua refuses every
+    // action on its elements ("could not be proven to belong to window N"). Checked BEFORE the stale-token case below,
+    // which matches the same words and would only re-read the window and try the same refused action again
+    if (j.code === "element_outside_target_window" || /could not be proven to belong|outside_target_window|ax_unresolved/i.test(reason)) code = "outside_window";
+    else if (/same_pid_keyboard|other eligible top-level/.test(reason)) code = "keyboard_ambiguity";
     else if (/background text route|background_unavailable|cannot establish a safe/i.test(reason)) code = "background_unavailable";
     else if (/minimi|hidden/.test(reason)) code = "minimized_or_hidden";
     else if (/could not be proven|stale/.test(reason)) code = "stale_element_token";
@@ -107,7 +111,7 @@ export class CliDriver implements Driver {
   /** uncertain: fast-lane actions that may or may not have happened (not redone through Cua) */
   readonly counts = { fast: 0, cua: 0, fellBack: 0, uncertain: 0 };
   /** what each element token pointed at when it was read, and in which window: lets the fast lane find the same element */
-  private seen = new Map<string, { pid: number; role: string; label?: string; frame?: Rect; windowId: number; winFrame?: Rect; winTitle?: string }>();
+  private seen = new Map<string, { pid: number; role: string; label?: string; frame?: Rect; windowId: number; winFrame?: Rect; winTitle?: string; actions?: string[] }>();
   onAction?: (n: ActionNote) => void;
   /** Cua's own gliding cursors (also played for fast-lane actions, see glide); off only when the overlay draws the agents' cursors instead (one cursor per agent, not two) */
   cuaCursors = true;
@@ -169,7 +173,7 @@ export class CliDriver implements Driver {
     // the window the elements were read from: the fast lane only acts on an element of THIS window
     const winEl = elements.find((e) => e.role === "AXWindow" && e.frame);
     const win = { windowId: w.windowId, winFrame: winEl?.frame, winTitle: winEl ? clean(winEl.label ?? "") : undefined };
-    for (const e of elements) if (e.token) this.seen.set(e.token, { pid: w.pid, role: e.role, label: e.label, frame: e.frame, ...win });
+    for (const e of elements) if (e.token) this.seen.set(e.token, { pid: w.pid, role: e.role, label: e.label, frame: e.frame, actions: e.actions, ...win });
     if (this.seen.size > 20000) this.seen = new Map([...this.seen].slice(-5000));
     return {
       agent, window: w, elements, truncated: !!j.truncated,
@@ -225,13 +229,49 @@ export class CliDriver implements Driver {
     if (f) this.onAction?.({ agent, frame: f, kind, via: "cua" });
   }
 
-  async click(agent: AgentName, w: WindowRef, token: string): Promise<ActionResult> {
-    const fast = await this.tryFast(agent, w, token, "press");
-    const result = fast ?? toResult(await this.call(agent, "click", { pid: w.pid, window_id: w.windowId, element_token: token, session: agent }));
+  async click(agent: AgentName, w: WindowRef, token: string, foreground = false): Promise<ActionResult> {
+    // a file row of an open/save panel is a text field with AXOpen and no AXPress (a press does nothing): open it.
+    // Neither the fast lane (it presses) nor a plain press applies to it
+    const acts = this.seen.get(token)?.actions;
+    const row = !!acts?.includes("AXOpen") && !acts.includes("AXPress");
+    const fast = foreground || row ? undefined : await this.tryFast(agent, w, token, "press");
+    const args: any = { pid: w.pid, window_id: w.windowId, element_token: token, session: agent };
+    if (row) args.action = "open";
+    if (foreground) args.delivery_mode = "foreground";
+    const result = fast ?? toResult(await this.call(agent, "click", args));
+    if (foreground) result.channel = "foreground";
     if (!fast) this.noteCua(agent, token, "press");
     this.clickMs.push(result.ms);
     if (this.clickMs.length > 20) this.clickMs.shift();
     return result;
+  }
+
+  /** a key chord. Foreground fronts the window for a moment (native menu key-equivalents ignore a background chord) */
+  async hotkey(agent: AgentName, w: WindowRef, keys: string[], token?: string, foreground = false): Promise<ActionResult> {
+    const args: any = { pid: w.pid, window_id: w.windowId, keys, session: agent };
+    if (token) args.element_token = token;
+    if (foreground) args.delivery_mode = "foreground";
+    const r = toResult(await this.call(agent, "hotkey", args));
+    if (foreground) r.channel = "foreground";
+    return r;
+  }
+
+  /**
+   * a physical click at a screen position in points (desktop scope, no window): Cua's last rung for what the accessibility
+   * tree cannot address. Cua reads x,y in the pixel space of the capture it is given, so take a fresh capture first and scale
+   * by ITS size (live, 2026-10-22: without one the click was scaled to an old 1000-px screenshot and landed off the screen).
+   */
+  async clickAtFrame(agent: AgentName, f: Rect, count = 1): Promise<ActionResult> {
+    const cap = await cua("get_desktop_state", { max_image_dimension: 8000, session: agent }, 8000);
+    const ratio = Number(cap.json?.screenshot_width) / Number(cap.json?.screen_width);
+    const id = cap.json?.capture_id;
+    if (!(ratio > 0) || !id) return { ok: false, channel: "pixel", ms: Math.round(cap.ms), cli: "click desktop", error: { code: "other", detail: `no desktop capture: ${cap.raw.slice(0, 100)}` } };
+    const x = Math.round((f.x + f.w / 2) * ratio), y = Math.round((f.y + f.h / 2) * ratio);
+    const args: any = { x, y, scope: "desktop", capture_id: id, session: agent };
+    if (count > 1) args.count = count;
+    const r = toResult(await this.call(agent, "click", args));
+    r.channel = "pixel";
+    return r;
   }
 
   async typeText(agent: AgentName, w: WindowRef, token: string, text: string, foreground = false): Promise<ActionResult> {
@@ -266,7 +306,7 @@ export class CliDriver implements Driver {
     return rc.json && existsSync(png) ? png : undefined;
   }
 
-  async paste(agent: AgentName, w: WindowRef, token: string, text: string): Promise<ActionResult> {
+  async paste(agent: AgentName, w: WindowRef, token: string | undefined, text: string, foreground = false): Promise<ActionResult> {
     const t0 = performance.now();
     const before = await cua("clipboard_read", { include_text: true, session: agent });
     const saved: string | null = typeof before.json?.text === "string" ? before.json.text : null;
@@ -277,7 +317,11 @@ export class CliDriver implements Driver {
     const restore = async () => { if (saved !== null) await cua("clipboard_write", { text: saved, session: agent }); };
     const check = await cua("clipboard_read", { include_text: true, session: agent });
     if (check.json?.text !== text) { await restore(); return fail("the clipboard does not hold the text"); }
-    const rc = await this.call(agent, "hotkey", { pid: w.pid, window_id: w.windowId, element_token: token, keys: ["cmd", "v"], session: agent }).finally(restore);
+    // foreground: the Save panel's window takes the chord only when the app is in front (no token: the field has the focus already)
+    const args: any = { pid: w.pid, window_id: w.windowId, keys: ["cmd", "v"], session: agent };
+    if (token) args.element_token = token;
+    if (foreground) args.delivery_mode = "foreground";
+    const rc = await this.call(agent, "hotkey", args).finally(restore);
     const r = toResult(rc);
     return { ...r, route: "paste", ms: Math.round(performance.now() - t0), cli: `paste ${text.length} chars (clipboard, Cmd+V)` };
   }

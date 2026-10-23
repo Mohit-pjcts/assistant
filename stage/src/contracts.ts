@@ -30,7 +30,7 @@ export interface Observation {
 
 export type DriverErrorCode =
   | "permissions_pending" | "session_ended" | "stale_element_token" | "keyboard_ambiguity"
-  | "minimized_or_hidden" | "background_unavailable" | "refused" | "timeout" | "other";
+  | "minimized_or_hidden" | "background_unavailable" | "outside_window" | "refused" | "timeout" | "other";
 
 export interface ActionResult {
   /** not refused and no error. It NEVER means "it worked": the next observation (and the verifier) decide that */
@@ -44,7 +44,12 @@ export interface Driver {
   listApps(): Promise<AppInfo[]>;
   launchApp(agent: AgentName, bundleId: string, urls?: string[], opts?: { newInstance?: boolean; args?: string[] }): Promise<{ pid: number }>;
   observe(agent: AgentName, w: WindowRef, opts?: { timeoutMs?: number; maxDepth?: number }): Promise<Observation>;
-  click(agent: AgentName, w: WindowRef, token: string): Promise<ActionResult>;
+  /** foreground=true briefly fronts the window for the click (Cua's delivery_mode): the fallback when a background click is refused or lands nowhere */
+  click(agent: AgentName, w: WindowRef, token: string, foreground?: boolean): Promise<ActionResult>;
+  /** optional: a key chord ("cmd","shift","g"). Foreground fronts the window briefly, which native menu key-equivalents need */
+  hotkey?(agent: AgentName, w: WindowRef, keys: string[], token?: string, foreground?: boolean): Promise<ActionResult>;
+  /** optional: a real click at a control's screen position (screen points). Last resort for surfaces accessibility cannot address: a separate Save panel window */
+  clickAtFrame?(agent: AgentName, frame: Rect, count?: number): Promise<ActionResult>;
   /** foreground=true briefly brings the window to the front (counted and shown): the fallback when background input is refused */
   typeText(agent: AgentName, w: WindowRef, token: string, text: string, foreground?: boolean): Promise<ActionResult>;
   pressKey(agent: AgentName, w: WindowRef, key: "escape" | "tab" | "return", token?: string, foreground?: boolean): Promise<ActionResult>;
@@ -53,7 +58,7 @@ export interface Driver {
   confirm(agent: AgentName, w: WindowRef, token: string): Promise<ActionResult>;
   setValue(agent: AgentName, w: WindowRef, token: string, value: string): Promise<ActionResult>;
   /** put text on the clipboard and Cmd+V it into the field (optional: drivers without a clipboard skip it) */
-  paste?(agent: AgentName, w: WindowRef, token: string, text: string): Promise<ActionResult>;
+  paste?(agent: AgentName, w: WindowRef, token: string | undefined, text: string, foreground?: boolean): Promise<ActionResult>;
   /** optional: a picture of this one window (not the screen), saved to a temporary PNG the caller deletes */
   windowPicture?(agent: AgentName, w: WindowRef): Promise<string | undefined>;
   endSession(agent: AgentName): Promise<void>;
@@ -83,7 +88,7 @@ export interface Facts {
 }
 
 export interface PlanStep {
-  action: "click" | "type" | "press_enter" | "press_escape" | "scroll_down" | "scroll_up" | "open_url" | "make_folder" | "move_file" | "sort_into" | "save_as" | "pick_city";
+  action: "click" | "type" | "press_enter" | "press_escape" | "scroll_down" | "scroll_up" | "open_url" | "make_folder" | "move_file" | "sort_into" | "save_as" | "pick_city" | "hotkey" | "save_dialog";
   target?: string;
   text?: string;
 }

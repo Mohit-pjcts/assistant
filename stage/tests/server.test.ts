@@ -2,6 +2,8 @@
 // the history cap, Onstage's API path, the tasks form of /api/run (Oni's own plan) and /api/look. Offline: the driver,
 // the run itself and Onstage are fakes (the real ones launch the Swift fast lane and reach the model/voice APIs), so
 // only the server's own logic runs here.
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
@@ -72,6 +74,7 @@ const fakeDriver = {
     return apps;
   },
   listWindows: async () => ({ windows }),
+  windowPicture: async () => { const f = join(tmpdir(), `server-test-shot-${Date.now()}.png`); writeFileSync(f, Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108020000009077053e0000000c4944415408d763f8cfc000000301010018dd8db00000000049454e44ae426082", "hex")); return f; },
   ensureSession: async (agent: string) => { sessions.push(`start ${agent}`); },
   endSession: async (agent: string) => { sessions.push(`end ${agent}`); },
   observe: async (agent: string, w: WindowRef, opts?: unknown) => { sessions.push(`observe ${agent}`); observeOpts = opts; return observeImpl(w); },
@@ -125,6 +128,7 @@ const startTasks = async (tasks: unknown, extra: Record<string, unknown> = {}) =
   return r;
 };
 const look = (app: unknown) => post("/api/look", { app });
+const shot = (app: unknown, windowId?: unknown) => post("/api/shot", { app, windowId });
 const settle = async (runId: string) => {
   release?.();
   for (let i = 0; i < 50; i++) { if ((await get(`/api/runs/${runId}`)).json.run.status !== "running") return; await Bun.sleep(10); }
@@ -639,4 +643,25 @@ test("form press / login: a bad button or address is a clear error, a failure in
   expect(bad.json.error).toContain('no "nope" button');
   expect((await post("/api/form/login", { url: "file:///x" })).status).toBe(400);
   expect((await post("/api/form/unknown", {})).status).toBe(404);
+});
+
+test("/api/shot: one picture of the app's working window (the id it is given, else its biggest), read-only, nothing else touched", async () => {
+  windows = [openWindow("Brave Browser", "Moodle", 900, 700), openWindow("Notes", "Todo")];
+  const id = windows[0]!.window_id;
+  const r = await shot("brave", id);
+  expect(r.json.ok).toBe(true);
+  expect(r.json.app).toBe("Brave Browser");
+  expect(r.json.shots.map((s: any) => [s.kind, s.title])).toEqual([["window", "Moodle"]]);
+  expect(typeof r.json.shots[0].data).toBe("string");
+  expect(sessions).toEqual([]); // no agent session, no observation: a picture only
+});
+
+test("/api/shot: an unknown app, a missing app, a locked screen and a window that cannot be captured are each said plainly", async () => {
+  expect((await shot("")).status).toBe(400);
+  expect((await shot("Nonexistent App")).json.ok).toBe(false);
+  windows = [];
+  expect((await shot("Notes")).json.error).toContain("couldn't capture");
+  locked = true;
+  expect((await shot("Notes")).json.locked).toBe(true);
+  locked = false;
 });

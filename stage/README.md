@@ -28,6 +28,7 @@ still goes through the same compilers, jev and check. See `assistant/stage.py` f
 |---|---|
 | `backstage` | `POST /api/run {tasks: [{app, goal}], purpose, clientRunId}`, then the long poll `GET /api/runs/{id}?since=&wait=` |
 | `backstage_look` | `POST /api/look {app}`: the text in an app's window, nothing touched |
+| `backstage_screenshot`, and automatically on a stalled or failed task | `POST /api/shot {app, windowId?}`: a picture of that ONE window (by its id, so what covers it is not in it), plus a Save / Open panel in front of it; JPEG, longest side 900 px |
 | `onstage` | `POST /api/explain {question, skipApps}` (a lesson word — next/back/repeat/stop — takes no screenshot) |
 | `stage_status` | `GET /api/state` (also says when the Mac's screen is locked) |
 | `stop_backstage` | `POST /api/stop` (`{runId}` stops just that run) |
@@ -57,6 +58,8 @@ window on this desktop (at most 400 lines and 8,000 characters), without clickin
 or two. A running job doesn't block it. Oni uses it to read a whole list or page (an agent answers in one short line),
 to see an app before planning a step on it, and to find out why a task failed. The app must already have a window open,
 and `app` is found as strictly as in the tasks form.
+
+**`POST /api/shot {app, windowId?}`** returns `{app, shots: [{kind: "panel" | "window", title, mime, data}]}` (base64, no `data:` prefix): the window the task worked in (`windowId`, which run summaries now carry per task; else the app's biggest window), never the screen, and the open Save / Open panel first when there is one (it is a window of its own). Read-only, never blocked by a running job. `src/shot.ts`.
 
 **No approval cards, by your choice** (2026-10-05): Oni calls Backstage and Onstage at once. What stands between a
 command and your apps is the in-code safety below (it can't be talked past by a prompt), which is why it was hardened
@@ -340,7 +343,8 @@ Measured on a 10-file sandbox:
   Measured: Spotify exposes nothing; App Store's and Music's search results aren't in the tree (App Store shows only the
   results' "Get" buttons, which the install guard refuses). A question can still be answered from one picture of the
   agent's window, but nothing is ever clicked from a picture.
-* **No keyboard shortcuts in the background.** macOS/Cua refuse Cmd-key combinations to background apps. Enter is sent through accessibility (`AXConfirm`) where possible.
+* **Key chords only in the foreground.** macOS/Cua refuse Cmd-key combinations to background apps, so a planned `hotkey` step (text e.g. `cmd+k`) is sent once as a foreground chord (the app comes forward for a moment, counted). Enter is sent through accessibility (`AXConfirm`) where possible.
+* **Save / Open panels** (a browser's "This page wants to save", a document's Save As): a `save_dialog` step (`src/savedialog.ts`), text = a folder or a full file path. Done in code because the panel is its own window that Cua will not attribute to the app's main one, its file rows have no Press action, and its name field holds a suggested name: real clicks down from the sidebar through each folder row (scrolling long lists), a triple-click and a paste for the name, Return sent to the panel's own window (a physical click on Save if Return does nothing), then a check that the file really appeared on disk. Cmd+Shift+G is not used: browsers own that chord (Brave: Find Previous). The folder must be under the home folder and exist; a Replace prompt is reported and never confirmed. A goal that names a Save panel and an absolute path compiles to this step with no model call (`savePanelPlan`).
 * An app with **two or more windows** may refuse background key presses; clicks and typing still work.
 * **Pop-ups, date pickers and menus** are separate windows that the agent can't see yet (for example, Reminders' due-date picker).
 * jev decides well when the step is clear (a plan step to ground). Without a plan, multi-step sequences such as typing digits one by one confuse it, which is why the LLM plans once.

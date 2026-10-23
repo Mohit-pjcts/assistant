@@ -227,7 +227,8 @@ export class ClaudeHelper implements Helper {
       model: this.model,
       system:
         "You plan the exact UI actions for an agent that operates ONE macOS app window through its accessibility controls. " +
-        "Use only controls that exist in the list (use their exact labels as target). One action per step. Keyboard shortcuts are NOT available. " +
+        "Use only controls that exist in the list (use their exact labels as target). One action per step. Keyboard shortcuts are not available except as ONE hotkey step (text = the chord, e.g. cmd+shift+g), and only when no control does the job. " +
+        "SAVE PANEL: when a macOS Save or Open panel is open (a sheet or window with a file list and Save and Cancel buttons, e.g. 'This page wants to save'), use ONE save_dialog step whose text is the destination: a folder path, or a full file path to also set the file name (e.g. /Users/me/Documents/Courses/sem_3/MATH2014/Assignment 2.pdf). Never click through its folder list or type into its name field yourself. " +
         "To go to a website, use ONE open_url step with the full URL as text (never type URLs into an address bar). " +
         "For a web search, prefer ONE open_url with a URL that already encodes the query (https://www.google.com/search?q=..., https://en.wikipedia.org/w/index.php?search=..., https://www.google.com/travel/flights?q=...) instead of filling search forms, which use pop-up suggestions the agent cannot see. " +
         "target must be EXACTLY one of the quoted labels in controls (not a role word such as 'text area'). " +
@@ -251,7 +252,7 @@ export class ClaudeHelper implements Helper {
               items: {
                 type: "object",
                 properties: {
-                  action: { type: "string", enum: ["click", "type", "press_enter", "press_escape", "scroll_down", "scroll_up", "open_url", "make_folder", "move_file", "sort_into"] },
+                  action: { type: "string", enum: ["click", "type", "press_enter", "press_escape", "scroll_down", "scroll_up", "open_url", "make_folder", "move_file", "sort_into", "hotkey", "save_dialog"] },
                   target: { type: "string", description: "exact control label" },
                   text: { type: "string", description: "for type: the exact text" },
                 },
@@ -265,9 +266,9 @@ export class ClaudeHelper implements Helper {
       maxTokens: 900,
     });
     // the model sometimes copies the list's role prefix ("button 'Clear'"): keep only the label
-    const valid = new Set(["click", "type", "press_enter", "press_escape", "scroll_down", "scroll_up", "open_url", "make_folder", "move_file", "sort_into"]);
+    const valid = new Set(["click", "type", "press_enter", "press_escape", "scroll_down", "scroll_up", "open_url", "make_folder", "move_file", "sort_into", "hotkey", "save_dialog"]);
     const steps = (r.input.steps ?? [])
-      .filter((st) => valid.has(st.action)) // e.g. a "cmd+a" step is impossible here: drop it
+      .filter((st) => valid.has(st.action)) // an unknown action is dropped; a chord is a hotkey step
       .slice(0, 30)
       .map((st) => {
         let t = st.target?.trim();

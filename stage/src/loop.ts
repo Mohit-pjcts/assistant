@@ -14,6 +14,7 @@ import { nowIso } from "./logger.ts";
 import { asksQuestion, FIND_FIELD, goalValues, MESSAGE_FIELD, openOnly, SEARCH_FIELD, sendIntent, explicitText } from "./compile.ts";
 import { PLACEHOLDER, perceive, screenFromMarkdown, screenText, showsPrompt, signature, TEXT_INPUT } from "./perceive.ts";
 import { addressBarForbidden, clickBlocked, editAllowed, enterForbidden, typingForbidden } from "./safety.ts";
+import { isSaveNameField, parseChord, runSaveDialog, type SaveDeps } from "./savedialog.ts";
 
 export const MAX_STEPS = 25;
 
@@ -24,6 +25,9 @@ const codeDecision = (model: string, kind: Decision["kind"] = "click", item?: nu
 /** an action the guards refused (never sent to the app); `cli: "blocked"` tells it apart from a driver refusal */
 const refused = (why: string): ActionResult => ({ ok: false, channel: "ax", ms: 0, cli: "blocked", error: { code: "refused", detail: why } });
 const blockedBy = (r: ActionResult) => (r.cli === "blocked" ? r.error?.detail ?? "blocked" : undefined);
+/** background input refused for a reason a foreground action can get past (Electron fields, apps with 2 windows, a Save panel in its own window) */
+const refusedInBackground = (r?: ActionResult) =>
+  !!r && !r.ok && (r.error?.code === "background_unavailable" || r.error?.code === "keyboard_ambiguity" || r.error?.code === "minimized_or_hidden" || r.error?.code === "outside_window");
 /** the fast lane could not tell whether its press / insert happened (it is not retried by the driver) */
 const uncertain = (r?: ActionResult) => !!r && !r.ok && r.effect === "uncertain";
 /**
@@ -53,6 +57,8 @@ export interface TaskCtx {
   helper: Helper;
   log: Logger;
   signal: AbortSignal;
+  /** test seam: front-app, home folder and waits for the Save panel step (defaults are the real ones) */
+  saveDeps?: Partial<SaveDeps>;
   win: WindowRef;
   /** when background input is refused (Electron text fields, apps with 2 windows), retry once in the foreground (counted) */
   allowForeground?: boolean;
@@ -264,7 +270,14 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     if (signal.aborted) return refused("stopped by the user");
     const why = clickBlocked({ role, label, token }, task.goal, els);
     if (why) return refused(why);
-    return driver.click(agent, win, token);
+    const r = await driver.click(agent, win, token);
+    // refused in the background (a Save panel is its own window: Cua will not attribute its controls to this one):
+    // one counted foreground retry, the rung Cua itself recommends
+    if (refusedInBackground(r) && allowForeground && !signal.aborted) {
+      task.counts.foreground++;
+      return driver.click(agent, win, token, true);
+    }
+    return r;
   };
   /** submit a search field: a real Return first (live, App Store ignored the field's accessibility "confirm" and only a
    * key press ran the search), the accessibility confirm when keys are refused in the background */
@@ -505,6 +518,49 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
       // an LLM plan once tried to "open icloud.com/pages" inside Notes: addresses only open in a browser or Finder
       log.write({ type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: codeDecision("open_url"), acted: `skipped: open url only works in a browser or Finder, not in ${task.app}`, results: [], ms: { observe: obs.ms, decide: 0, act: 0 } });
       planPos++;
+      continue;
+    }
+    // a key chord (Cmd+Shift+G ...): the step's text is the chord. Foreground, because a native menu key-equivalent ignores a
+    // chord posted in the background; disclosed and counted like every foreground action
+    if (planActive() && plan![planPos]?.action === "hotkey") {
+      const t1 = performance.now();
+      const chord = parseChord(plan![planPos]!.text);
+      const tokenEl = plan![planPos]!.target ? p.items.find((i) => i.text === plan![planPos]!.target && i.token) : undefined;
+      let acted: string;
+      const res: ActionResult[] = [];
+      if (!chord) acted = `blocked: "${plan![planPos]!.text ?? ""}" is not a key chord (modifiers, then one key: cmd+shift+g)`;
+      else if (!driver.hotkey) acted = "blocked: this driver has no key chords";
+      else {
+        // never twice: a chord has no read-back, so a background try followed by a foreground one could fire it two times
+        const r = await driver.hotkey(agent, win, chord, tokenEl?.token, allowForeground);
+        res.push(r);
+        if (allowForeground) task.counts.foreground++;
+        task.counts.actions++;
+        acted = `press ${chord.join("+")}${r.channel === "foreground" ? " (foreground)" : ""}${r.ok ? "" : ` FAILED (${r.error?.detail ?? r.effect})`}`;
+      }
+      log.write({ type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: codeDecision("hotkey"), acted, results: res, ms: { observe: obs.ms, decide: 0, act: Math.round(performance.now() - t1) } });
+      prev.push(acted);
+      planPos++;
+      if (acted.startsWith("blocked")) return finish("not_achieved", acted);
+      await sleep(400);
+      continue;
+    }
+    // an open Save / Open panel: folder, name and Save done in code (savedialog.ts). The step's text is a folder or a full file path
+    if (planActive() && plan![planPos]?.action === "save_dialog") {
+      const t1 = performance.now();
+      update("filling the Save panel");
+      const r = await runSaveDialog(plan![planPos]!.text ?? "", { driver, agent, win, allowForeground, sleep, signal, ...ctx.saveDeps });
+      task.counts.scripted++;
+      task.counts.actions += r.results.length;
+      task.counts.foreground += r.foreground;
+      const acted = r.ok ? r.detail : `Save panel FAILED: ${r.detail} (${r.steps.join(" > ")})`;
+      log.write({ type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: codeDecision("save_dialog"), acted, results: r.results, ms: { observe: obs.ms, decide: 0, act: Math.round(performance.now() - t1) } });
+      prev.push(acted);
+      planPos++;
+      if (!r.ok) return finish("not_achieved", acted);
+      // the new file on disk is the proof, and the panel is gone: the generic "did the screen change" check would find
+      // nothing to see, call the task not done and replan against a closed panel (live: a saved file, a failed task)
+      if (planPos >= plan!.length) return finish(null, "", acted);
       continue;
     }
     if (planActive() && plan![planPos]?.action === "save_as") {
@@ -909,9 +965,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: dec, acted, results,
         ms: { observe: obs.ms, decide: dec.ms, act: Math.round(actMs) }, truncated: obs.truncated,
       });
-    // background input refused (Electron text fields, apps with several windows): one counted foreground retry
-    const refusedInBackground = (r?: ActionResult) =>
-      !!r && !r.ok && (r.error?.code === "background_unavailable" || r.error?.code === "keyboard_ambiguity" || r.error?.code === "minimized_or_hidden");
+    // background input refused (Electron text fields, apps with several windows): one counted foreground retry (refusedInBackground, top of file)
 
     // ---- the gate: only for the calibrated brain (jev). An LLM's self-reported confidence is not calibrated. ----
     if (dec.backend === "jev" && !["done", "wait", "none"].includes(dec.kind) && dec.gate < GATE) {
@@ -1034,7 +1088,8 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         // SAFETY: never add to text the agent did not write (e.g. the body of one of the user's existing notes): its own
         // text is a field still holding exactly what the agent left there; the goal may name the text to edit
         const own = owns(id, before);
-        const mayEdit = editAllowed(task.goal, `${purpose}\n${before}`);
+        // the name field of a Save panel holds a SUGGESTED name ("MATH2014 ASSIGNMENT2 (1)"); a goal that saves a file may rename it
+        const mayEdit = editAllowed(task.goal, `${purpose}\n${before}`) || (/\b(save|download|export)\b/i.test(task.goal) && isSaveNameField(obs.elements, chosen.token));
         if (chosen.role === "AXTextArea" && chosen.state === "filled" && !placeholder && !own && !mayEdit) {
           desc = `blocked: '${chosen.text.slice(0, 30)}' already contains someone else's text (create a new item first)`;
           if (usePlan && safetyReplans < 1) {
