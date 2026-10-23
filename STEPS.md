@@ -14196,3 +14196,21 @@ You gave standing permission to commit and push; the earlier work is pushed (`30
 - No end-to-end before/after measurement of time saved by R2 or R3 in real use; the numbers are projections from measured components. Re-run the Langfuse and `traces.sqlite` queries after a week of use.
 - Nothing was run through the live backend this session; the backend must be restarted to pick up the new code, and the first start will embed the vault's chunks in the background (about 17 s).
 - `scripts/sync_prompts_to_langfuse.py supervisor-system-prompt` was run, so the production supervisor prompt in Langfuse is the new one.
+
+## 209. Stage speed investigation: Cua driven directly, no Oni, no LLM (2026-10-23)
+
+**Ask (user, verbatim):** "i feel like you can investigate more and come up with a better plan. you can run the cua driver yourself, not through oni for now. that would spend my anthropic credtis."
+
+**Method.** `cua-driver call ...` against Calculator only (no messaging apps), a throwaway second daemon for the one tuning experiment (killed afterwards; Stage's daemon was never restarted), the Stage fast-lane helper probed directly over its stdin protocol, and an analysis of 84 completed tasks in `stage/runs`. No Anthropic, TypeSafe or Oni calls.
+
+**Findings (details and numbers in `docs/STAGE_SPEED_PLAN.md`):**
+- A Cua accessibility click costs 1.2-1.6 s; Stage's own fast lane costs 10-20 ms (measured on Calculator, and 221 real presses at a 5 ms median).
+- The fast lane was not used at all in 53 of 92 runs (every run Oct 16 to the morning of Oct 22), and nothing recorded that it was off. Cause unproven; the Accessibility permission of the launching Oni.app is the likely one.
+- The click delay is inside the action (effect visible only after ~1.3 s), so overlapping an observe with it cannot help.
+- Daemon `WINDOW_CHANGE_TIMEOUT_MS` 300 -> 0 saves ~340 ms per Cua action (measured); dialog detection under it is untested.
+- Synthesized typing: `delay_ms` 30 -> 0 saves ~25 ms per character (measured); character fidelity untested.
+- Verify (21.5% of wall time) is left alone on purpose: it is the false-"done" guard.
+
+**Wrong turn, kept for the record.** My first click benchmarks looked like 20 ms because the calls were refused (`stale_element_token`: snapshots are scoped to a named session, and a bare CLI call has none). The numbers above are all from runs with `start_session` and the same `session` on every call.
+
+**Not done.** No Stage code changed. Plan step 1 (record the fast lane's state and reason in each run) is the first thing to build; it needs no permission and changes nothing about cost.
