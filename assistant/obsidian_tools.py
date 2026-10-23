@@ -92,6 +92,7 @@ TRASH_DIR_NAME = "_trash"
 RESERVED_DIR_NAMES = (CONFLICTS_DIR_NAME, TRASH_DIR_NAME)
 
 _MAX_SEARCH_RESULTS = 20
+_MAX_CHUNK_RESULTS = 8
 _MAX_READ_BYTES = 200_000
 _MAX_RELATED_NOTES = 5
 _SNIPPET_RADIUS = 80
@@ -247,7 +248,9 @@ def search_vault(query: str) -> str:
     substring match, case-insensitive, plus a semantic supplement so a
     paraphrase or synonym-shaped query (not just an exact phrase) can still
     find a relevant note; a result marked "(semantic match...)" means it
-    didn't literally contain your search text but is topically related.
+    didn't literally contain your search text but is topically related, and
+    one marked "(best match under 'Heading')" shows the passage inside the
+    note (anywhere in it) that matched, found by keyword + meaning together.
     Scoped to the vault only (not the whole disk). Use this to check
     whether something related already exists before writing a new note, or
     to find a note to read/update/delete.
@@ -293,13 +296,36 @@ def search_vault(query: str) -> str:
         (title, score) for title, score in semantic_search(query) if title not in exact_titles
     ]
 
-    if not hits and not semantic_hits:
+    # Chunk-level hybrid (BM25 + dense, vault_index.py) is ADDED for notes the two passes above did
+    # not list: it reaches text anywhere in a note, and a natural-language question that never matches
+    # as a verbatim substring. Failing soft keeps search_vault exactly as it was if the index breaks.
+    from assistant import vault_index
+
+    listed = exact_titles | {title for title, _ in semantic_hits}
+    try:
+        chunk_hits = [
+            (chunk, score) for chunk, score in vault_index.search(query, top_k=_MAX_CHUNK_RESULTS + len(listed))
+            if chunk.title not in exact_titles
+        ]
+    except Exception:  # noqa: BLE001
+        chunk_hits = []
+    chunk_titles = {chunk.title for chunk, _ in chunk_hits[:_MAX_CHUNK_RESULTS]}
+    semantic_hits = [(t, sc) for t, sc in semantic_hits if t not in chunk_titles]
+
+    if not hits and not semantic_hits and not chunk_hits:
         return f"No notes found matching '{query}'."
 
     shown = hits[:_MAX_SEARCH_RESULTS]
     lines = "\n".join(shown) if shown else ""
     if len(hits) > len(shown):
         lines += f"\n... and {len(hits) - len(shown)} more (truncated)"
+
+    if chunk_hits:
+        chunk_lines = "\n".join(
+            f"[[{c.title}]] (best match" + (f" under '{c.heading}'" if c.heading else "") + f"): …{_chunk_snippet(c.text, c.title, c.heading)}…"
+            for c, _ in chunk_hits[:_MAX_CHUNK_RESULTS]
+        )
+        lines = f"{lines}\n{chunk_lines}" if lines else chunk_lines
 
     if semantic_hits:
         semantic_lines = "\n".join(
@@ -311,12 +337,25 @@ def search_vault(query: str) -> str:
     return lines
 
 
+def _chunk_snippet(text: str, title: str, heading: str, limit: int = 200) -> str:
+    body = text[len(title) + 1 :]
+    if heading and body.startswith(heading):
+        body = body[len(heading) + 1 :]
+    return " ".join(body.split())[:limit].strip()
+
+
 @tool
-def read_vault_note(title: str) -> str:
+def read_vault_note(title: str, query: str = "", section: str = "") -> str:
     """Read one note from Oni's own note vault by its exact title.
+
+    A note longer than about 20,000 characters is returned cut, with its outline and an exact
+    instruction for the rest, unless it is one Oni wrote itself. To read part of any note without
+    fetching all of it, pass `section` (a heading in the note) or `query` (what you are looking for).
 
     Args:
         title: The note's title (matches its filename, without `.md`).
+        query: Optional. Return only the passages of this note that best match these words.
+        section: Optional. Return only the section under this heading (takes precedence over query).
     """
     path = _find_existing_note(title)
     if path is None:
@@ -325,12 +364,43 @@ def read_vault_note(title: str) -> str:
         data = path.read_bytes()
     except OSError as exc:
         return f"Error: could not read '{title}': {exc}"
-    if len(data) > _MAX_READ_BYTES:
-        return f"Error: '{title}' is too large to read ({len(data)} bytes, cap {_MAX_READ_BYTES})"
     try:
-        return data.decode("utf-8")
+        text = data.decode("utf-8")
     except UnicodeDecodeError:
         return f"Error: '{title}' is not a text file"
+
+    from assistant import vault_index
+
+    body = vault_index.strip_frontmatter(text)
+    if section:
+        found = vault_index.read_section(body, section)
+        if found is None:
+            heads = ", ".join(h for _, _, h in vault_index.outline(body)) or "(no headings)"
+            return f"Error: no heading matching '{section}' in '{title}'. Headings: {heads}"
+        return f"[Section '{section}' of '{title}', {len(found)} of {len(body)} characters]\n\n{found}"
+    if query:
+        relpath = str(path.relative_to(VAULT_DIR))
+        try:
+            passages = vault_index.read_relevant(relpath, query)
+        except Exception:  # noqa: BLE001 - fall through to a plain read rather than fail the call
+            passages = None
+        if passages:
+            return (f"[Passages of '{title}' matching '{query}', not the whole note ({len(body)} characters). "
+                    f"Call again with section=... or without query for more.]\n\n{passages}")
+        # no passage matched (or the note is not indexed): fall through and read it normally
+    if len(text) <= vault_index.FULL_READ_CHARS or _is_oni_authored(text):
+        if len(data) > _MAX_READ_BYTES:
+            return f"Error: '{title}' is too large to read ({len(data)} bytes, cap {_MAX_READ_BYTES})"
+        return text
+    cut = text.rfind("\n\n", 0, vault_index.FULL_READ_CHARS)
+    cut = cut if cut > vault_index.FULL_READ_CHARS // 2 else vault_index.FULL_READ_CHARS
+    heads = vault_index.outline(body)
+    toc = "\n".join(f"{'  ' * (lvl - 1)}- {head}" for lvl, _, head in heads[:60]) or "(no headings)"
+    return (
+        f"{text[:cut]}\n\n[CUT: showing {cut} of {len(text)} characters of '{title}'. This is a partial view: "
+        f"do not base update_vault_note on it. Outline:\n{toc}\n"
+        f"Fetch more with read_vault_note(title, section='<heading>') or read_vault_note(title, query='<what you need>').]"
+    )
 
 
 @tool

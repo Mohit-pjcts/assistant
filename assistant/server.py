@@ -101,6 +101,7 @@ from assistant import (  # noqa: E402
     stage_history,
     thread_store,
     trace_store,
+    vault_index,
     workflow_store,
 )
 from assistant.a2ui import A2UI_SURFACE_KEY  # noqa: E402
@@ -996,6 +997,14 @@ async def lifespan(app: FastAPI):
         "gmail": bool(present_tool_names & _GMAIL_TOOL_NAMES),
         "calendar": bool(present_tool_names & _CALENDAR_TOOL_NAMES),
     }
+
+    # R3 (STEPS.md 206): load the embedding model and embed the vault's chunks off the request path, so the
+    # first search_vault of the session pays neither the model load nor the one-off 13 s embedding. A
+    # daemon thread; any failure only leaves search BM25-only.
+    try:
+        vault_index.preload_in_background()
+    except Exception:  # noqa: BLE001
+        pass
 
     async with get_checkpointer(CONVERSATION_DB_PATH) as checkpointer:
         graph = build_graph(checkpointer, [send_test_notification], mcp_tools)

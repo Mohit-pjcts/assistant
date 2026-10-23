@@ -39,6 +39,8 @@ cost_cache.json
 # STEPS.md 150) — a derived, rebuildable cache keyed by content hash, same
 # runtime-state category as cost_cache.json above.
 vault_embeddings_cache.npz
+# vault_index.py's cached chunk embeddings (R3, STEPS.md 206), same derived/rebuildable category
+vault_chunk_embeddings_cache.npz
 
 # conversation_search.py's cached thread embeddings (STEPS.md 151/152) —
 # same derived, rebuildable-cache category as vault_embeddings_cache.npz
@@ -112,3 +114,6 @@ ios/DerivedData/
 xcuserdata/
 # The app source dir would otherwise match the sandbox rule "oni/" above (case-insensitive).
 !/ios/Oni/
+
+# Scored model outputs from `python -m evals.stubbed run` (local, regenerable).
+evals/stubbed_runs/
