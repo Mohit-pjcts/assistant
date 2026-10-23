@@ -14177,3 +14177,22 @@ You gave standing permission to commit and push; the earlier work is pushed (`30
 - **Stubbed gate on the "parallel" variant (r5-parallel vs r4, ~$1.6):** routing 100%, arguments 100%, invariants none, replies 93.3% (28/30), pairwise 7 wins / 17 ties / 4 losses. The mixed-response check FAILED as designed: 1 of 258 supervisor responses (`When is my CCHU9053 quiz?` -> `life_admin_agent` plus `search_vault`) mixed a delegation with a read; the guard would keep only the delegation. Passes with `--allow-mixed`, which is the flag for a change that ships the guard. The model also batched independent reads on its own (two `search_vault` calls on the paraphrase and count cases), which is the win this enables.
 - **What this does not show:** the eval only scores the FIRST response of a conversation, so it cannot show the saved round trips of a search-then-read-N chain (that happens on later turns). The saving is projected (about one model round trip per extra read) and still needs a real-use measurement in `traces.sqlite`/Langfuse. Nothing here was run through the live backend.
 - `tests/test_supervisor.py` was not run in full (it makes real Anthropic calls); only its offline tests were run (18 pass).
+
+## 208. Closing the speed build: what was built, what was deliberately not, and why (2026-10-23)
+
+**Built and pushed:** gate gaps (206.1), R3 vault retrieval (206.2), Apple/Google names and long-note guidance in the supervisor prompt (207.1), R2 guarded parallel reads (207.2). All gated by the stubbed eval; offline suite 957 pass.
+
+**Not built, with the reasons (also in SPEED_PLAN.md "Outcome"):**
+- **R4 Stage speculative verify: dropped, the research premise was wrong.** I had assumed a classify call on the last plan step could overlap with verify. Reading `loop.ts` for the build: after the last planned action the next iteration observes and calls `checkDone` directly with no classify, and verify needs that fresh screen; classify returns "done" only on the rare free-decision path. There is nothing to overlap, and the claimed 0.45 s saving does not exist.
+- **R1.1 workflow runner: deferred.** About 1% of spend (2 bundled workflows in 10 days); `/resume` replays the whole tool, so a step loop would re-run completed steps (only email and iMessage have idempotency); the per-step instruction would become the approved summary instead of a supervisor-written one. A behaviour change in the security-model path that cannot be live-verified without your macOS Automation clicks. Needs a per-step replay guard designed first.
+- **R1.2 express lane: not built.** About 10 qualifying delegations in 10 days (about 40 s total), and it adds routing surface (the phone-channel marker in server.py steers `open_app` to `phone_agent`).
+- **R1.3 relay mode: not built.** Lossy by design (drops the supervisor's synthesis), touches surfaces, phone actions and voice, and the first-turn eval cannot judge the replies it would change.
+
+**Test hygiene found by running the whole offline suite (957 pass, tests/test_server.py and tests/test_supervisor.py excluded, they call Anthropic):**
+- `tests/test_vault_search.py` assigned `vault_search._model = None` and left a fake model behind, which made `test_vault_sync::test_oni_never_sees_conflict_copies_or_trash` and `test_server_app_mounts_the_vault_api_behind_the_token` fail whenever the files ran in that order. They failed the same way on `640b8f2` before any of this work. Fixed with `monkeypatch.setattr`.
+- **Still failing, not mine:** `tests/test_calendar_store.py::test_only_this_computer_may_read_the_calendar` expects 403 for `GET /calendar` from a non-local address, but CLAUDE.md says `GET /calendar` is deliberately readable from the phone (ADR 0005). It fails the same way on `3024106`. The test looks stale against that decision; left for you to decide which is right.
+
+**Still owed, and honest about what was not verified:**
+- No end-to-end before/after measurement of time saved by R2 or R3 in real use; the numbers are projections from measured components. Re-run the Langfuse and `traces.sqlite` queries after a week of use.
+- Nothing was run through the live backend this session; the backend must be restarted to pick up the new code, and the first start will embed the vault's chunks in the background (about 17 s).
+- `scripts/sync_prompts_to_langfuse.py supervisor-system-prompt` was run, so the production supervisor prompt in Langfuse is the new one.

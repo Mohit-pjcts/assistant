@@ -4,6 +4,22 @@
 
 Companion to [SPEED_RESEARCH.md](SPEED_RESEARCH.md), which holds the measurements and sources. This file is the decision: what to build, in what order, what must pass before each item merges, and what is still a guess. Priority: faster > smarter > cheaper. The bar: nothing may get dumber.
 
+## Outcome (2026-10-23, STEPS 206 to 208)
+
+| item | result |
+|---|---|
+| Gate gaps (fingerprint, all-calls invariant, mixed-response check, vault cases) | **built**, offline tests |
+| R3 vault retrieval | **built, gated, pushed.** Keyword-style R@5 0.14 to 0.86, paraphrase 0.30 to 0.80, 0 old hits lost; stubbed gate PASS |
+| Apple/Google gate names, long-note read guidance (prompt) | **built, gated, synced to Langfuse.** Arguments 100% (198/198), the observed Sonnet name swap is gone |
+| R2 guarded parallel reads | **built, gated, pushed** (`assistant/parallel_guard.py`, 17 tests incl. a real graph). Time saving is projected, not measured end to end |
+| R1.1 workflow runner in code | **not built, deliberately.** At today's usage there were 2 bundled workflows in 10 days (about 1% of spend). Running steps from a tool means a `/resume` replays every earlier step (only email and iMessage have idempotency guards), and the step instruction would change from a supervisor-written one to the approved summary. That is a behaviour change in the security-model path that cannot be live-verified here (the Phase 25 chains still need your macOS Automation clicks). Revisit when bundled workflows are common and the replay guard is designed |
+| R1.2 express lane | **not built.** Reach is about 10 delegations in 10 days (open_app, open_url_in_brave), roughly 40 s total saved, against new routing surface: the phone-channel marker in `server.py` steers `open_app` requests to `phone_agent`, and the supervisor prompt would need the same care |
+| R1.3 relay mode | **not built.** It deliberately drops the supervisor's synthesis, interacts with surfaces, phone actions and voice replies, and the first-turn stubbed eval cannot judge the final replies it would change |
+| R4 Stage speculative verify | **dropped: the premise was wrong.** Reading `stage/src/loop.ts`: after the last plan step the loop goes straight to `checkDone` (no classify call), and verify needs the post-action screen, so there is nothing to overlap. `classify` returning "done" is the rare path, where overlap would save at most 0.45 s on a call that may be an LLM call |
+| conversation_search chunking, `list_vault_notes` | deferred (see STEPS 206.3) |
+
+Also fixed on the way: an order-dependent test pollution (`tests/test_vault_search.py` left a fake model in `vault_search._model`, which failed `test_vault_sync` in a full run, on `main` before any of this work).
+
 ## Status of the evidence
 
 | kind | what it covers |

@@ -142,7 +142,8 @@ def test_load_model_falls_back_to_a_network_load_when_nothing_is_cached_locally(
     monkeypatch.setattr(
         "sentence_transformers.SentenceTransformer", _FakeSentenceTransformer
     )
-    vault_search._model = None
+    # monkeypatch, not a bare assignment: the fake model must not outlive this test (it broke later tests that search)
+    monkeypatch.setattr(vault_search, "_model", None)
     vault_search._load_model()
 
     assert calls == [True, False]  # tried local-only first, fell back to a network-enabled load
