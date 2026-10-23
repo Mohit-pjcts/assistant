@@ -14224,3 +14224,13 @@ You gave standing permission to commit and push; the earlier work is pushed (`30
 **A/B (stage CLI, 4 prompts x lane off/on x 3 repeats, interleaved, real Calculator/Safari/TextEdit; LLM cost $0.0072 total):** 24/24 done, identical answers and step counts in both arms. Lane on: Calculator 128x37 5.3 s vs 8.6 s off (8 fast actions vs 8 Cua); add/subtract 17.6 s vs 18.9 s median (one 36.8 s outlier in the on arm); Safari lookup and TextEdit write were the same (no clicks or fast-lane typing involved: TextEdit text went through Cua in both arms).
 
 **Not shown:** any intelligence loss from the fast lane on these tasks. Not tested: Brave/WhatsApp page loads, multi-agent parallel runs, and the original pre-review lane code. Left behind: six saved scratch .txt TextEdit windows and a Safari Wikipedia window.
+
+## 211. One end-to-end test through Oni: Instagram group reply, fast lane off vs on (2026-10-23)
+
+**Ask (user, verbatim):** "do one test, normal backstage vs fast lane. 'reply in the Mohit reddy vuyyuru group in instagram'", then "no u dont read the group chat, oni should do the whole job." The user chose "the same reply to the context in the group chat. twice."
+
+**Method.** Oni's backend untouched. Stage restarted by hand with `FAST_INPUT=off` (arm A), then restarted normally (arm B, lane on); Oni's `stage.py` re-reads `server.json` per call, so it followed. Same prompt shape each time, fresh Oni thread each time. Stage was left running with the lane on, started from this session's shell rather than by the Oni app.
+
+**Results.** A (lane off): Oni read the chat and sent "I'm down too, anywhere near campus works for me" in 89 s (Backstage read 42.8 s, failed its own check "jev unsure which line answers" but Oni recovered; send 17.5 s, 3 steps, 0 fast actions). B first try (lane on): Oni read the chat, saw the same text already there and sent nothing (48 s) - correct caution, but not what was asked. B retry with "post it again on purpose" (lane on): sent, 92 s, one Backstage run of 75.1 s / 17 steps (5 fast-lane, 8 Cua actions); Stage's own duplicate guard skipped a retype, then Return was pressed in the foreground. Two identical messages are now in the group.
+
+**Reading.** No speed gain and no loss of intelligence from the lane in this one test; the runs were not the same work (B had the duplicate-text situation), so this is an anecdote, not a measurement. Oni's total time is dominated by its own turns and the Backstage read, not by clicks.
