@@ -14248,3 +14248,15 @@ You gave standing permission to commit and push; the earlier work is pushed (`30
 **Not a drop-in.** (1) `get_window_state` now returns only a markdown tree by default; Stage needs `tree_format:"both"` (with `"elements"` alone the first attempt failed 8/8, because Stage reads on-screen text from the markdown: my shim's mistake, fixed). (2) Default `max_elements` is 250 (was 2,000) and the default tree walk budget 1,000 ms, so `observe()` should pass both explicitly. (3) The AX click delay is still ~1 s.
 
 **Not tested:** Brave/WhatsApp task runs, foreground typing, dialogs and the save panel, Stage's error-code parsing against 0.38.0's messages (`classifyError` matches message text), or the daemon's window-change timeout at 0.
+
+## 213. Moodle COMP2119 Brave comparison of Cua 0.38.0 vs 0.32.0: abandoned, inconclusive (2026-10-23)
+
+**Ask (user):** test 0.38.0 on the Moodle COMP2119 Brave task against 0.32.0 via the shim, cost reported first; chose "Oni, 4 runs". Then "stop the agents", then "the quiz scope is not on moodle, stop looking for it".
+
+**What ran.** One 0.32.0 arm through Oni (209 s, 5 Backstage tasks, 2 done / 3 failed; Oni answered the quiz is in class on Tue 27 Oct and Moodle gives no scope). One 0.38.0 arm failed at setup, a second was stopped partway (7 tasks, 4 failed).
+
+**Why no verdict.** Oni picks different Backstage sub-tasks every run and many fail in both arms, so times are not comparable; the question itself has no answer on Moodle, so the task has no natural "done". The Stage-CLI variant compiles to one Google search with no clicks, so it can't compare drivers either. The Calculator result in 212 stays the only driver measurement.
+
+**Setup lesson.** `scripts/start.sh` prepends `~/.local/bin` to PATH, so a PATH shim placed before it is ignored (Oni then reported "daemon not running" on the default socket). Needed a scratch copy of start.sh with the shim first. Also, a Stage stop traps `pkill CuaDriver.app/.../cua-driver`, which kills a side-by-side test daemon too: start the test daemon after Stage is up.
+
+**Cleanup.** Test daemon and `v38.sock` removed; Stage restored on the installed 0.32.0 driver, lane on. Moodle threads "Moodle drv0.32 run1" and "Moodle drv0.38 run1" remain in Oni's list. No `stage/` code changed.
