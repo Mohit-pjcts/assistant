@@ -14234,3 +14234,17 @@ You gave standing permission to commit and push; the earlier work is pushed (`30
 **Results.** A (lane off): Oni read the chat and sent "I'm down too, anywhere near campus works for me" in 89 s (Backstage read 42.8 s, failed its own check "jev unsure which line answers" but Oni recovered; send 17.5 s, 3 steps, 0 fast actions). B first try (lane on): Oni read the chat, saw the same text already there and sent nothing (48 s) - correct caution, but not what was asked. B retry with "post it again on purpose" (lane on): sent, 92 s, one Backstage run of 75.1 s / 17 steps (5 fast-lane, 8 Cua actions); Stage's own duplicate guard skipped a retype, then Return was pressed in the foreground. Two identical messages are now in the group.
 
 **Reading.** No speed gain and no loss of intelligence from the lane in this one test; the runs were not the same work (B had the duplicate-text situation), so this is an anecdote, not a measurement. Oni's total time is dominated by its own turns and the Backstage read, not by clicks.
+
+## 212. Cua Driver 0.38.0 tried beside the installed 0.32.0 (2026-10-23)
+
+**Ask (user):** "test the upgraded criver".
+
+**Method.** Official `trycua/cua` release `cua-driver-rs-v0.38.0`, asset `cua-driver-rs-0.38.0-darwin-arm64.tar.gz` (85 MB), SHA-256 matched `SHA256SUMS`, signature valid and notarized (Developer ID Cua AI, Inc., team YCK386LBJ7, same as the installed driver). Unpacked in the scratchpad only and run as a second daemon on its own socket with Stage's `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`; the installed driver was never touched, replaced or restarted, and the test daemon was stopped afterwards. Stage itself ran against it through a PATH shim (`cua-driver call` forwarded to the 0.38.0 socket).
+
+**Direct benchmarks, Calculator, medians (0.32.0 -> 0.38.0):** snapshot tree-only 294 -> 112 ms; AX click 1578 -> 1066 ms; `type_text` of 10 digits 654 -> 441 ms; `press_key` 473 -> 458 ms; `list_windows` the same; **`hotkey` 452 -> 1206 ms (slower)**. Brave front window: 306 -> 98 ms; the 0.38.0 tree has ~500 fewer rows because it prunes expanded menus, and every labelled non-menu element was identical.
+
+**Stage end to end (8 runs, two Calculator prompts, lane off/on): 8/8 done, same answers and step counts as 0.32.0.** Times: 128x37 lane-off 8.6 -> 7.3 s, lane-on 5.3 -> 3.8 s; add/subtract lane-on 17.6 -> 13 s, lane-off roughly unchanged (18.9 -> 17.6-20.8 s, within noise). LLM cost the same.
+
+**Not a drop-in.** (1) `get_window_state` now returns only a markdown tree by default; Stage needs `tree_format:"both"` (with `"elements"` alone the first attempt failed 8/8, because Stage reads on-screen text from the markdown: my shim's mistake, fixed). (2) Default `max_elements` is 250 (was 2,000) and the default tree walk budget 1,000 ms, so `observe()` should pass both explicitly. (3) The AX click delay is still ~1 s.
+
+**Not tested:** Brave/WhatsApp task runs, foreground typing, dialogs and the save panel, Stage's error-code parsing against 0.38.0's messages (`classifyError` matches message text), or the daemon's window-change timeout at 0.
