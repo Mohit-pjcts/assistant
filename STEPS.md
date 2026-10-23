@@ -14214,3 +14214,13 @@ You gave standing permission to commit and push; the earlier work is pushed (`30
 **Wrong turn, kept for the record.** My first click benchmarks looked like 20 ms because the calls were refused (`stale_element_token`: snapshots are scoped to a named session, and a bare CLI call has none). The numbers above are all from runs with `start_session` and the same `session` on every call.
 
 **Not done.** No Stage code changed. Plan step 1 (record the fast lane's state and reason in each run) is the first thing to build; it needs no permission and changes nothing about cost.
+
+## 210. Did the fast lane make Backstage dumber? Log analysis plus a 24-run A/B (2026-10-23)
+
+**Ask (user):** "when i first used fast lane, backstage got much dumber, look into why before you do anything", then "run a small A/B: same prompts with FAST_INPUT=off vs on, using the cheapest tasks, and report the LLM cost before you start."
+
+**Log analysis (156 tasks, Oct 4 onward; the logs start after the first fast-lane use, so the original experience cannot be reproduced):** done rate fast 55% vs Cua 47%; "three actions changed nothing" is the top failure in both (~20%); repeat-click rate on an unchanged screen 22% vs 21%; no sign of delayed effects after fast presses. 39 of the 72 not-done tasks stopped on a guard ("blocked: ...already holds...") or the confidence gate (< 0.4), in both lanes; those guards were tightened in the same Oct 5 review as the lane hardening (STEPS 155).
+
+**A/B (stage CLI, 4 prompts x lane off/on x 3 repeats, interleaved, real Calculator/Safari/TextEdit; LLM cost $0.0072 total):** 24/24 done, identical answers and step counts in both arms. Lane on: Calculator 128x37 5.3 s vs 8.6 s off (8 fast actions vs 8 Cua); add/subtract 17.6 s vs 18.9 s median (one 36.8 s outlier in the on arm); Safari lookup and TextEdit write were the same (no clicks or fast-lane typing involved: TextEdit text went through Cua in both arms).
+
+**Not shown:** any intelligence loss from the fast lane on these tasks. Not tested: Brave/WhatsApp page loads, multi-agent parallel runs, and the original pre-review lane code. Left behind: six saved scratch .txt TextEdit windows and a Safari Wikipedia window.
