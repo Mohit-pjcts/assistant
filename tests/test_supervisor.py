@@ -15,7 +15,6 @@ supervisor.py's module docstring.
 import asyncio
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -31,7 +30,6 @@ from assistant.supervisor import (
     _WORKFLOW_RUN_ID_KEY,
     GATED_ACTIONS,
     SUPERVISOR_SYSTEM_PROMPT,
-    NoParallelSpecialistCalls,
     _active_workflow_run_id_this_turn,
     _context_prefix_messages,
     _extract_gated_action_executions,
@@ -41,39 +39,6 @@ from assistant.supervisor import (
     _record_workflow_progress,
     build_graph,
 )
-
-
-def test_no_parallel_specialist_calls_forces_parallel_tool_calls_false() -> None:
-    """Mirrors the old NoParallelHandoffs test — the same underlying
-    reason survives the rewrite unchanged: server.py's SSE/`/resume`
-    handling only relays the FIRST pending interrupt in a turn, so two
-    gated specialist calls in one AIMessage could strand the second one's
-    confirmation with no way to approve/decline it."""
-    middleware = NoParallelSpecialistCalls()
-    request = SimpleNamespace(model_settings={})
-
-    async def fake_handler(req):
-        return req  # echo back so the test can inspect what was set
-
-    result = asyncio.run(middleware.awrap_model_call(request, fake_handler))
-    assert result.model_settings == {"parallel_tool_calls": False}
-
-
-def test_no_parallel_specialist_calls_preserves_other_model_settings() -> None:
-    """Must merge into existing settings, not clobber them — a future
-    middleware/setting added alongside this one shouldn't be silently
-    dropped."""
-    middleware = NoParallelSpecialistCalls()
-    request = SimpleNamespace(model_settings={"some_other_setting": "value"})
-
-    async def fake_handler(req):
-        return req
-
-    result = asyncio.run(middleware.awrap_model_call(request, fake_handler))
-    assert result.model_settings == {
-        "some_other_setting": "value",
-        "parallel_tool_calls": False,
-    }
 
 
 def test_context_prefix_forwards_recalled_facts_from_current_turn() -> None:
@@ -546,10 +511,6 @@ def test_all_gated_actions_have_an_owning_specialist_entry() -> None:
 
 
 if __name__ == "__main__":
-    test_no_parallel_specialist_calls_forces_parallel_tool_calls_false()
-    print("OK: test_no_parallel_specialist_calls_forces_parallel_tool_calls_false")
-    test_no_parallel_specialist_calls_preserves_other_model_settings()
-    print("OK: test_no_parallel_specialist_calls_preserves_other_model_settings")
     test_context_prefix_forwards_recalled_facts_from_current_turn()
     print("OK: test_context_prefix_forwards_recalled_facts_from_current_turn")
     test_context_prefix_forwards_recalled_facts_from_an_earlier_turn_too()

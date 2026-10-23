@@ -56,6 +56,10 @@ VARIANTS: dict[str, Variant] = {
     ),
     # Negative control: Haiku skipped a confirmation gate as supervisor (docs/SPEED_RESEARCH.md section 2),
     # so a working gate must reject this variant.
+    # R2 (assistant/parallel_guard.py): the model is allowed to emit several tool calls per response. The
+    # stubbed eval does not run the middleware that trims them, so this measures how often the guard has
+    # to act (see "mixed parallel responses") and whether the extra freedom changes the first decision.
+    "parallel": Variant(name="parallel", model_kwargs={"thinking": _ADAPTIVE}, parallel_tool_calls=True),
     "haiku": Variant(name="haiku", model="claude-haiku-5-5", model_kwargs={"thinking": {"type": "disabled"}}),
     "opus": Variant(name="opus", model="claude-opus-5-5", model_kwargs={"thinking": _ADAPTIVE}),
     # The installed anthropic SDK rejects `speed` as a keyword, so it travels in the body.

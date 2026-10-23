@@ -182,13 +182,13 @@ write_tools.py/mac_tools.py/interrupts.py/disk_tools.py:
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import Annotated, Any, Awaitable, Callable, NamedTuple, TypedDict
+from typing import Annotated, Any, NamedTuple, TypedDict
 
 import httpx
 from dotenv import load_dotenv
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.callbacks import AsyncCallbackHandler, adispatch_custom_event
@@ -216,6 +216,7 @@ from assistant.compaction import (
 )
 from assistant.memory_extraction import recall_memory_node, text_only_content
 from assistant.obsidian_tools import build_obsidian_tools
+from assistant.parallel_guard import GuardedParallelReads
 from assistant.phone_tools import PHONE_ACTION_KEY
 from assistant.sub_agents import (
     build_coding_agent,
@@ -519,6 +520,11 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "yourself, unasked, when something's worth saving and call "
     "write_vault_note directly — it auto-links related notes for you, no "
     "need to search first. You can only update/delete a note you created. "
+    "search_vault finds a passage anywhere in a note, not just matching "
+    "titles. read_vault_note returns a short note whole; for a long one pass "
+    "query='<what you need>' (the best passages) or section='<heading>' "
+    "instead of reading all of it, and if a read says [CUT ...] follow its "
+    "instructions rather than guessing the rest. "
     "A bare 'note'/'vault' request DEFAULTS here, never Notes.app — route "
     "to mac_control_agent's Notes.app only when the user explicitly says "
     "'Notes.app'/'Apple Notes'.\n\n"
@@ -580,7 +586,12 @@ SUPERVISOR_SYSTEM_PROMPT_FALLBACK = (
     "specialist's own confirmation for this exact action is already "
     "satisfied, so it proceeds without asking again. If declined, do not "
     "delegate at all — tell the user directly it was cancelled. This "
-    "applies ONLY to the EXACT action names listed — reads, searches, "
+    "applies ONLY to the EXACT action names listed — and use the name that "
+    "matches the calendar the user means: Apple Calendar (the user's default "
+    "calendar, mac_control_agent) is calendar_create_event / "
+    "calendar_update_event; Google Calendar (life_admin_agent) is "
+    "create_calendar_event / update_calendar_event / delete_calendar_event. "
+    "Never put one calendar's action name on the other's request. Reads, searches, "
     "non-destructive Mac control, and any action not in that list need no "
     "upfront confirmation. Do NOT pattern-match by verb alone: writing/"
     "updating/deleting a note in Oni's own vault is NEVER one of these "
@@ -667,22 +678,6 @@ class _AgentActivityRelay(AsyncCallbackHandler):
         )
 
 
-class NoParallelSpecialistCalls(AgentMiddleware):
-    """Forces the supervisor to call at most one tool per model turn.
-
-    Mirrors the old NoParallelHandoffs — same underlying reason survives the
-    rewrite unchanged: server.py's SSE/`/resume` handling only relays the
-    FIRST pending interrupt in a turn, so two gated specialist calls issued
-    in the same AIMessage could strand the second one's confirmation with no
-    way to approve/decline it. A structural cap (disable_parallel_tool_use
-    via the Anthropic API), not left to the system prompt's own instruction.
-    """
-
-    async def awrap_model_call(self, request, handler):  # noqa: ANN001, ANN201
-        request.model_settings["parallel_tool_calls"] = False
-        return await handler(request)
-
-
 def _context_prefix_messages(state: GraphState) -> list[AnyMessage]:
     """What a fresh, isolated specialist call would otherwise miss, forwarded
     on purpose: the compaction summary (if this thread has been compacted)
@@ -755,7 +750,7 @@ def _active_workflow_run_id_this_turn(state: GraphState) -> str | None:
     workflow approved in an earlier, unrelated turn must never leak
     forward. Returns the most recently seen run id (there should be at
     most one live workflow per turn in practice, since propose_workflow is
-    itself just one more tool call inside `NoParallelSpecialistCalls`'
+    itself just one more tool call inside `GuardedParallelReads`'
     serialized loop)."""
     messages = state["messages"]
     turn_start = 0
@@ -967,7 +962,12 @@ def _make_confirmation_tool() -> BaseTool:
             "specialist with the same request; that specialist's own "
             "confirmation for this exact action is automatically satisfied, so "
             "it will just proceed. If declined, do not delegate — tell the "
-            "user it was cancelled instead."
+            "user it was cancelled instead. Calendar names: Apple Calendar "
+            "(mac_control_agent) is calendar_create_event / "
+            "calendar_update_event; Google Calendar (life_admin_agent) is "
+            "create_calendar_event / update_calendar_event / "
+            "delete_calendar_event — never use one calendar's name for the "
+            "other."
         ),
     )
     async def request_gated_action_confirmation(
@@ -1746,7 +1746,7 @@ def build_supervisor(
         tools=tools,
         system_prompt=SUPERVISOR_SYSTEM_PROMPT,
         middleware=[
-            NoParallelSpecialistCalls(),
+            GuardedParallelReads(),
             AnthropicPromptCachingMiddleware(),
             RepeatedToolFailureCircuitBreaker(),
             ThinkingBlockRepairMiddleware(),
