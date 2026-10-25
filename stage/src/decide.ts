@@ -107,6 +107,22 @@ export class JevBrain implements Brain {
     return { choice: String(a.choice), confidence: a.confidence, probs: a.probabilities, costUsd: tokens * JEV_PRICE_PER_TOKEN, ms: Math.round(performance.now() - t0) };
   }
 
+  /** several same-shape questions in ONE systemOne call: the per-question round trips become one */
+  async chooseMany(state: object, calls: { question: string; options: Record<string, string> }[]): Promise<Choice[]> {
+    if (!calls.length) return [];
+    if (calls.length === 1) return [await this.choose(calls[0]!.question, calls[0]!.options, state)];
+    const t0 = performance.now();
+    const questions = Object.fromEntries(calls.map((c, i) => [`q${i}`, choice(c.question, c.options)]));
+    const res = await this.client.systemOne({ state, questions } as any).withResponse();
+    const tokens = res.data.usage?.input_tokens ?? 0;
+    const ms = Math.round(performance.now() - t0);
+    return calls.map((_, i) => {
+      const a = (res.data.answers as any)[`q${i}`];
+      // the one call's cost and time are reported on the first choice, so a run's totals stay honest
+      return { choice: String(a.choice), confidence: a.confidence, probs: a.probabilities, costUsd: i === 0 ? tokens * JEV_PRICE_PER_TOKEN : 0, ms: i === 0 ? ms : 0 };
+    });
+  }
+
   readonly kind = "jev" as const;
   model: string;
   private client: TypeSafeClient;

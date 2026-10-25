@@ -301,6 +301,8 @@ export async function runCommand(o: RunOpts): Promise<{ tasks: Task[]; totals: R
   o.log.write({
     type: "run_start", runId: o.runId, t: nowIso(), command: o.command, brain: o.brainKind, tasks,
     ...(source ? { source } : {}), ...(clientRunId ? { clientRunId } : {}),
+    // the fast lane's state at the start of every run: a silent outage (STAGE_SPEED_PLAN F2) is visible in the log
+    ...(o.driver.fast ? { fastLane: { on: o.driver.fast.on, ...(o.driver.fast.reason ? { reason: o.driver.fast.reason } : {}) } } : {}),
   });
   o.onUpdate?.(tasks);
 
@@ -347,6 +349,7 @@ export async function runCommand(o: RunOpts): Promise<{ tasks: Task[]; totals: R
   await Promise.all([...new Set(tasks.map((t) => t.agent))].map((agent) => o.driver.endSession(agent).catch(() => {})));
   const totals = totalsOf(tasks, (performance.now() - t0) / 1000);
   totals.helperUsd += planCostUsd;
+  if (o.driver.counts) totals.fastLane = { ...o.driver.counts };
   o.log.write({ type: "run_end", runId: o.runId, t: nowIso(), totals, tasks });
   return { tasks, totals, plan: merged, planCostUsd };
 }

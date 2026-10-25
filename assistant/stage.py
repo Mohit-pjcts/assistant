@@ -347,6 +347,14 @@ def format_run(run: dict[str, Any]) -> str:
             f"{totals.get('done', 0)}/{totals.get('tasks', len(tasks))} tasks done in "
             f"{float(totals.get('seconds', 0)):.1f} s, ${usd:.4f}"
         )
+        # Lane counts: an all-Cua run while the lane was supposed to be on is the
+        # silent-outage shape (stage/docs/STAGE_SPEED_PLAN.md F2), so say it.
+        lane = totals.get("fastLane")
+        if lane:
+            tally += (
+                f"; lane: {lane.get('fast', 0)} fast / {lane.get('cua', 0)} Cua"
+                f" ({lane.get('fellBack', 0)} fell back)"
+            )
     else:
         done = sum(1 for t in tasks if t.get("status") == "done")
         tally = f"{done}/{len(tasks)} tasks done so far"
@@ -698,11 +706,20 @@ async def stage_status() -> str:
     except StageUnavailable as exc:
         return f"Error: {exc}"
     keys = state.get("keys") or {}
+    lane = state.get("fastLane") or {}
+    lane_txt = ""
+    if lane:
+        lane_state = "on" if lane.get("on") else f"OFF ({lane.get('reason') or 'unknown reason'})"
+        lane_txt = (
+            f" Fast lane {lane_state}: {lane.get('fast', 0)} fast, "
+            f"{lane.get('cua', 0)} via Cua, {lane.get('fellBack', 0)} fell back."
+        )
     head = (
         f"Stage at {_connection()[0]}: Backstage {'busy' if state.get('busy') else 'idle'}; "
         f"overlay {'on' if state.get('overlay') else 'off'}; "
         f"TypeSafe key {'set' if keys.get('typesafe') else 'MISSING'}, "
         f"Anthropic key {'set' if keys.get('anthropic') else 'MISSING'}."
+        f"{lane_txt}"
     )
     if state.get("locked"):
         head += " The Mac's screen is LOCKED: nothing can run until it's unlocked."

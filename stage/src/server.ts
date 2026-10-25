@@ -181,7 +181,7 @@ export function startPanel(port = Number(process.env.PORT ?? 3000), token = "", 
     keys: { typesafe: !!process.env.TYPESAFE_API_KEY, anthropic: hasClaude() },
     llmModel: LLM_BRAIN_MODEL,
     medianClickMs: driver.medianClickMs(),
-    fastLane: { on: driver.fast.on, ...driver.counts },
+    fastLane: { on: driver.fast.on, reason: driver.fast.reason, ...driver.counts },
   });
   /** a run changed: wake its long polls, refresh the panel and the overlay's widgets */
   const changed = (rec?: RunRecord) => {

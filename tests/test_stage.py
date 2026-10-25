@@ -1297,3 +1297,78 @@ def test_a_picture_never_reaches_another_specialist_as_text(env):
     (forwarded,) = sup._prior_specialist_results_this_turn(state)
     assert "FAILED (stalled)" in forwarded.content and big not in forwarded.content and "base64" not in forwarded.content
     assert _text_of(content) == "1. Calculator: FAILED (stalled)"
+
+
+# --- Fast-lane visibility (STAGE_SPEED_PLAN step 1) ---------------------------
+
+
+def test_a_finished_runs_lane_counts_are_spelled_out():
+    run = _run_record(
+        [{"status": "done", "answer": "ok"}],
+        totals={
+            "tasks": 1,
+            "done": 1,
+            "failed": 0,
+            "seconds": 5.0,
+            "decisionsUsd": 0.0007,
+            "helperUsd": 0.0003,
+            "fastLane": {"fast": 4, "cua": 2, "fellBack": 1},
+        },
+    )
+    head = stage.format_run(run).splitlines()[0]
+    assert head.endswith("lane: 4 fast / 2 Cua (1 fell back)")
+
+
+def test_a_run_without_lane_counts_reads_as_before():
+    run = _run_record(
+        [{"status": "done", "answer": "ok"}],
+        totals={"tasks": 1, "done": 1, "failed": 0, "seconds": 5.0,
+                "decisionsUsd": 0.0007, "helperUsd": 0.0003},
+    )
+    head = stage.format_run(run).splitlines()[0]
+    assert "lane" not in head and head.endswith("$0.0010")
+
+
+def test_status_names_a_quiet_fast_lane_outage(env):
+    real_request = env.request
+
+    async def with_lane(method, path, body, timeout):
+        reply = await real_request(method, path, body, timeout)
+        if path == "/api/state":
+            reply = {
+                **reply,
+                "fastLane": {"on": False, "reason": "no helper connected",
+                             "fast": 0, "cua": 9, "fellBack": 0},
+            }
+        return reply
+
+    import assistant.stage as stage_mod
+
+    stage_mod._request = with_lane
+    try:
+        status = asyncio.run(stage.stage_status.ainvoke({}))
+    finally:
+        stage_mod._request = real_request
+    assert "Fast lane OFF (no helper connected): 0 fast, 9 via Cua, 0 fell back." in status
+
+
+def test_status_says_when_the_fast_lane_is_on(env):
+    real_request = env.request
+
+    async def with_lane(method, path, body, timeout):
+        reply = await real_request(method, path, body, timeout)
+        if path == "/api/state":
+            reply = {
+                **reply,
+                "fastLane": {"on": True, "reason": "", "fast": 3, "cua": 1, "fellBack": 0},
+            }
+        return reply
+
+    import assistant.stage as stage_mod
+
+    stage_mod._request = with_lane
+    try:
+        status = asyncio.run(stage.stage_status.ainvoke({}))
+    finally:
+        stage_mod._request = real_request
+    assert "Fast lane on: 3 fast, 1 via Cua, 0 fell back." in status

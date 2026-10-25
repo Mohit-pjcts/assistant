@@ -59,6 +59,10 @@ export interface Driver {
   setValue(agent: AgentName, w: WindowRef, token: string, value: string): Promise<ActionResult>;
   /** put text on the clipboard and Cmd+V it into the field (optional: drivers without a clipboard skip it) */
   paste?(agent: AgentName, w: WindowRef, token: string | undefined, text: string, foreground?: boolean): Promise<ActionResult>;
+  /** the direct-accessibility fast lane, when the driver has one (CliDriver does): whether it is on, and why not */
+  readonly fast?: { readonly on: boolean; readonly reason: string };
+  /** per-process action counters by lane (CliDriver): fast lane, Cua, fell back to Cua, uncertain */
+  readonly counts?: { fast: number; cua: number; fellBack: number; uncertain: number };
   /** optional: a picture of this one window (not the screen), saved to a temporary PNG the caller deletes */
   windowPicture?(agent: AgentName, w: WindowRef): Promise<string | undefined>;
   endSession(agent: AgentName): Promise<void>;
@@ -126,6 +130,8 @@ export interface Brain {
   classify(facts: Facts, items: Item[]): Promise<Decision>;
   /** one typed question (e.g. "which folder does this file belong in?"): the cheap classifier's home ground */
   choose?(question: string, options: Record<string, string>, state: object): Promise<Choice>;
+  /** several typed questions of the same shape in ONE call (jev batching): one Choice per call, same order */
+  chooseMany?(state: object, calls: { question: string; options: Record<string, string> }[]): Promise<Choice[]>;
 }
 
 /** free-text and verification helpers (an LLM, called only when needed) */
@@ -178,12 +184,14 @@ export interface RunTotals {
   tasks: number; done: number; failed: number; seconds: number;
   decisionsUsd: number; helperUsd: number; decisions: number; actions: number;
   medianDecideMs: number;
+  /** actions by lane, when the driver counts them: a silent fast-lane outage shows here as all-Cua */
+  fastLane?: { fast: number; cua: number; fellBack: number; uncertain: number };
 }
 
 export type LogLine =
   // source: who started the run ("api" = Oni, "hotkey", "panel"); clientRunId: the caller's own id for it (Oni sends its
   // tool-call id). Both optional: logs from before they existed lack them. Oni's History panel reads them (assistant/stage_history.py)
-  | { type: "run_start"; runId: string; t: string; command: string; brain: BrainKind; tasks: Task[]; source?: string; clientRunId?: string }
+  | { type: "run_start"; runId: string; t: string; command: string; brain: BrainKind; tasks: Task[]; source?: string; clientRunId?: string; fastLane?: { on: boolean; reason?: string } }
   | {
       type: "step"; runId: string; t: string; taskId: string; agent: AgentName; step: number;
       items: Item[]; decision: Decision; acted: string; results: ActionResult[];
