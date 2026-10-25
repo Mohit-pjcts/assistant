@@ -598,7 +598,7 @@ def test_a_specialist_call_paused_by_a_confirmation_gate_is_not_logged_as_an_err
     """The shared bookkeeping (`_run_delegation`) treats an interrupt() as control flow: the
     call replays on /resume and is logged then; the dashboard's activity still ends."""
 
-    async def gated(messages, pre_approved_actions):
+    async def gated(messages, pre_approved_actions, prior_gated_writes=0):
         interrupt({"action": "send_email"})
         return sup.SpecialistResult("sent", [], [], [])
 

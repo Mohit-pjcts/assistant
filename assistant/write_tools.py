@@ -38,7 +38,12 @@ MAX_HANDOFFS_PER_TURN and memory_extraction.py's MAX_PROPOSED_FACTS_PER_CALL —
 enforced structurally by counting this turn's already-completed gated-write
 ToolMessages via InjectedState, not left to the model's own judgment. Checked
 BEFORE interrupt() so a capped-out call doesn't waste a confirmation
-round-trip on something that's going to be refused anyway.
+round-trip on something that's going to be refused anyway. "This turn" means
+the whole TOP-LEVEL turn: `_writes_so_far_this_turn` adds the writes earlier
+specialist delegations of the same turn already executed (supervisor.py's
+`_EXECUTED_GATED_WRITES_KEY` markers, threaded in as
+`prior_gated_writes_this_turn`), since each delegation's isolated message
+list can only see its own calls.
 
 No-parallel-writes guard: sub_agents.py disables parallel_tool_calls on
 life_admin_agent's model (mirrors supervisor.py's NoParallelHandoffs) —
@@ -99,6 +104,12 @@ class _AgentState(TypedDict):
 
     messages: Annotated[list[AnyMessage], add_messages]
     pre_approved_actions: NotRequired[set[str]]
+    # Gated writes earlier specialist delegations already executed within
+    # this same top-level turn (supervisor.py stamps it — see
+    # sub_agents.GatedAgentState). Lets MAX_WRITES_PER_TURN span every
+    # delegation of one turn again, not just this one call's isolated
+    # history (the agents-as-tools rewrite had silently narrowed it).
+    prior_gated_writes_this_turn: NotRequired[int]
 
 
 # Structural cap on gated write-tool calls per top-level turn — mirrors
@@ -140,6 +151,22 @@ def _count_writes_this_turn(messages: list[AnyMessage]) -> int:
         for m in messages[turn_start:]
         if isinstance(m, ToolMessage) and (m.name or "") in _GATED_WRITE_TOOL_NAMES
     )
+
+
+def _writes_so_far_this_turn(state: _AgentState) -> int:
+    """This turn's gated-write count for cap purposes: writes visible in
+    THIS specialist call's own isolated message list PLUS writes earlier
+    delegations of the same top-level turn already executed (carried in
+    via `prior_gated_writes_this_turn`, supervisor.py). Before the offset
+    existed, a compound turn delegating to life_admin_agent twice could
+    exceed MAX_WRITES_PER_TURN in aggregate, each call under the cap on
+    its own fresh history — supervisor.py's module docstring carried that
+    as a disclosed limitation; this restores the documented per-TURN
+    scope. Each write remains individually confirmation-gated either way
+    — the cap is a runaway-loop / confirmation-fatigue guard, not the
+    security boundary."""
+    prior = state.get("prior_gated_writes_this_turn") or 0
+    return _count_writes_this_turn(state["messages"]) + prior
 
 
 def _find_tool(tools: list[BaseTool], name: str) -> BaseTool | None:
@@ -287,7 +314,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 cc: Optional CC recipient address(es).
                 bcc: Optional BCC recipient address(es).
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             payload = {
                 "action": "send_email",
@@ -344,7 +371,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 remove_label_ids: Label IDs to remove — pass ["INBOX"] to
                     archive.
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             message = await _read_back_message(read_email_raw, message_id)
             if message is None:
@@ -409,7 +436,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 attendees: Optional list of {"email": ..., "displayName": ...}
                     dicts — each attendee receives a real invitation email.
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             payload = {
                 "action": "create_calendar_event",
@@ -481,7 +508,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 attendees: New full attendee list, if changing — replaces the
                     existing list; each new attendee gets a real invitation.
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             current = await _read_back_event(get_event_raw, calendar_id, event_id)
             if current is None:
@@ -558,7 +585,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 event_id: ID of the event to delete.
                 calendar_id: Calendar the event is on; 'primary' by default.
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             event = await _read_back_event(get_event_raw, calendar_id, event_id)
             if event is None:
@@ -615,7 +642,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                 forward_to: Email address to forward matching mail to, if
                     any — shown as the most prominent field at confirmation.
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             resulting_action = {
                 "add_labels": add_label_ids or [],
@@ -663,7 +690,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             Args:
                 filter_id: ID of the filter to delete.
             """
-            if _count_writes_this_turn(state["messages"]) >= MAX_WRITES_PER_TURN:
+            if _writes_so_far_this_turn(state) >= MAX_WRITES_PER_TURN:
                 return _WRITE_CAP_MESSAGE
             filter_text = await _read_back_filter_text(get_filter_raw, filter_id)
             if filter_text is None:
