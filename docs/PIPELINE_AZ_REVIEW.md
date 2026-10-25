@@ -56,41 +56,57 @@ does not relitigate them.
 
 ## Findings and what changed on this branch
 
-### FIXED: per-turn write cap had silently narrowed to per-delegation
+### FIXED (two designs): per-turn write cap had silently narrowed to per-delegation
 
-`write_tools.MAX_WRITES_PER_TURN` (3) counts this turn's gated-write
-ToolMessages via InjectedState. Under agents-as-tools each delegation's
-state is a fresh isolated list, so a compound turn delegating to
-life_admin_agent twice could execute up to 2x the cap. supervisor.py's
-docstring disclosed this as a known limitation ("revisit if this turns out
-to matter"). It is a confirmation-fatigue/runaway guard gap, **not** a
-gate bypass — every write still interrupts for confirmation — but the guard
-now matches its documented per-turn scope again:
+`write_tools.MAX_WRITES_PER_TURN` (3) counts this turn's gated writes.
+Under agents-as-tools each delegation's state is a fresh isolated list, so
+a compound turn delegating to life_admin_agent twice could execute up to
+2x the cap. supervisor.py's docstring disclosed this as a known
+limitation. It is a confirmation-fatigue/runaway guard gap, **not** a
+gate bypass — every write still interrupts for confirmation.
 
-- `call_specialist` stamps its delegation ToolMessage with
-  `_EXECUTED_GATED_WRITES_KEY` = the number of write_tools actions that
-  delegation actually executed (from the existing
-  `_extract_gated_action_executions`; declined/errored/no-op don't count).
-- Before the next delegation, `_prior_executed_gated_writes_this_turn`
-  sums this turn's markers (same genuine-human-turn boundary as the
-  existing counters) and threads the total into the specialist's
-  `GatedAgentState.prior_gated_writes_this_turn`.
-- `write_tools._writes_so_far_this_turn` adds the offset before the
-  interrupt, so a capped-out call still refuses before asking.
+**Design A (929745b, branch `pipeline-az-improvements`, independently
+reviewed):** delegation ToolMessages carry a supervisor-written count of
+executed gated writes; the next delegation sums this turn's markers and
+threads the total into the specialist's state. No new storage. Two
+residual undercount edges: mid-turn compaction can delete the markers,
+and a delegation that executes writes and THEN errors leaves no
+ToolMessage to stamp. Both fail open toward one extra
+individually-confirmed write, never toward skipping a confirmation.
 
-Robustness properties (test-backed, `tests/test_write_cap_per_turn.py`, 9
-tests): the marker is written only by supervisor code from structured
-extraction — specialist result text cannot forge it (test included); the
-count scopes to the current genuine turn (test); parallel delegations
-can't race the count because GuardedParallelReads structurally serializes
-non-read calls (unchanged invariant); the full chain marker → prior → real
-gated tool refusal is exercised end-to-end (test). Known, accepted edge:
-if outer history is compacted mid-turn or a delegation errors AFTER
-executing writes but BEFORE returning, the count can be understated —
-this fails open toward one extra individually-confirmed write, never
-toward skipping a confirmation. Chosen over a persisted per-turn store
-(supervisor.py's earlier estimate of the fix) because the checkpointed
-delegation ToolMessages already carry everything needed.
+**Design B (this follow-up branch, `pipeline-write-cap-durable`):** a
+durable counter (`write_cap_store.py`, sync sqlite, idempotency_store
+precedent) keyed (thread_id, turn_id, tool_call_id). Every gated write
+records itself at execution time; the cap check reads the counter.
+`call_specialist` threads a stable per-turn id (genuine-human-message id,
+else content hash + position — identical user texts in different turns
+cannot collide, test-pinned) into `GatedAgentState.write_cap_turn_id`.
+Bare invocations fall back to the legacy message scan.
+
+What B solves over A: compaction-proof, error-after-execution-proof.
+What B adds as obligations (each tested or reasoned, not "by
+construction"):
+
+- **Corrupt/unavailable DB:** cap check falls back to the legacy scan and
+  the gate still interrupts (test); recording is swallowed (best-effort,
+  same failure direction as A).
+- **Check-then-record race:** deliberately not atomic. Safe because
+  same-turn gated writes are structurally sequential — life_admin's model
+  has parallel_tool_calls disabled and GuardedParallelReads trims any
+  multi-call response to one non-read call (invariant test-pinned).
+- **Crash between side effect and record:** residual undercount window
+  (fails open toward one extra confirmed write). Recording BEFORE
+  execution was considered and rejected: a crash or refusal mid-window
+  would then consume cap without a write and could refuse an
+  already-approved write on resume.
+- **Resume/retry double-count:** INSERT OR IGNORE on tool_call_id, stable
+  across any LangGraph replay (test).
+- **Privacy:** the store persists thread/turn/call ids, tool name,
+  timestamp only — no payload, recipients, or content (schema test).
+
+Both designs preserve every confirmation gate. Which to merge is the
+user's call: A is smaller and stateless; B closes A's two residual
+edges at the cost of one more sqlite store.
 
 ### Reviewed and left as-is (with reasons)
 
@@ -118,6 +134,36 @@ delegation ToolMessages already carry everything needed.
 - platform.claude.com/docs/en/managed-agents/multiagent-orchestration,
   anthropic.com/engineering/building-effective-agents — orchestrator-
   worker pattern; Oni's supervisor-with-tools is this pattern.
+
+## Dependency reproducibility finding (fresh installs broken)
+
+`requirements.txt` pins `langchain-mcp-adapters==0.3.0` but leaves `mcp`
+unpinned. Probed on 2026-10-25 (uv venv, Python 3.12): adapters 0.3.0's
+`sessions.py` imports `streamable_http_client` (present only in mcp >=
+2.0.0) while its `callbacks.py` imports `RequestContext` from
+`mcp.shared.context` (present only in mcp 1.x; removed by 2.0.0). Every
+version probed — mcp 1.8.1, 1.9.2, 1.9.4, 1.10.1, 1.11.0, 1.12.4,
+1.13.0, 1.14.1, 1.15.0, 1.16.0, 1.17.0, 1.18.0-1.22.0 (newest 1.x), and
+2.0.0-2.3.0 (newest overall) — failed one of the two imports; no probed
+version satisfied both. adapters 0.3.2 has the same conflict (and adds
+mcp<2). Consequence: a fresh `pip install -r requirements.txt` today
+resolves mcp 2.3.0 and the backend crashes at import. Sources:
+https://pypi.org/pypi/langchain-mcp-adapters/json (0.3.0 released
+2026-06-10, `Requires-Dist: mcp>=1.9.2`, no upper bound),
+https://pypi.org/pypi/mcp/json (2.3.0 current). Reproduce:
+
+    uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python \
+        langchain-mcp-adapters==0.3.0 mcp==2.3.0
+    .venv/bin/python -c "from langchain_mcp_adapters.client import MultiServerMCPClient"
+    # ImportError: cannot import name 'RequestContext' from 'mcp.shared.context'
+
+The user's working install presumably predates this (resolved when an
+mcp version existed that satisfied both, or differs from the pin).
+Recommended: pin BOTH packages in requirements.txt to the versions on
+the working machine (`pip show mcp langchain-mcp-adapters`); not changed
+on this branch because the correct values depend on that environment.
+This sandbox ran the suite with adapters 0.3.0 + mcp 1.22.0 + a local
+two-line alias shim (uncommitted).
 
 ## Environment caveats for this branch's test runs
 

@@ -114,12 +114,12 @@ class GatedAgentState(AgentState):
 
     pre_approved_actions: NotRequired[set[str]]
     # Per-turn write cap, restored to top-level-turn scope (see
-    # write_tools.py's MAX_WRITES_PER_TURN docstring): how many gated
-    # writes EARLIER specialist delegations already executed within this
-    # same top-level turn. Stamped by supervisor.py's call_specialist
-    # from its own `_EXECUTED_GATED_WRITES_KEY` markers; 0/absent for the
-    # first delegation of a turn. Read by write_tools.py's cap check.
-    prior_gated_writes_this_turn: NotRequired[int]
+    # write_tools.py's MAX_WRITES_PER_TURN docstring and
+    # write_cap_store.py): stable identity of the current top-level turn,
+    # threaded in by supervisor.py's call_specialist
+    # (_write_cap_turn_id). Absent for invocations outside the real
+    # supervisor path, which fall back to legacy message counting.
+    write_cap_turn_id: NotRequired[str]
 
 
 # --- Coding sub-agent --------------------------------------------------

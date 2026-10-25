@@ -82,23 +82,21 @@ own model composed for that specialist call.
 
 **Per-turn write cap, restored to top-level-turn scope (2026-10-25,
 pipeline review):** the rewrite had silently narrowed `write_tools.py`'s
-`MAX_WRITES_PER_TURN` to per-DELEGATION scope — it counts gated-write
+`MAX_WRITES_PER_TURN` to per-DELEGATION scope -- it counts gated-write
 `ToolMessage`s in whatever state it's handed via `InjectedState`, and each
 delegation now starts a fresh, isolated sub-agent conversation, so a
 compound turn delegating to `life_admin_agent` twice could exceed 3 total
-writes across those calls (each still individually confirmed). Closed
-without any persisted state addition: `call_specialist` already receives
-`_extract_gated_action_executions`'s executed-write list and already
-writes its delegation ToolMessage into the OUTER graph's checkpointed
-state, so it stamps that ToolMessage with an `_EXECUTED_GATED_WRITES_KEY`
-count marker and reads earlier markers back on the next delegation
-(`_prior_executed_gated_writes_this_turn`), threading the running total
-into the next specialist's `GatedAgentState.prior_gated_writes_this_turn`.
-write_tools.py's cap check adds the offset. The marker is supervisor-side
-bookkeeping only — a specialist's own cap check never trusts it blindly
-for anything but counting (the count can only be understated if outer
-history is compacted mid-turn, which errs toward allowing one extra
-individually-confirmed write, never toward skipping a confirmation).
+writes across those calls (each still individually confirmed). Fixed by
+keying the cap to a DURABLE counter instead of any message list:
+`call_specialist` derives a stable per-turn id (`_write_cap_turn_id`),
+every gated write records itself into `write_cap_store` at execution time
+(idempotent on its `tool_call_id`, so resume/retry replays never
+double-count), and the cap check reads that counter. This closes the two
+undercount edges the message-marker design (929745b, superseded) still
+had -- mid-turn compaction deleting the markers, and a delegation that
+executed writes and THEN errored leaving no ToolMessage to stamp. Each
+write remains individually confirmation-gated either way; the cap is a
+runaway-loop / confirmation-fatigue guard, not the security boundary.
 
 **Upfront confirmation (explicitly discussed and authorized, not a silent
 change to the confirmation gate's guarantees):** `GATED_ACTIONS` below is a
@@ -182,6 +180,7 @@ write_tools.py/mac_tools.py/interrupts.py/disk_tools.py:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -227,7 +226,6 @@ from assistant.sub_agents import (
     build_research_agent,
 )
 from assistant.thinking_repair import THINKING_CONFIG, ThinkingBlockRepairMiddleware
-from assistant.write_tools import _GATED_WRITE_TOOL_NAMES
 from assistant.tool_trace import TRACE_CONTEXT, ToolTraceMiddleware
 
 # Phase 16 Part A.5 (the mentor's distributed-tracing spike, PLAN.md):
@@ -302,15 +300,6 @@ _GATED_ACTION_APPROVED_KEY = "gated_action_approved"
 # workflow in progress this turn" without free-text parsing, same
 # structured-marker discipline as every other key in this module.
 _WORKFLOW_RUN_ID_KEY = "workflow_run_id"
-
-# additional_kwargs marker key a delegation ToolMessage carries when the
-# specialist it ran EXECUTED one or more gated writes (write_tools.py's
-# set) — how a LATER delegation in the same top-level turn learns the
-# per-turn write count so write_tools.py's MAX_WRITES_PER_TURN applies
-# per top-level turn again (it had silently become per-delegation under
-# the agents-as-tools rewrite; see write_tools.py's docstring). Same
-# structured-marker discipline as every other key in this module.
-_EXECUTED_GATED_WRITES_KEY = "executed_gated_writes"
 
 # PLAN.md Phase 25: the exact literal string EVERY gated tool in this
 # codebase returns on decline (write_tools.py/mac_tools.py/interrupts.py/
@@ -845,24 +834,30 @@ def _prior_specialist_results_this_turn(state: GraphState) -> list[AnyMessage]:
     return forwarded
 
 
-def _prior_executed_gated_writes_this_turn(state: GraphState) -> int:
-    """Gated writes already EXECUTED by earlier specialist delegations in
-    this top-level turn — the sum of `_EXECUTED_GATED_WRITES_KEY` markers
-    on this turn's delegation ToolMessages. Same turn-boundary logic as
+def _write_cap_turn_id(state: GraphState) -> str:
+    """Stable identity of the current top-level turn, threaded into every
+    specialist's `GatedAgentState.write_cap_turn_id` so write_tools.py's
+    MAX_WRITES_PER_TURN can count against write_cap_store's durable
+    (thread_id, turn_id) bucket. Same turn-boundary logic as
     `_pre_approved_actions_this_turn`/`_prior_specialist_results_this_turn`
-    (scoped to messages since the most recent genuine HumanMessage, not
-    the thread's lifetime). Fed into the next specialist call's state so
-    write_tools.py's per-turn cap sees the whole turn, not one call."""
+    (the most recent genuine HumanMessage). Prefers that message's own id;
+    falls back to a content hash plus its position so two identical user
+    texts in different turns still key differently. A collision or a
+    mid-turn compaction shifting the fallback can only merge or split a
+    fatigue-guard bucket — it fails toward asking again, never toward
+    skipping a confirmation."""
     messages = state["messages"]
     turn_start = 0
+    last_human: AnyMessage | None = None
     for i, m in enumerate(messages):
         if is_genuine_human_turn(m):
             turn_start = i
-    total = 0
-    for m in messages[turn_start:]:
-        if isinstance(m, ToolMessage):
-            total += (getattr(m, "additional_kwargs", None) or {}).get(_EXECUTED_GATED_WRITES_KEY, 0)
-    return total
+            last_human = m
+    if last_human is not None and getattr(last_human, "id", None):
+        return str(last_human.id)
+    text = "" if last_human is None else _specialist_text(last_human.content)
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return "turn-%d-%s" % (turn_start, digest)
 
 
 def _extract_gated_action_executions(result_messages: list[AnyMessage]) -> list[dict[str, Any]]:
@@ -1248,7 +1243,7 @@ async def _invoke_agent_graph(
     agent_name: str,
     messages: list[AnyMessage],
     pre_approved_actions: set[str],
-    prior_gated_writes: int = 0,
+    write_cap_turn_id: str = "",
 ) -> SpecialistResult:
     """The in-process specialist path: a fresh, isolated `ainvoke()` per
     call — see this module's docstring for why the specialist graph must
@@ -1295,7 +1290,7 @@ async def _invoke_agent_graph(
         {
             "messages": messages,
             "pre_approved_actions": pre_approved_actions,
-            "prior_gated_writes_this_turn": prior_gated_writes,
+            "write_cap_turn_id": write_cap_turn_id,
         },
         config={"callbacks": [_AgentActivityRelay(agent_name)]},
     )
@@ -1312,7 +1307,7 @@ async def _invoke_agent_graph(
 
 
 async def _invoke_research_agent_via_http(
-    messages: list[AnyMessage], pre_approved_actions: set[str], prior_gated_writes: int = 0
+    messages: list[AnyMessage], pre_approved_actions: set[str], write_cap_turn_id: str = ""
 ) -> SpecialistResult:
     """`pre_approved_actions` accepted for a uniform call signature with
     `_invoke_agent_graph` (see `_make_specialist_tool`) but unused here —
@@ -1501,7 +1496,7 @@ async def _run_delegation(
 def _make_specialist_tool(
     tool_name: str,
     description: str,
-    invoke: Callable[[list[AnyMessage], set[str], int], Awaitable[SpecialistResult]],
+    invoke: Callable[[list[AnyMessage], set[str], str], Awaitable[SpecialistResult]],
 ) -> BaseTool:
     """Build a tool that delegates to one specialist — the "agents as
     tools" replacement for the old `_make_handoff_tool`'s
@@ -1562,9 +1557,9 @@ def _make_specialist_tool(
             HumanMessage(content=request),
         ]
         pre_approved = _pre_approved_actions_this_turn(state)
-        prior_writes = _prior_executed_gated_writes_this_turn(state)
+        cap_turn_id = _write_cap_turn_id(state)
         content, surfaces, phone_actions, executed_actions = await _run_delegation(
-            tool_name, lambda: invoke(seed, pre_approved, prior_writes), tool_call_id
+            tool_name, lambda: invoke(seed, pre_approved, cap_turn_id), tool_call_id
         )
         if executed_actions:
             run_id = _active_workflow_run_id_this_turn(state)
@@ -1590,13 +1585,6 @@ def _make_specialist_tool(
             )
         if phone_actions:
             kwargs[PHONE_ACTION_KEY] = phone_actions
-        executed_write_count = sum(
-            1
-            for a in executed_actions
-            if a["executed"] and a["action"] in _GATED_WRITE_TOOL_NAMES
-        )
-        if executed_write_count:
-            kwargs[_EXECUTED_GATED_WRITES_KEY] = executed_write_count
         return Command(
             update={
                 "messages": [
@@ -1678,7 +1666,7 @@ def _make_backstage_tool() -> BaseTool:
 
 
 async def _invoke_onstage(
-    messages: list[AnyMessage], pre_approved_actions: set[str], prior_gated_writes: int = 0
+    messages: list[AnyMessage], pre_approved_actions: set[str], write_cap_turn_id: str = ""
 ) -> SpecialistResult:
     """The code-backed `onstage` specialist (stage.py). Ungated."""
     return SpecialistResult(await stage.run_onstage(messages), [], [], [])

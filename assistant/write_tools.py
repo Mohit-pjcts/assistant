@@ -35,15 +35,17 @@ bare ID, never a model paraphrase of what it thinks the ID refers to.
 
 Per-turn write cap: MAX_WRITES_PER_TURN mirrors supervisor.py's
 MAX_HANDOFFS_PER_TURN and memory_extraction.py's MAX_PROPOSED_FACTS_PER_CALL —
-enforced structurally by counting this turn's already-completed gated-write
-ToolMessages via InjectedState, not left to the model's own judgment. Checked
+enforced structurally, not left to the model's own judgment. Checked
 BEFORE interrupt() so a capped-out call doesn't waste a confirmation
 round-trip on something that's going to be refused anyway. "This turn" means
-the whole TOP-LEVEL turn: `_writes_so_far_this_turn` adds the writes earlier
-specialist delegations of the same turn already executed (supervisor.py's
-`_EXECUTED_GATED_WRITES_KEY` markers, threaded in as
-`prior_gated_writes_this_turn`), since each delegation's isolated message
-list can only see its own calls.
+the whole TOP-LEVEL turn: `_writes_so_far_this_turn` reads write_cap_store's
+durable (thread_id, turn_id) counter — every wrapper below records itself
+there at execution time (idempotent on tool_call_id, so replays never
+double-count) — because each delegation's isolated message list can only see
+its own calls, and any message-scanning design undercounts when compaction
+fires mid-turn or a delegation errors after executing. Without a durable
+context (bare invocations, tests) it falls back to the legacy scan of this
+state's own messages.
 
 No-parallel-writes guard: sub_agents.py disables parallel_tool_calls on
 life_admin_agent's model (mirrors supervisor.py's NoParallelHandoffs) —
@@ -84,11 +86,12 @@ from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langgraph.config import get_config
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
 
-from assistant import idempotency_store
+from assistant import idempotency_store, write_cap_store
 from assistant.compaction import is_genuine_human_turn
 
 logger = logging.getLogger(__name__)
@@ -104,12 +107,13 @@ class _AgentState(TypedDict):
 
     messages: Annotated[list[AnyMessage], add_messages]
     pre_approved_actions: NotRequired[set[str]]
-    # Gated writes earlier specialist delegations already executed within
-    # this same top-level turn (supervisor.py stamps it — see
-    # sub_agents.GatedAgentState). Lets MAX_WRITES_PER_TURN span every
-    # delegation of one turn again, not just this one call's isolated
-    # history (the agents-as-tools rewrite had silently narrowed it).
-    prior_gated_writes_this_turn: NotRequired[int]
+    # Stable identity of the current TOP-LEVEL turn (supervisor.py's
+    # _write_cap_turn_id threads it in — see sub_agents.GatedAgentState).
+    # Combined with the ambient thread_id it keys write_cap_store's
+    # durable counter, letting MAX_WRITES_PER_TURN span every delegation
+    # of one turn again — including mid-turn compaction and delegation
+    # errors, which message-scanning could not survive.
+    write_cap_turn_id: NotRequired[str]
 
 
 # Structural cap on gated write-tool calls per top-level turn — mirrors
@@ -153,20 +157,48 @@ def _count_writes_this_turn(messages: list[AnyMessage]) -> int:
     )
 
 
+def _cap_store_context(state: _AgentState) -> tuple[str | None, str | None]:
+    """(thread_id, turn_id) for the durable counter, or (None, ...) when
+    either side is unavailable — a bare tool invocation outside the real
+    supervisor path (unit tests, direct calls) has no ambient thread or no
+    threaded turn id, and falls back to the legacy message scan."""
+    try:
+        thread_id = get_config()["configurable"]["thread_id"]
+    except Exception:
+        thread_id = None
+    return thread_id, state.get("write_cap_turn_id")
+
+
 def _writes_so_far_this_turn(state: _AgentState) -> int:
-    """This turn's gated-write count for cap purposes: writes visible in
-    THIS specialist call's own isolated message list PLUS writes earlier
-    delegations of the same top-level turn already executed (carried in
-    via `prior_gated_writes_this_turn`, supervisor.py). Before the offset
-    existed, a compound turn delegating to life_admin_agent twice could
-    exceed MAX_WRITES_PER_TURN in aggregate, each call under the cap on
-    its own fresh history — supervisor.py's module docstring carried that
-    as a disclosed limitation; this restores the documented per-TURN
-    scope. Each write remains individually confirmation-gated either way
-    — the cap is a runaway-loop / confirmation-fatigue guard, not the
-    security boundary."""
-    prior = state.get("prior_gated_writes_this_turn") or 0
-    return _count_writes_this_turn(state["messages"]) + prior
+    """This TOP-LEVEL turn's gated-write count for cap purposes. Primary
+    source: write_cap_store's durable (thread, turn) counter — counted at
+    execution time, so it survives mid-turn compaction and a delegation
+    that errors after executing (the two undercount edges of any
+    message-scanning design; supervisor.py's module docstring has the
+    history). Fallback: the legacy scan of whatever messages this state
+    carries, used only when no durable context exists. The cap is a
+    runaway-loop / confirmation-fatigue guard; the per-action interrupt()
+    remains the authorization boundary."""
+    thread_id, turn_id = _cap_store_context(state)
+    if thread_id and turn_id:
+        try:
+            return write_cap_store.count_writes(thread_id, turn_id)
+        except Exception:
+            pass  # a broken counter must not break a real turn — fall through
+    return _count_writes_this_turn(state["messages"])
+
+
+def _record_executed_write(state: _AgentState, tool_call_id: str, tool_name: str) -> None:
+    """Count one just-executed gated write against this top-level turn.
+    Best-effort (see write_cap_store.py's failure-direction note) and a
+    no-op outside the durable (thread, turn) context."""
+    thread_id, turn_id = _cap_store_context(state)
+    if not (thread_id and turn_id):
+        return
+    try:
+        write_cap_store.record_write(thread_id, turn_id, tool_call_id, tool_name)
+    except Exception:
+        pass
 
 
 def _find_tool(tools: list[BaseTool], name: str) -> BaseTool | None:
@@ -342,6 +374,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             result = await send_email_raw.ainvoke(
                 {"to": to, "subject": subject, "body": body, "cc": cc or [], "bcc": bcc or []}
             )
+            _record_executed_write(state, tool_call_id, "send_email")
             return _extract_text(result)
 
         built.append(send_email)
@@ -357,6 +390,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             remove_label_ids: list[str] | None = None,
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Add/remove labels on an email — including archiving, which is
             removing the 'INBOX' label. Requires the user's explicit
@@ -397,6 +431,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                     "removeLabelIds": remove_label_ids or [],
                 }
             )
+            _record_executed_write(state, tool_call_id, "modify_gmail_labels")
             return _extract_text(result)
 
         built.append(modify_gmail_labels)
@@ -417,6 +452,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             attendees: list[dict] | None = None,
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Create a calendar event. Requires the user's explicit
             confirmation showing the exact event details. If attendees are
@@ -468,6 +504,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
                     "attendees": attendees or [],
                 }
             )
+            _record_executed_write(state, tool_call_id, "create_calendar_event")
             return _extract_text(result)
 
         built.append(create_calendar_event)
@@ -489,6 +526,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             attendees: list[dict] | None = None,
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Update a calendar event. Requires the user's explicit
             confirmation showing BOTH the event's real current content (read
@@ -560,6 +598,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             if attendees is not None:
                 args["attendees"] = attendees
             result = await update_event_raw.ainvoke(args)
+            _record_executed_write(state, tool_call_id, "update_calendar_event")
             return _extract_text(result)
 
         built.append(update_calendar_event)
@@ -574,6 +613,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             calendar_id: str = "primary",
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Delete a calendar event. Requires the user's explicit
             confirmation showing the event's real current content (read back
@@ -609,6 +649,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await delete_event_raw.ainvoke({"calendarId": calendar_id, "eventId": event_id})
+            _record_executed_write(state, tool_call_id, "delete_calendar_event")
             return _extract_text(result)
 
         built.append(delete_calendar_event)
@@ -625,6 +666,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             forward_to: str | None = None,
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Create a Gmail filter — a STANDING rule that keeps acting on
             every future matching email, not a one-time action. Requires the
@@ -669,6 +711,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             if forward_to:
                 action["forward"] = forward_to
             result = await create_filter_raw.ainvoke({"criteria": criteria, "action": action})
+            _record_executed_write(state, tool_call_id, "create_gmail_filter")
             return _extract_text(result)
 
         built.append(create_gmail_filter)
@@ -682,6 +725,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             filter_id: str,
             *,
             state: Annotated[_AgentState, InjectedState],
+            tool_call_id: Annotated[str, InjectedToolCallId],
         ) -> str:
             """Delete a Gmail filter. Requires the user's explicit
             confirmation showing the real filter content (read back first —
@@ -713,6 +757,7 @@ def build_write_tools(mcp_tools: list[BaseTool]) -> list[BaseTool]:
             if not approved:
                 return "Cancelled — user did not confirm."
             result = await delete_filter_raw.ainvoke({"filterId": filter_id})
+            _record_executed_write(state, tool_call_id, "delete_gmail_filter")
             return _extract_text(result)
 
         built.append(delete_gmail_filter)
