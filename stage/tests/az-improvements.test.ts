@@ -104,10 +104,42 @@ test("chooseMany: several questions in ONE systemOne call, one Choice per questi
   ]);
   expect(seen.length).toBe(1); // one round trip
   expect(Object.keys(seen[0].body.questions)).toEqual(["q0", "q1"]);
-  expect(choices.map((c: Choice) => c.choice)).toEqual(["PDFs", "leave_in_place"]);
-  expect(choices.map((c: Choice) => c.confidence)).toEqual([0.9, 0.3]); // per-question confidence kept
+  expect(choices.map((c) => c?.choice)).toEqual(["PDFs", "leave_in_place"]);
+  expect(choices.map((c) => c?.confidence)).toEqual([0.9, 0.3]); // per-question confidence kept
   expect(choices[0]!.costUsd).toBeGreaterThan(0);
   expect(choices[1]!.costUsd).toBe(0); // the one call's cost is reported once
+  expect(choices[0]!.ms).toBe(choices[1]!.ms); // its time is spread over the answered choices, not zeroed after the first
+});
+
+test("chooseMany: a question the model skipped comes back undefined (the caller re-asks it); the rest still land", async () => {
+  const fakeFetch = (async (_input: any, init?: any) => {
+    void JSON.parse(init?.body ?? "{}");
+    // q1 answered; q0 skipped outright; q2 answered with a folder that is not an option; q3 answered with no confidence
+    const answers = {
+      q1: { choice: "PDFs", confidence: 0.9, probabilities: {} },
+      q2: { choice: "NotARealFolder", confidence: 0.9, probabilities: {} },
+      q3: { choice: "Images", probabilities: {} },
+    };
+    return new Response(JSON.stringify({ answers, usage: { input_tokens: 500 }, model: "jev-test" }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const brain = new JevBrain("jev-test", { apiKey: "test", fetch: fakeFetch });
+  const options = { PDFs: 'the "PDFs" folder', Images: 'the "Images" folder', leave_in_place: "Leave it" };
+  const choices = await brain.chooseMany({ goal: "sort" }, [0, 1, 2, 3].map((i) => ({ question: `Which folder for "f${i}"?`, options })));
+  expect(choices.map((c) => c?.choice)).toEqual([undefined, "PDFs", undefined, undefined]); // no throw, no guessed folder
+  expect(choices[1]!.costUsd).toBeGreaterThan(0); // the one call's cost lands on the first answered choice
+});
+
+test("chooseMany: a wholly unusable response throws, so the caller falls back to one question at a time", async () => {
+  const fakeFetch = (async () =>
+    new Response(JSON.stringify({ answers: {}, usage: { input_tokens: 10 }, model: "jev-test" }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  const brain = new JevBrain("jev-test", { apiKey: "test", fetch: fakeFetch });
+  const options = { PDFs: 'the "PDFs" folder', leave_in_place: "Leave it" };
+  await expect(
+    brain.chooseMany({ goal: "sort" }, [
+      { question: 'Which folder for "a"?', options },
+      { question: 'Which folder for "b"?', options },
+    ]),
+  ).rejects.toThrow("no usable answers");
 });
 
 test("fast-lane visibility: run_start logs the lane's state and reason; totals carry the lane counts", async () => {
@@ -202,4 +234,147 @@ test("sort_into: every file's folder is decided in ONE batched chooseMany call, 
   expect(existsSync(join(root, "Images", "b.png"))).toBe(true);
   expect(existsSync(join(root, "c.txt"))).toBe(true); // below the gate: left in place
   expect(done.answer).toContain("2 file(s) moved");
+});
+
+// --- Independent-review repair tests: guarded replay, batched-sort failure paths -------------------------------
+
+const sortFixture = async () => {
+  const { mkdtempSync: mkdtemp, writeFileSync } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  const root = mkdtemp(join(homedir(), "sort-test-")); // inside home, not hidden: safeRoot accepts it
+  writeFileSync(join(root, "a.pdf"), "x");
+  writeFileSync(join(root, "b.png"), "x");
+  const name = root.split("/").pop()!;
+  const parts = root.split("/").filter(Boolean);
+  const els = [
+    { index: 0, depth: 0, role: "AXList", label: "path", actions: [] },
+    ...["Macintosh HD", ...parts].map((v, k) => ({ index: k + 1, parent: 0, depth: 1, role: "AXStaticText", label: v, value: v, actions: [] })),
+  ];
+  const finder = {
+    win: { pid: 1, windowId: 1, app: "Finder", title: name },
+    async observe(agent: any, w: any) { return { agent, window: w, elements: els, truncated: false, ms: 1 }; },
+    async ensureSession() {}, async endSession() {}, async listWindows() { return { windows: [] }; }, async listApps() { return []; },
+    async launchApp() { return { pid: 1 }; },
+    async click() { return { ok: true, channel: "ax", ms: 1, cli: "sim" } as ActionResult; },
+    async typeText() { return { ok: true, channel: "ax", ms: 1, cli: "sim" } as ActionResult; },
+    async pressKey() { return { ok: true, channel: "ax", ms: 1, cli: "sim" } as ActionResult; },
+    async scroll() { return { ok: true, channel: "ax", ms: 1, cli: "sim" } as ActionResult; },
+    async confirm() { return { ok: true, channel: "ax", ms: 1, cli: "sim" } as ActionResult; },
+    async setValue() { return { ok: true, channel: "ax", ms: 1, cli: "sim" } as ActionResult; },
+  } as any;
+  const helper = {
+    async plan() { return { steps: [{ action: "sort_into", text: "PDFs, Images" }] as PlanStep[], costUsd: 0, ms: 1 }; },
+    async writeText() { return { text: "", costUsd: 0, ms: 1 }; },
+    async verify() { return { achieved: true, answer: "sorted", reason: "checked", costUsd: 0, ms: 1 }; },
+  } as Helper;
+  const task: Task = {
+    id: "t1", agent: "Mint-3", app: "Finder", goal: "organise these files by type", brain: "jev", status: "queued", steps: 0, seconds: 0,
+    cost: { decisionsUsd: 0, helperUsd: 0 }, counts: { decisions: 0, actions: 0, helperCalls: 0, gated: 0, foreground: 0, scripted: 0 }, decideMs: [], llmCalls: [],
+  };
+  return { root, finder, helper, task };
+};
+
+const runSort = (f: { root: string; finder: any; helper: Helper; task: Task }, brain: Brain) =>
+  runTask({
+    runId: "test", driver: f.finder, brain, helper: f.helper, signal: new AbortController().signal, win: f.finder.win, sleep: async () => {},
+    log: new RunLogger("t-" + Math.random().toString(36).slice(2), mkdtempSync(join(tmpdir(), "runs-"))),
+  }, f.task);
+
+test("sort_into: a batched call that fails falls back to deciding one file at a time", async () => {
+  const { existsSync } = await import("node:fs");
+  const f = await sortFixture();
+  class ThrowMany implements Brain {
+    readonly kind = "jev" as const; readonly model = "throw-many";
+    sequential = 0;
+    async classify(): Promise<Decision> { throw new Error("not reached"); }
+    async chooseMany(): Promise<(Choice | undefined)[]> { throw new Error("simulated batch failure"); }
+    async choose(): Promise<Choice> {
+      this.sequential++;
+      return { choice: "leave_in_place", confidence: 0.9, costUsd: 0.00001, ms: 1 };
+    }
+  }
+  const brain = new ThrowMany();
+  const done = await runSort(f, brain);
+  expect(brain.sequential).toBe(2); // both files decided one at a time
+  expect(done.status).toBe("done"); // the sort survives the failed batch
+  expect(done.answer).toContain("0 file(s) moved"); // both left in place by choice, not lost to the failure
+  expect(existsSync(join(f.root, "a.pdf"))).toBe(true);
+  expect(existsSync(join(f.root, "b.png"))).toBe(true);
+});
+
+test("sort_into: a file the batch skipped is decided on its own; the rest keep their batched answers", async () => {
+  const { existsSync } = await import("node:fs");
+  const f = await sortFixture();
+  class PartialMany implements Brain {
+    readonly kind = "jev" as const; readonly model = "partial";
+    sequential: string[] = [];
+    async classify(): Promise<Decision> { throw new Error("not reached"); }
+    async chooseMany(_s: object, calls: { question: string; options: Record<string, string> }[]): Promise<(Choice | undefined)[]> {
+      return calls.map((_c, i) => (i === 1 ? undefined : { choice: "PDFs", confidence: 0.9, costUsd: i === 0 ? 0.00001 : 0, ms: 1 }));
+    }
+    async choose(q: string): Promise<Choice> {
+      this.sequential.push(q);
+      return { choice: "Images", confidence: 0.9, costUsd: 0.00001, ms: 1 };
+    }
+  }
+  const brain = new PartialMany();
+  const done = await runSort(f, brain);
+  expect(brain.sequential.length).toBe(1); // only the skipped file fell back
+  expect(brain.sequential[0]).toContain("b.png");
+  expect(done.status).toBe("done");
+  expect(done.answer).toContain("2 file(s) moved");
+  expect(existsSync(join(f.root, "PDFs", "a.pdf"))).toBe(true);
+  expect(existsSync(join(f.root, "Images", "b.png"))).toBe(true);
+});
+
+test("compiled replay: a background-refused press gets one counted foreground retry (guardedClick)", async () => {
+  class RefuseOnce extends SimCalc {
+    retried = false;
+    override async click(agent: any, w: any, token: string, foreground?: boolean): Promise<ActionResult> {
+      const b = (this as any).tokens.get(token);
+      if (b === "Multiply" && !foreground && !this.retried) {
+        return { ok: false, channel: "ax", ms: 1, cli: "sim", error: { code: "background_unavailable", detail: "simulated background refusal" } };
+      }
+      if (b === "Multiply" && foreground) this.retried = true;
+      return super.click(agent, w, token);
+    }
+  }
+  const d = new RefuseOnce();
+  const helper = new CompiledHelper("42", clicks("All Clear", "6", "Multiply", "7", "Equals"));
+  const ctx = ctxOf(d, new Explosive(), helper);
+  const task = await runTask(ctx, newTask("compute 6 times 7"));
+  expect(d.retried).toBe(true); // the foreground retry ran, as a classified click's would
+  expect(task.counts.foreground).toBe(1); // and it is counted like every foreground action
+  expect(task.status).toBe("done");
+  expect(d.calls).toEqual(["All Clear", "6", "Multiply", "7", "Equals"]);
+});
+
+test("compiled replay: a long run of planned clicks is pressed in bounded batches, with a fresh read between", async () => {
+  const d = new SimCalc();
+  const helper = new CompiledHelper("0", clicks("All Clear", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "All Clear"));
+  const ctx = ctxOf(d, new Explosive(), helper);
+  const task = await runTask(ctx, newTask("press the digit row, then clear"));
+  const replay = ctx.log.lines.filter((l) => l.type === "step" && l.decision.model === "compiled_replay");
+  expect(replay.length).toBe(2); // 12 planned clicks, at most 8 per observation: two bounded batches
+  expect(task.status).toBe("done");
+  expect(d.calls).toEqual(["All Clear", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "All Clear"]);
+});
+
+test("compiled replay: a stop mid-batch still logs the presses that landed", async () => {
+  const controller = new AbortController();
+  class AbortOnSecond extends SimCalc {
+    override async click(agent: any, w: any, token: string): Promise<ActionResult> {
+      const r = await super.click(agent, w, token);
+      if (this.calls.length === 2) controller.abort();
+      return r;
+    }
+  }
+  const d = new AbortOnSecond();
+  const helper = new CompiledHelper("42", clicks("All Clear", "6", "Multiply", "7", "Equals"));
+  const ctx = { ...ctxOf(d, new Explosive(), helper), signal: controller.signal };
+  const task = await runTask(ctx, newTask("compute 6 times 7"));
+  expect(task.exception?.code).toBe("stopped"); // finish() records a stop as a failed task with the stopped code
+  const replay = ctx.log.lines.filter((l) => l.type === "step" && l.decision.model === "compiled_replay");
+  expect(replay.length).toBe(1); // the landed presses are on record even though the run stopped
+  expect((replay[0] as any).acted).toContain("All Clear");
 });

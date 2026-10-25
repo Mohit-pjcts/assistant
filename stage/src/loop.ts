@@ -157,6 +157,9 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
   let savedDoc: { path: string; checked: boolean; openedIn?: string } | undefined; // a document saved by code (save_as)
   let safetyReplans = 0;
   let replayOff = false; // a compiled replay press that failed: the rest of the task is decided step by step
+  // a replay never presses more than this without a fresh observation: a longer run of planned clicks replays
+  // over several iterations, so drift between presses is bounded by a new read of the window
+  const REPLAY_MAX_PRESSES = 8;
   const searchedFor = new Set<string>(); // things the agent already searched for (once each)
   const reached = new Set<string>(); // things the goal asks to reach that the agent already clicked (once each)
   const norm = (s: string | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
@@ -776,17 +779,24 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         const moved: string[] = [];
         const options: Record<string, string> = Object.fromEntries(cats.map((c) => [c, `the "${c}" folder`]));
         options.leave_in_place = "Leave it where it is: none of the folders fits, or it is unclear";
-        // one batched call for every file when the brain supports it (jev does): N round trips become one
-        let batched: Choice[] | undefined;
+        // one batched call for every file when the brain supports it (jev does): N round trips become one.
+        // A batched call that fails outright (or answers only some files) never strands the sort: every file
+        // without a batched answer falls back to the per-file choose in the loop below.
+        let batched: (Choice | undefined)[] | undefined;
         if (brain.chooseMany && brain.choose && files.length > 1 && !signal.aborted) {
           update(`sorting ${files.length} files`);
-          batched = await brain.chooseMany(
-            { goal: task.goal, files: files.map((f) => f.text), folders: cats },
-            files.map((f) => ({
-              question: `Which folder should the file "${f.text}" be moved into, to achieve the goal: ${task.goal}`,
-              options,
-            })),
-          );
+          try {
+            batched = await brain.chooseMany(
+              { goal: task.goal, files: files.map((f) => f.text), folders: cats },
+              files.map((f) => ({
+                question: `Which folder should the file "${f.text}" be moved into, to achieve the goal: ${task.goal}`,
+                options,
+              })),
+            );
+          } catch (e: any) {
+            lines.push(`batched sort failed (${String(e?.message ?? e).slice(0, 120)}): deciding one file at a time`);
+            batched = undefined;
+          }
         }
         for (const [fi, f] of files.entries()) {
           if (signal.aborted) break;
@@ -938,8 +948,10 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     }
 
     // A compiled plan's run of clicks needs no classify call per step: the compiler already verified every target's
-    // label against THIS window, each press goes through the same in-code guard as a classified click, and the first
-    // surprise (a control that isn't there, a press that fails) stops the replay and returns to deciding step by step.
+    // label against THIS window, every press goes through guardedClick (the one click choke point: the abort check,
+    // the Send / irreversible rules re-checked right before the press, one counted foreground retry when a background
+    // press is refused), and the first surprise (a control that isn't there, a press that fails) stops the replay and
+    // returns to deciding step by step.
     // Stale-window risk, grounded in the cua-driver contract: element_token is an AX action path scoped to
     // (pid, window_id), carries its snapshot generation (trycua/cua PR #2608), and Cua REFUSES a stale or
     // unresolvable token (cua.ai/docs/cua-driver click reference; a live refusal is recorded in STEPS.md 14214,
@@ -950,7 +962,7 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
     // the task's verify pass is the backstop before anything is reported done.
     if (!replayOff && planActive() && helper.lastSource === "compiled" && plan![planPos]?.action === "click") {
       const batch: Item[] = [];
-      for (let i = planPos; i < plan!.length && plan![i]!.action === "click"; i++) {
+      for (let i = planPos; i < plan!.length && plan![i]!.action === "click" && batch.length < REPLAY_MAX_PRESSES; i++) {
         const target = plan![i]!.target ?? "";
         const hits = p.items.filter((it) => it.text === target && it.token && !TEXT_INPUT.has(it.role));
         if (hits.length !== 1) { batch.length = 0; break; } // missing or ambiguous: the normal loop handles it
@@ -963,11 +975,11 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
         const results: ActionResult[] = [];
         const pressed: string[] = [];
         for (const it of batch) {
-          if (signal.aborted) return finish("stopped", "stopped by the user");
+          if (signal.aborted) break; // stop now; the presses that already landed are still logged below
           // Let the UI settle between presses: the normal loop gets this for free from observe
           // latency; replayed presses run back to back and can outrun a menu or sheet animating in.
           if (pressed.length > 0) await sleep(250);
-          const r = await driver.click(agent, win, it.token!);
+          const r = await guardedClick(it.token!, it.text, it.role, obs.elements);
           results.push(r);
           task.counts.actions++;
           if (!r.ok) {
@@ -977,9 +989,12 @@ export async function runTask(ctx: TaskCtx, task: Task): Promise<Task> {
           pressed.push(it.text);
         }
         planPos += pressed.length;
-        const acted = `compiled replay: pressed ${pressed.join(" → ")}${pressed.length < batch.length ? ` (${batch.length - pressed.length} planned press(es) did not land: back to deciding step by step)` : ""}`;
-        log.write({ type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: codeDecision("compiled_replay"), acted, results, ms: { observe: obs.ms, decide: 0, act: Math.round(performance.now() - t1) } });
-        prev.push(acted);
+        if (results.length) {
+          const acted = `compiled replay: pressed ${pressed.join(" → ") || "none"}${pressed.length < batch.length ? ` (${batch.length - pressed.length} planned press(es) did not land: back to deciding step by step)` : ""}`;
+          log.write({ type: "step", runId: ctx.runId, t: nowIso(), taskId: task.id, agent, step, items: p.items, decision: codeDecision("compiled_replay"), acted, results, ms: { observe: obs.ms, decide: 0, act: Math.round(performance.now() - t1) } });
+          prev.push(acted);
+        }
+        if (signal.aborted) return finish("stopped", "stopped by the user");
         continue;
       }
     }

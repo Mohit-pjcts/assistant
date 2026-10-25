@@ -130,8 +130,10 @@ export interface Brain {
   classify(facts: Facts, items: Item[]): Promise<Decision>;
   /** one typed question (e.g. "which folder does this file belong in?"): the cheap classifier's home ground */
   choose?(question: string, options: Record<string, string>, state: object): Promise<Choice>;
-  /** several typed questions of the same shape in ONE call (jev batching): one Choice per call, same order */
-  chooseMany?(state: object, calls: { question: string; options: Record<string, string> }[]): Promise<Choice[]>;
+  /** several typed questions of the same shape in ONE call (jev batching): one slot per call, same order;
+   *  a question the model skipped or answered unusably comes back undefined, and the caller re-asks that one
+   *  on its own (the batched call must never take the whole batch down with one bad answer) */
+  chooseMany?(state: object, calls: { question: string; options: Record<string, string> }[]): Promise<(Choice | undefined)[]>;
 }
 
 /** free-text and verification helpers (an LLM, called only when needed) */

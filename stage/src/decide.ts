@@ -108,7 +108,7 @@ export class JevBrain implements Brain {
   }
 
   /** several same-shape questions in ONE systemOne call: the per-question round trips become one */
-  async chooseMany(state: object, calls: { question: string; options: Record<string, string> }[]): Promise<Choice[]> {
+  async chooseMany(state: object, calls: { question: string; options: Record<string, string> }[]): Promise<(Choice | undefined)[]> {
     if (!calls.length) return [];
     if (calls.length === 1) return [await this.choose(calls[0]!.question, calls[0]!.options, state)];
     const t0 = performance.now();
@@ -116,11 +116,22 @@ export class JevBrain implements Brain {
     const res = await this.client.systemOne({ state, questions } as any).withResponse();
     const tokens = res.data.usage?.input_tokens ?? 0;
     const ms = Math.round(performance.now() - t0);
-    return calls.map((_, i) => {
-      const a = (res.data.answers as any)[`q${i}`];
-      // the one call's cost and time are reported on the first choice, so a run's totals stay honest
-      return { choice: String(a.choice), confidence: a.confidence, probs: a.probabilities, costUsd: i === 0 ? tokens * JEV_PRICE_PER_TOKEN : 0, ms: i === 0 ? ms : 0 };
+    const choices = calls.map((c, i): Choice | undefined => {
+      const a = (res.data.answers as any)?.[`q${i}`];
+      // an answer that is missing, names no option, or carries no calibrated confidence is not a Choice:
+      // undefined hands that one question back to the per-file path instead of sorting on a guess (or
+      // crashing the whole batch on a property of undefined, which the first version did)
+      if (typeof a?.choice !== "string" || !(a.choice in c.options) || !Number.isFinite(a?.confidence)) return undefined;
+      return { choice: a.choice, confidence: a.confidence, probs: a.probabilities, costUsd: 0, ms: 0 };
     });
+    const answered = choices.filter((c): c is Choice => !!c);
+    if (!answered.length) throw new Error(`batched choose: no usable answers for ${calls.length} questions`);
+    // the one call's cost lands on the first answered choice, so a run's spend totals stay honest; its time is
+    // spread over the answered choices, so medianDecideMs compares per-file decide latency either way (the first
+    // version reported 0 ms for every file after the first and dragged the median toward zero)
+    answered[0]!.costUsd = tokens * JEV_PRICE_PER_TOKEN;
+    for (const c of answered) c.ms = Math.round(ms / answered.length);
+    return choices;
   }
 
   readonly kind = "jev" as const;
